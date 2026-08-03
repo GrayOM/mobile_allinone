@@ -1,0 +1,114 @@
+rules:
+  - id: msw.android.webview.javascript-interface
+    message: WebView JavaScript bridge exposure needs an origin and method-level review.
+    severity: WARNING
+    languages: [java]
+    patterns:
+      - pattern: $WEBVIEW.addJavascriptInterface($OBJECT, $NAME)
+    metadata:
+      category: webview
+      confidence_score: 0.86
+      masvs: MASVS-PLATFORM
+      mastg: MASTG-TEST-0031
+      cwe: CWE-749
+
+  - id: msw.android.webview.file-origin-access
+    message: WebView permits file-origin access to other origins.
+    severity: ERROR
+    languages: [java]
+    pattern-either:
+      - pattern: $SETTINGS.setAllowFileAccessFromFileURLs(true)
+      - pattern: $SETTINGS.setAllowUniversalAccessFromFileURLs(true)
+    metadata:
+      category: webview
+      confidence_score: 0.92
+      masvs: MASVS-PLATFORM
+      mastg: MASTG-TEST-0252
+      cwe: CWE-749
+
+  - id: msw.android.network.permissive-hostname-verifier
+    message: HostnameVerifier accepts every hostname.
+    severity: ERROR
+    languages: [java]
+    patterns:
+      - pattern-inside: |
+          new HostnameVerifier() {
+            ...
+          }
+      - pattern: |
+          public boolean verify(String $HOST, SSLSession $SESSION) {
+            ...
+            return true;
+          }
+    metadata:
+      category: certificate_pinning
+      confidence_score: 0.95
+      masvs: MASVS-NETWORK
+      mastg: MASTG-TEST-0021
+      cwe: CWE-297
+
+  - id: msw.android.network.empty-trust-manager
+    message: X509TrustManager client certificate validation is empty.
+    severity: ERROR
+    languages: [java]
+    pattern-either:
+      - pattern: |
+          public void checkServerTrusted(X509Certificate[] $CHAIN, String $TYPE) {
+          }
+      - pattern: |
+          public void checkServerTrusted(java.security.cert.X509Certificate[] $CHAIN, String $TYPE) {
+          }
+    metadata:
+      category: certificate_pinning
+      confidence_score: 0.96
+      masvs: MASVS-NETWORK
+      mastg: MASTG-TEST-0021
+      cwe: CWE-295
+
+  - id: msw.android.crypto.ecb-mode
+    message: ECB block-cipher mode does not provide semantic security.
+    severity: WARNING
+    languages: [java]
+    patterns:
+      - pattern: Cipher.getInstance($TRANSFORMATION)
+      - metavariable-regex:
+          metavariable: $TRANSFORMATION
+          regex: '(?i)^".*/ECB(/.*)?".*$'
+    metadata:
+      category: weak_cryptography
+      confidence_score: 0.9
+      masvs: MASVS-CRYPTO
+      mastg: MASTG-TEST-0013
+      cwe: CWE-327
+
+  - id: msw.android.storage.world-readable-preferences
+    message: SharedPreferences uses a legacy world-readable or world-writable mode.
+    severity: ERROR
+    languages: [java]
+    pattern-either:
+      - pattern: $CONTEXT.getSharedPreferences($NAME, Context.MODE_WORLD_READABLE)
+      - pattern: $CONTEXT.getSharedPreferences($NAME, Context.MODE_WORLD_WRITEABLE)
+    metadata:
+      category: insecure_storage
+      confidence_score: 0.94
+      masvs: MASVS-STORAGE
+      mastg: MASTG-TEST-0001
+      cwe: CWE-922
+
+  - id: msw.android.logging.authorization-value
+    message: Authorization or token-like value is written to Android logs.
+    severity: WARNING
+    languages: [java]
+    patterns:
+      - pattern-either:
+          - pattern: Log.$LEVEL(..., $VALUE, ...)
+          - pattern: android.util.Log.$LEVEL(..., $VALUE, ...)
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: '(?i).*(token|authorization|bearer|session|password).*'
+    metadata:
+      category: sensitive_logging
+      confidence_score: 0.68
+      masvs: MASVS-STORAGE
+      mastg: MASTG-TEST-0003
+      cwe: CWE-532

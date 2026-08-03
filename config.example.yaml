@@ -1,0 +1,32 @@
+host: 127.0.0.1
+port: 8765
+default_mock_mode: true
+auto_open_browser: true
+max_upload_mb: 512
+command_timeout_seconds: 30
+mask_external_ai_data: true
+# MobSF API 키는 config.yaml이 아니라 .env의 MOBSF_API_KEY에 둡니다.
+# mobsf_url: http://127.0.0.1:8000
+semgrep_rules_path: rules/semgrep
+tools:
+  adb: adb
+  apktool: apktool
+  jadx: jadx
+  aapt: aapt
+  apkanalyzer: apkanalyzer
+  frida: frida
+  frida_ps: frida-ps
+  mitmdump: mitmdump
+  node: node
+  ssh: ssh
+  scp: scp
+  apkid: apkid
+  semgrep: semgrep
+  objection: objection
+  drozer: drozer
+  pymobiledevice3: pymobiledevice3
+  idevice_id: idevice_id
+  ideviceinfo: ideviceinfo
+  ideviceinstaller: ideviceinstaller
+  idevicesyslog: idevicesyslog
+  idevicescreenshot: idevicescreenshot
