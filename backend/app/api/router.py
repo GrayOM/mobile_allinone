@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import shutil
 import uuid
 import zipfile
@@ -25,7 +24,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -42,6 +41,12 @@ from backend.app.catalog import CATALOG_SOURCE, MASTG_CONTROLS
 from backend.app.core.config import ROOT_DIR, AppSettings, get_settings
 from backend.app.core.events import event_bus
 from backend.app.core.status import CapabilityStatus, Platform, RunMode, RunStatus
+from backend.app.core.targets import (
+    is_valid_app_identifier,
+    normalize_platform,
+    platform_for_adapter,
+    require_app_identifier,
+)
 from backend.app.database.models import (
     AIInvocation,
     AppArtifact,
@@ -61,8 +66,14 @@ from backend.app.database.session import get_db
 from backend.app.demo import create_demo_apk
 from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDeviceAdapter
 from backend.app.evidence.report import EvidenceReportRenderer
+from backend.app.evidence.service import EvidenceService
 from backend.app.frida import FridaManager
 from backend.app.orchestration import DiagnosticOrchestrator
+from backend.app.orchestration.approvals import (
+    ApprovalError,
+    consume_approval,
+    issue_approval,
+)
 from backend.app.orchestration.resources import allocate_available_port
 from backend.app.ai.storage import save_ai_raw_response
 from backend.app.proxy import (
@@ -90,7 +101,6 @@ from backend.app.schemas import (
 
 
 router = APIRouter(prefix="/api")
-PACKAGE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$")
 
 
 def _orchestrator(request: Request) -> DiagnosticOrchestrator:
@@ -120,6 +130,51 @@ def _app_or_404(db: Session, app_id: str) -> AppArtifact:
     if not app:
         raise HTTPException(404, "앱 파일을 찾을 수 없습니다.")
     return app
+
+
+def _scoped_run(
+    db: Session,
+    *,
+    project_id: str,
+    run_id: str,
+    require_paused: bool = True,
+) -> tuple[Project, DiagnosticRun, AppArtifact | None]:
+    project = _project_or_404(db, project_id)
+    run = _run_or_404(db, run_id)
+    if run.project_id != project.id:
+        raise HTTPException(422, "진단 실행이 선택한 프로젝트에 속하지 않습니다.")
+    if require_paused and run.status != RunStatus.PAUSED.value:
+        raise HTTPException(409, "직접 단말 작업은 진단을 일시정지한 상태에서만 실행할 수 있습니다.")
+    app = db.get(AppArtifact, run.app_id) if run.app_id else None
+    return project, run, app
+
+
+def _target_for_app(app: AppArtifact | None, *, live: bool) -> str:
+    if not app:
+        if live:
+            raise HTTPException(422, "Live 진단에는 app_id가 필요합니다.")
+        raise HTTPException(422, "직접 작업에는 대상 앱이 연결된 진단이 필요합니다.")
+    try:
+        return require_app_identifier(app.platform, app.package_name)
+    except ValueError as exc:
+        status_code = 409 if live else 422
+        raise HTTPException(status_code, f"대상 앱 식별자 확인이 필요합니다: {exc}") from exc
+
+
+def _validate_app_device_platform(
+    app: AppArtifact, *, device_adapter: str, device_id: str
+) -> str:
+    try:
+        app_platform = normalize_platform(app.platform)
+        device_platform = platform_for_adapter(device_adapter, device_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if app_platform != device_platform:
+        raise HTTPException(
+            422,
+            f"{app_platform} 앱은 {device_platform} 단말 Adapter에서 실행할 수 없습니다.",
+        )
+    return app_platform
 
 
 @router.get("/health")
@@ -163,6 +218,9 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
     values = payload.model_dump(mode="json")
     values["run_mode"] = payload.run_mode.value
     values["mock_mode"] = payload.run_mode == RunMode.MOCK
+    if payload.external_analyzer_allowed:
+        values["external_analyzer_approved_by"] = "local_user"
+        values["external_analyzer_approved_at"] = datetime.now(timezone.utc)
     project = Project(**values)
     db.add(project)
     db.commit()
@@ -186,6 +244,13 @@ def update_project(
         raise HTTPException(409, "앱 또는 진단 이력이 있는 프로젝트의 실행 모드는 변경할 수 없습니다.")
     for key, value in changes.items():
         setattr(project, key, value)
+    if "external_analyzer_allowed" in changes:
+        if changes["external_analyzer_allowed"]:
+            project.external_analyzer_approved_by = "local_user"
+            project.external_analyzer_approved_at = datetime.now(timezone.utc)
+        else:
+            project.external_analyzer_approved_by = None
+            project.external_analyzer_approved_at = None
     if requested_mode:
         project.mock_mode = requested_mode == RunMode.MOCK.value
     db.commit()
@@ -278,7 +343,11 @@ async def _store_and_analyze(
     settings: AppSettings,
     db: Session,
 ) -> AppArtifact:
-    analyzer = StaticAnalyzer(settings)
+    analyzer = StaticAnalyzer(
+        settings,
+        external_analyzers_allowed=project.external_analyzer_allowed,
+        external_analyzer_approved_by=project.external_analyzer_approved_by,
+    )
     analysis_dir = settings.data_dir / "analysis" / source_path.stem
     try:
         result = await analyzer.analyze(source_path, analysis_dir)
@@ -321,7 +390,11 @@ async def reanalyze_app(
     if not source_path.is_file():
         raise HTTPException(404, "등록된 앱 원본 파일을 찾을 수 없습니다.")
     settings = _settings(request)
-    analyzer = StaticAnalyzer(settings)
+    analyzer = StaticAnalyzer(
+        settings,
+        external_analyzers_allowed=project.external_analyzer_allowed,
+        external_analyzer_approved_by=project.external_analyzer_approved_by,
+    )
     try:
         result = await analyzer.analyze(
             source_path, settings.analysis_dir / source_path.stem
@@ -506,6 +579,7 @@ async def bootstrap_demo(request: Request, db: Session = Depends(get_db)):
 @router.get("/devices")
 async def list_devices(request: Request):
     settings = _settings(request)
+    configured_errors: list[dict[str, str]] = []
     adapters = [
         MockDeviceAdapter(),
         MockDeviceAdapter(platform=Platform.MOCK_IOS),
@@ -514,36 +588,44 @@ async def list_devices(request: Request):
     ]
     ios_host = os.getenv("MSW_IOS_SSH_HOST")
     if ios_host:
-        adapters.append(
-            IOSDeviceAdapter(
-                settings,
-                host=ios_host,
-                port=int(os.getenv("MSW_IOS_SSH_PORT", "22")),
-                username=os.getenv("MSW_IOS_SSH_USER", "root"),
-                include_usb=False,
+        try:
+            adapters.append(
+                IOSDeviceAdapter(
+                    settings,
+                    host=ios_host,
+                    port=int(os.getenv("MSW_IOS_SSH_PORT", "22")),
+                    username=os.getenv("MSW_IOS_SSH_USER", "root"),
+                    include_usb=False,
+                )
             )
-        )
+        except (TypeError, ValueError) as exc:
+            configured_errors.append({"adapter": "ios_windows:env", "error": str(exc)})
     from backend.app.database.session import SessionLocal
 
     with SessionLocal() as profile_db:
         profiles = profile_db.scalars(
             select(IOSDeviceProfile).order_by(IOSDeviceProfile.created_at)
         ).all()
-        adapters.extend(
-            IOSDeviceAdapter(
-                settings,
-                host=profile.host,
-                port=profile.ssh_port,
-                username=profile.username,
-                include_usb=False,
-            )
-            for profile in profiles
-        )
+        for profile in profiles:
+            try:
+                adapters.append(
+                    IOSDeviceAdapter(
+                        settings,
+                        host=profile.host,
+                        port=profile.ssh_port,
+                        username=profile.username,
+                        include_usb=False,
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                configured_errors.append(
+                    {"adapter": f"ios_windows:{profile.id}", "error": str(exc)}
+                )
     discovered = await asyncio.gather(
         *(adapter.discover() for adapter in adapters), return_exceptions=True
     )
     devices = []
-    adapter_errors = []
+    adapter_errors = list(configured_errors)
     for adapter, result in zip(adapters, discovered):
         if isinstance(result, Exception):
             adapter_errors.append({"adapter": adapter.name, "error": str(result)})
@@ -588,6 +670,9 @@ class DeviceAction(BaseModel):
     adapter: str = "mock"
     device_id: str
     action: str
+    project_id: str | None = None
+    run_id: str | None = None
+    approval_token: str | None = None
     package_name: str | None = None
     app_id: str | None = None
     remote_path: str | None = None
@@ -595,11 +680,63 @@ class DeviceAction(BaseModel):
     remote_port: int | None = Field(default=None, ge=1, le=65535)
 
 
+class ApprovalIssueRequest(BaseModel):
+    project_id: str
+    run_id: str
+    resource_type: str = Field(pattern="^(device|runtime|frida)$")
+    action: str = Field(min_length=1, max_length=100)
+    approved_by: str = Field(default="local_user", min_length=1, max_length=100)
+
+
+@router.post("/approvals", status_code=201)
+def create_operation_approval(
+    payload: ApprovalIssueRequest, db: Session = Depends(get_db)
+):
+    _, run, app = _scoped_run(
+        db, project_id=payload.project_id, run_id=payload.run_id
+    )
+    target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
+    approval, token = issue_approval(
+        db,
+        project_id=payload.project_id,
+        run_id=payload.run_id,
+        resource_type=payload.resource_type,
+        action=payload.action,
+        device_id=run.device_id,
+        target=target,
+        approved_by=payload.approved_by,
+    )
+    return {
+        "id": approval.id,
+        "token": token,
+        "expires_at": approval.expires_at,
+        "scope": {
+            "project_id": approval.project_id,
+            "run_id": approval.run_id,
+            "resource_type": approval.resource_type,
+            "action": approval.action,
+            "device_id": approval.device_id,
+            "target": approval.target,
+        },
+    }
+
+
 @router.post("/devices/action")
 async def device_action(
     request: Request, payload: DeviceAction, db: Session = Depends(get_db)
 ):
     settings = _settings(request)
+    read_only_unscoped = {"list_packages", "frida_status"}
+    controlled_actions = {
+        "install",
+        "uninstall",
+        "start",
+        "stop",
+        "screenshot",
+        "logs",
+        "pull_file",
+        "forward_port",
+    }
     if payload.adapter == "android_adb":
         adapter = AndroidDeviceAdapter(settings)
     elif payload.adapter == "ios_windows":
@@ -622,57 +759,113 @@ async def device_action(
     else:
         if payload.adapter != "mock":
             raise HTTPException(422, "지원하지 않는 단말 Adapter입니다.")
-        adapter = MockDeviceAdapter()
-    if payload.package_name and not PACKAGE_PATTERN.fullmatch(payload.package_name):
-        raise HTTPException(422, "패키지명 형식이 올바르지 않습니다.")
+        adapter = MockDeviceAdapter(
+            platform=(Platform.MOCK_IOS if "ios" in payload.device_id.lower() else Platform.MOCK_ANDROID)
+        )
+
+    scoped = payload.action not in read_only_unscoped
+    run = None
+    app = None
+    target = payload.package_name
+    approval = None
+    lease_acquired = False
+    if scoped:
+        if not payload.project_id or not payload.run_id:
+            raise HTTPException(422, "이 단말 작업에는 project_id와 run_id가 필요합니다.")
+        _, run, app = _scoped_run(
+            db, project_id=payload.project_id, run_id=payload.run_id
+        )
+        if payload.device_id != run.device_id or payload.adapter != run.device_adapter:
+            raise HTTPException(422, "요청 단말이 진단 실행에 임대된 단말과 일치하지 않습니다.")
+        if app:
+            _validate_app_device_platform(
+                app, device_adapter=run.device_adapter, device_id=run.device_id
+            )
+        target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
+        if payload.package_name and payload.package_name != target:
+            raise HTTPException(422, "직접 입력한 대상값이 진단 앱 식별자와 일치하지 않습니다.")
+        if payload.action in controlled_actions:
+            try:
+                approval = consume_approval(
+                    db,
+                    payload.approval_token,
+                    project_id=payload.project_id,
+                    run_id=payload.run_id,
+                    resource_type="device",
+                    action=payload.action,
+                    device_id=run.device_id,
+                    target=target,
+                )
+            except ApprovalError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        lease_acquired = await _orchestrator(request).leases.acquire(
+            run.id, run.device_id, None
+        )
+
     actions = {
         "list_packages": lambda: adapter.list_packages(payload.device_id),
-        "start": lambda: adapter.start_app(
-            payload.device_id, payload.package_name or "com.example.demo"
-        ),
-        "stop": lambda: adapter.stop_app(
-            payload.device_id, payload.package_name or "com.example.demo"
-        ),
-        "uninstall": lambda: adapter.uninstall_app(
-            payload.device_id, payload.package_name or "com.example.demo"
-        ),
-        "process": lambda: adapter.process_info(
-            payload.device_id, payload.package_name or "com.example.demo"
-        ),
+        "start": lambda: adapter.start_app(payload.device_id, str(target)),
+        "stop": lambda: adapter.stop_app(payload.device_id, str(target)),
+        "uninstall": lambda: adapter.uninstall_app(payload.device_id, str(target)),
+        "process": lambda: adapter.process_info(payload.device_id, str(target)),
         "frida_status": lambda: adapter.frida_status(payload.device_id),
         "forward_port": lambda: adapter.forward_port(
             payload.device_id, payload.local_port or 27042, payload.remote_port or 27042
         ),
     }
-    if payload.action == "install":
-        if not payload.app_id:
-            raise HTTPException(422, "install에는 app_id가 필요합니다.")
-        app = _app_or_404(db, payload.app_id)
-        operation = await adapter.install_app(payload.device_id, Path(app.stored_path))
-    elif payload.action in {"screenshot", "logs", "pull_file"}:
-        action_dir = settings.evidence_dir / "manual-actions"
-        action_dir.mkdir(parents=True, exist_ok=True)
-        if payload.action == "screenshot":
-            operation = await adapter.screenshot(
-                payload.device_id, action_dir / f"{uuid.uuid4()}.png"
-            )
-        elif payload.action == "logs":
-            operation = await adapter.collect_logs(
-                payload.device_id, action_dir / f"{uuid.uuid4()}.log"
-            )
+    try:
+        if payload.action == "install":
+            if not app or not payload.app_id or payload.app_id != app.id:
+                raise HTTPException(422, "install의 app_id는 진단 실행의 대상 앱이어야 합니다.")
+            operation = await adapter.install_app(payload.device_id, Path(app.stored_path))
+        elif payload.action in {"screenshot", "logs", "pull_file"}:
+            if not run:
+                raise HTTPException(422, "증적 수집 작업에는 진단 실행 범위가 필요합니다.")
+            action_dir = EvidenceService(settings).run_dir(run.id) / "manual-actions"
+            action_dir.mkdir(parents=True, exist_ok=True)
+            if payload.action == "screenshot":
+                operation = await adapter.screenshot(
+                    payload.device_id, action_dir / f"{uuid.uuid4()}.png"
+                )
+            elif payload.action == "logs":
+                operation = await adapter.collect_logs(
+                    payload.device_id, action_dir / f"{uuid.uuid4()}.log"
+                )
+            else:
+                if not payload.remote_path:
+                    raise HTTPException(422, "pull_file에는 remote_path가 필요합니다.")
+                operation = await adapter.pull_file(
+                    payload.device_id,
+                    payload.remote_path,
+                    action_dir / f"{uuid.uuid4()}-{Path(payload.remote_path).name}",
+                )
+        elif payload.action in actions:
+            operation = await actions[payload.action]()
         else:
-            if not payload.remote_path:
-                raise HTTPException(422, "pull_file에는 remote_path가 필요합니다.")
-            operation = await adapter.pull_file(
-                payload.device_id,
-                payload.remote_path,
-                action_dir / f"{uuid.uuid4()}-{Path(payload.remote_path).name}",
+            raise HTTPException(422, "지원하지 않는 단말 작업입니다.")
+
+        result = operation.to_dict()
+        if run:
+            evidence = EvidenceService(settings).add(
+                db,
+                run_id=run.id,
+                evidence_type="manual_device_action",
+                title=f"직접 단말 작업 · {payload.action}",
+                description=operation.message,
+                command=operation.command,
+                file_path=operation.file_path,
+                inline_data={
+                    "operation": result,
+                    "approval_id": approval.id if approval else None,
+                    "approved_by": approval.approved_by if approval else None,
+                    "approved_at": approval.approved_at.isoformat() if approval else None,
+                },
             )
-    elif payload.action in actions:
-        operation = await actions[payload.action]()
-    else:
-        raise HTTPException(422, "지원하지 않는 단말 작업입니다.")
-    return operation.to_dict()
+            result["evidence_id"] = evidence.id
+        return result
+    finally:
+        if run and lease_acquired:
+            await _orchestrator(request).leases.release(run.id)
 
 
 @router.get("/projects/{project_id}/runs", response_model=list[RunOut])
@@ -707,14 +900,50 @@ async def create_run(
         raise HTTPException(422, "Mock 프로젝트는 Mock 단말과 Mock 프록시만 사용할 수 있습니다.")
     if payload.device_adapter == "mock" and not payload.device_id.startswith("mock-"):
         raise HTTPException(422, "Mock Adapter에는 Mock 단말 ID가 필요합니다.")
+    app = None
+    if run_mode == RunMode.LIVE and not payload.app_id:
+        raise HTTPException(422, "Live 진단에는 app_id가 필요합니다.")
     if payload.app_id:
         app = _app_or_404(db, payload.app_id)
         if app.project_id != project.id:
             raise HTTPException(422, "앱이 선택한 프로젝트에 속하지 않습니다.")
+        app_platform = _validate_app_device_platform(
+            app,
+            device_adapter=payload.device_adapter,
+            device_id=payload.device_id,
+        )
+        if run_mode == RunMode.LIVE:
+            _target_for_app(app, live=True)
+    else:
+        try:
+            app_platform = platform_for_adapter(payload.device_adapter, payload.device_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    selected_script_ids = list(dict.fromkeys(payload.frida_script_ids))
+    if selected_script_ids:
+        selected_scripts = db.scalars(
+            select(FridaScript).where(FridaScript.id.in_(selected_script_ids))
+        ).all()
+        if len(selected_scripts) != len(selected_script_ids):
+            raise HTTPException(422, "선택한 Frida 스크립트 중 존재하지 않는 ID가 있습니다.")
+        incompatible = []
+        for script in selected_scripts:
+            try:
+                compatible = normalize_platform(script.platform) == app_platform
+            except ValueError:
+                compatible = False
+            if not compatible:
+                incompatible.append(script.name)
+        if incompatible:
+            raise HTTPException(
+                422,
+                f"앱 플랫폼과 맞지 않는 Frida 스크립트입니다: {', '.join(incompatible)}",
+            )
     options = dict(payload.options)
     options.update(
         {
-            "frida_script_ids": payload.frida_script_ids,
+            "frida_script_ids": selected_script_ids,
             "pause_for_login": payload.pause_for_login,
         }
     )
@@ -1019,11 +1248,10 @@ async def approve_frida_script(
 
 
 class FridaExecuteRequest(BaseModel):
-    device_id: str = "mock-android-01"
-    target: str = "com.example.demo"
-    mode: str = "spawn"
-    mock: bool = False
     project_id: str | None = None
+    run_id: str | None = None
+    mode: str = Field(default="spawn", pattern="^(spawn|attach)$")
+    approval_token: str | None = None
 
 
 @router.post("/frida/scripts/{script_id}/execute")
@@ -1048,26 +1276,71 @@ async def execute_frida_script(
         raise HTTPException(409, "승인 후 스크립트 내용이 변경되어 재승인이 필요합니다.")
     if script.syntax_status != CapabilityStatus.AVAILABLE.value:
         raise HTTPException(409, "Node.js 구문 검사를 통과한 스크립트만 실행할 수 있습니다.")
-    if payload.mock:
-        if not payload.project_id:
-            raise HTTPException(422, "Mock 실행에는 Mock 프로젝트 ID가 필요합니다.")
-        project = _project_or_404(db, payload.project_id)
-        if project.run_mode != RunMode.MOCK.value:
-            raise HTTPException(422, "Live 프로젝트에서는 Mock Frida를 실행할 수 없습니다.")
-    result = await FridaManager(_settings(request)).execute(
-        device_id=payload.device_id,
-        target=payload.target,
-        script_name=script.name,
-        script_content=script.content,
-        mode=payload.mode,
-        mock=payload.mock,
+    if not payload.project_id or not payload.run_id:
+        raise HTTPException(422, "Frida 직접 실행에는 project_id와 run_id가 필요합니다.")
+    project, run, app = _scoped_run(
+        db, project_id=payload.project_id, run_id=payload.run_id
     )
-    if not payload.mock and result.status == CapabilityStatus.AVAILABLE:
-        script.success_count += 1
-    elif not payload.mock:
-        script.failure_count += 1
-    db.commit()
-    return result.to_dict()
+    if not app:
+        raise HTTPException(422, "Frida 실행에는 대상 앱이 연결된 진단이 필요합니다.")
+    app_platform = _validate_app_device_platform(
+        app, device_adapter=run.device_adapter, device_id=run.device_id
+    )
+    if normalize_platform(script.platform) != app_platform:
+        raise HTTPException(422, "Frida 스크립트 플랫폼이 대상 앱과 일치하지 않습니다.")
+    target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
+    action_scope = f"execute:{script.id}"
+    try:
+        approval = consume_approval(
+            db,
+            payload.approval_token,
+            project_id=project.id,
+            run_id=run.id,
+            resource_type="frida",
+            action=action_scope,
+            device_id=run.device_id,
+            target=target,
+        )
+    except ApprovalError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    lease_acquired = await _orchestrator(request).leases.acquire(
+        run.id, run.device_id, None
+    )
+    try:
+        result = await FridaManager(_settings(request)).execute(
+            device_id=run.device_id,
+            target=target,
+            script_name=script.name,
+            script_content=script.content,
+            mode=payload.mode,
+            mock=run.run_mode == RunMode.MOCK.value,
+        )
+        if run.run_mode == RunMode.LIVE.value and result.status == CapabilityStatus.AVAILABLE:
+            script.success_count += 1
+        elif run.run_mode == RunMode.LIVE.value:
+            script.failure_count += 1
+        result_data = result.to_dict()
+        evidence = EvidenceService(_settings(request)).add(
+            db,
+            run_id=run.id,
+            evidence_type="frida_script",
+            title=f"직접 Frida 실행 · {script.name}",
+            description=result.message,
+            command=result.command,
+            inline_data={
+                "script_id": script.id,
+                "result": result_data,
+                "approval_id": approval.id,
+                "approved_by": approval.approved_by,
+                "approved_at": approval.approved_at.isoformat(),
+            },
+        )
+        db.commit()
+        result_data["evidence_id"] = evidence.id
+        return result_data
+    finally:
+        if lease_acquired:
+            await _orchestrator(request).leases.release(run.id)
 
 
 class FridaGenerateRequest(BaseModel):
@@ -1158,7 +1431,7 @@ async def generate_frida_script(
         ).check_syntax(candidate.content)
         script = FridaScript(
             name=candidate.name,
-            platform=candidate.platform,
+            platform=payload.platform,
             category=candidate.category,
             target_framework=candidate.target_framework,
             conditions=candidate.conditions,
@@ -1223,17 +1496,18 @@ async def runtime_adapters(request: Request):
 
 class RuntimeExecuteRequest(BaseModel):
     adapter: str
-    device_id: str
-    target: str
+    project_id: str
+    run_id: str
     action: str
     arguments: dict[str, Any] = Field(default_factory=dict)
-    approved: bool = False
+    approval_token: str | None = None
 
 
 @router.post("/runtime/execute")
 async def execute_runtime_tool(
     request: Request,
     payload: RuntimeExecuteRequest,
+    db: Session = Depends(get_db),
 ):
     settings = _settings(request)
     adapters = {
@@ -1243,14 +1517,68 @@ async def execute_runtime_tool(
     adapter = adapters.get(payload.adapter)
     if not adapter:
         raise HTTPException(422, "지원하지 않는 런타임 Adapter입니다.")
-    result = await adapter.execute(
-        device_id=payload.device_id,
-        target=payload.target,
-        action=payload.action,
-        arguments=payload.arguments,
-        approved=payload.approved,
+    _, run, app = _scoped_run(
+        db, project_id=payload.project_id, run_id=payload.run_id
     )
-    return result.to_dict()
+    if not app:
+        raise HTTPException(422, "런타임 작업에는 대상 앱이 연결된 진단이 필요합니다.")
+    app_platform = _validate_app_device_platform(
+        app, device_adapter=run.device_adapter, device_id=run.device_id
+    )
+    if payload.adapter == "drozer" and app_platform != "android":
+        raise HTTPException(422, "drozer는 Android 앱과 단말에서만 실행할 수 있습니다.")
+    target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
+    action_details = adapter.actions.get(payload.action)
+    if not action_details:
+        raise HTTPException(422, "지원하지 않는 런타임 작업입니다.")
+    risk = action_details[0]
+    approval = None
+    action_scope = f"{payload.adapter}:{payload.action}"
+    if risk in {"medium", "high"}:
+        try:
+            approval = consume_approval(
+                db,
+                payload.approval_token,
+                project_id=payload.project_id,
+                run_id=payload.run_id,
+                resource_type="runtime",
+                action=action_scope,
+                device_id=run.device_id,
+                target=target,
+            )
+        except ApprovalError as exc:
+            raise HTTPException(409, str(exc)) from exc
+    lease_acquired = await _orchestrator(request).leases.acquire(
+        run.id, run.device_id, None
+    )
+    try:
+        result = await adapter.execute(
+            device_id=run.device_id,
+            target=target,
+            action=payload.action,
+            arguments=payload.arguments,
+            approved=approval is not None,
+        )
+        result_data = result.to_dict()
+        evidence = EvidenceService(settings).add(
+            db,
+            run_id=run.id,
+            evidence_type="runtime_tool",
+            title=f"직접 런타임 작업 · {payload.adapter}:{payload.action}",
+            description=result.message,
+            command=result.command,
+            inline_data={
+                "operation": result_data,
+                "approval_id": approval.id if approval else None,
+                "approved_by": approval.approved_by if approval else None,
+                "approved_at": approval.approved_at.isoformat() if approval else None,
+            },
+        )
+        result_data["evidence_id"] = evidence.id
+        return result_data
+    finally:
+        if lease_acquired:
+            await _orchestrator(request).leases.release(run.id)
 
 
 @router.get("/coverage")
@@ -1293,21 +1621,34 @@ def coverage(
 
 
 class AITestRequest(BaseModel):
-    task: str = "연결 테스트"
-    context: dict[str, Any] = Field(default_factory=lambda: {"platform": "android"})
+    model_config = ConfigDict(extra="forbid")
+
     use_mock: bool = False
     simulate_nvidia_failure: bool = False
 
 
 @router.post("/ai/test")
 async def test_ai(request: Request, payload: AITestRequest):
-    context = dict(payload.context)
-    context["simulate_nvidia_failure"] = payload.simulate_nvidia_failure
+    task = "고정 합성 데이터 기반 AI Provider 연결 테스트"
+    context = {
+        "platform": "android",
+        "static_signals": {"sample": [{"value": "synthetic-test-only"}]},
+        "runtime_log": "Synthetic provider connectivity test; no project data.",
+        "proxy_flows": [
+            {
+                "method": "GET",
+                "url": "https://provider-test.invalid/health",
+                "status_code": 200,
+            }
+        ],
+        "evidence_ids": ["synthetic-evidence-id"],
+        "simulate_nvidia_failure": payload.simulate_nvidia_failure,
+    }
     if payload.use_mock:
-        result = await MockAIProvider().analyze(payload.task, context)
+        result = await MockAIProvider().analyze(task, context)
         return {"selected": result.to_dict(), "attempts": [result.to_dict()]}
     result, attempts = await AIProviderChain(settings=_settings(request)).analyze(
-        payload.task,
+        task,
         context,
         masked=_settings(request).mask_external_ai_data,
     )
@@ -1364,6 +1705,10 @@ def read_settings(request: Request):
             "port": settings.port,
             "data_dir": str(settings.data_dir),
             "max_upload_mb": settings.max_upload_mb,
+            "lan_access": settings.lan_access,
+            "authentication_required": settings.lan_access,
+            "api_docs_enabled": settings.enable_api_docs,
+            "trusted_hosts": settings.effective_trusted_hosts,
         },
         "ai": {
             "nvidia_configured": bool(settings.nvidia_api_key),
@@ -1385,6 +1730,8 @@ def read_settings(request: Request):
                 settings.mobsf_url and settings.mobsf_api_key
             ),
             "mobsf_url": settings.mobsf_url,
+            "mobsf_allowed_networks": settings.mobsf_allowed_networks,
+            "mobsf_allowed_hosts": settings.mobsf_allowed_hosts,
             "semgrep_rules_path": str(settings.semgrep_rules_path),
             "catalog": CATALOG_SOURCE,
             "archive_limits": {

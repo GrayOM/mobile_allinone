@@ -115,8 +115,16 @@ class StaticAnalysisResult:
 
 
 class StaticAnalyzer:
-    def __init__(self, settings: AppSettings | None = None):
+    def __init__(
+        self,
+        settings: AppSettings | None = None,
+        *,
+        external_analyzers_allowed: bool = False,
+        external_analyzer_approved_by: str | None = None,
+    ):
         self.settings = settings or get_settings()
+        self.external_analyzers_allowed = external_analyzers_allowed
+        self.external_analyzer_approved_by = external_analyzer_approved_by
 
     @staticmethod
     def detect_platform(path: Path) -> str:
@@ -282,7 +290,11 @@ class StaticAnalyzer:
         adapters = (
             APKiDAnalyzerAdapter(self.settings),
             SemgrepAnalyzerAdapter(self.settings),
-            MobSFAnalyzerAdapter(self.settings),
+            MobSFAnalyzerAdapter(
+                self.settings,
+                transmission_allowed=self.external_analyzers_allowed,
+                approved_by=self.external_analyzer_approved_by,
+            ),
         )
         executions = await asyncio.gather(
             *(
@@ -304,7 +316,11 @@ class StaticAnalyzer:
         output_dir: Path | None,
         result: StaticAnalysisResult,
     ) -> None:
-        execution = await MobSFAnalyzerAdapter(self.settings).analyze(
+        execution = await MobSFAnalyzerAdapter(
+            self.settings,
+            transmission_allowed=self.external_analyzers_allowed,
+            approved_by=self.external_analyzer_approved_by,
+        ).analyze(
             path,
             (output_dir or self.settings.analysis_dir / result.sha256[:12]) / "tools",
             platform=result.platform,

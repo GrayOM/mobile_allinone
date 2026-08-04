@@ -18,6 +18,5 @@ from backend.app.main import create_app  # noqa: E402
 
 @pytest.fixture()
 def client():
-    with TestClient(create_app()) as test_client:
+    with TestClient(create_app(), base_url="http://127.0.0.1") as test_client:
         yield test_client
-

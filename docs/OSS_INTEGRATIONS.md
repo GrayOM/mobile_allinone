@@ -48,10 +48,13 @@ run clones it and links evidence IDs as checks execute.
 ## Runtime approval boundary
 
 Read-only objection and drozer actions may run from the diagnostic setup.
-Actions that change app behavior, dump sensitive stores or invoke exposed
-components return `manual_required` until the API request includes explicit
-approval. AI-generated Frida code is always stored as `pending_approval`; it is
-never executed in the generation request or automatic repair step.
+Direct device, runtime and Frida operations are scoped to a paused diagnostic
+run and its device lease. Actions that change app behavior, dump sensitive
+stores or invoke exposed components require a server-issued, five-minute,
+single-use approval token. Only its SHA-256 is stored, together with approver,
+scope, issue time and consume time. AI-generated Frida code is always stored as
+`pending_approval`; it is never executed in the generation request or automatic
+repair step.
 
 Every runtime command is bound to the selected device. pymobiledevice3 receives
 the selected UDID, iOS Frida uses `-D <device-id>`, and drozer gets a per-run ADB
@@ -67,17 +70,30 @@ results and AI invocations carry a persistent marker.
 mitmproxy binds to a user-selected Windows LAN IP, uses a dynamically allocated
 port and requires an allowed client IP. The addon rejects other source addresses.
 The orchestrator stops the complete proxy process tree on completion, stop,
-failure and server shutdown, then drains the final JSONL capture.
+failure and server shutdown, then drains the final JSONL capture. Listener bind
+failures trigger a new leased port and retry up to three times inside a shared
+startup critical section.
 
 APK/IPA input is rejected before external tools run when archive entry, expanded
 size, compression-ratio, nested archive, duplicate-name, traversal, encryption or
-symlink limits are exceeded. Optional analyzer subprocesses run in their own
-process group with wall-time, process-tree memory and CPU-time limits.
+symlink limits are exceeded. Optional analyzer subprocesses and Androguard run
+outside the FastAPI process with wall-time, process-tree memory and CPU-time
+limits.
+
+MobSF upload is disabled per project unless `external_analyzer_allowed` was
+explicitly approved. Its URL must also match the configured loopback or
+corporate destination allowlist; transmission destination and approval metadata
+are retained in the analyzer tool run.
+
+The HTTP API is loopback-only by default. LAN mode requires a specific bind
+address, an ephemeral Bearer token, a separate administrator token for state
+changes, and Trusted Host validation. OpenAPI, Swagger UI and ReDoc are disabled
+unless explicitly enabled.
 
 ## Windows installation
 
-The base installer includes Androguard because it is the default in-process APK
-parser. Other tools are opt-in:
+The base installer includes Androguard because it is the default isolated APK
+parser worker. Other tools are opt-in:
 
 ```powershell
 .\install_oss_tools.ps1 -Frida -Mitmproxy -Semgrep

@@ -14,7 +14,7 @@ class ResourceLeaseManager:
         self._devices: dict[str, str] = {}
         self._ports: dict[int, str] = {}
 
-    async def acquire(self, run_id: str, device_id: str, port: int | None) -> None:
+    async def acquire(self, run_id: str, device_id: str, port: int | None) -> bool:
         async with self._lock:
             device_owner = self._devices.get(device_id)
             if device_owner and device_owner != run_id:
@@ -27,9 +27,26 @@ class ResourceLeaseManager:
                     raise ResourceLeaseError(
                         f"프록시 포트 {port}은 진단 {port_owner}에서 사용 중입니다."
                     )
+            newly_acquired = device_owner != run_id
             self._devices[device_id] = run_id
             if port is not None:
+                newly_acquired = newly_acquired or self._ports.get(port) != run_id
                 self._ports[port] = run_id
+            return newly_acquired
+
+    async def replace_port(self, run_id: str, port: int) -> None:
+        async with self._lock:
+            owner = self._ports.get(port)
+            if owner and owner != run_id:
+                raise ResourceLeaseError(
+                    f"프록시 포트 {port}은 진단 {owner}에서 사용 중입니다."
+                )
+            self._ports = {
+                key: value
+                for key, value in self._ports.items()
+                if value != run_id
+            }
+            self._ports[port] = run_id
 
     async def release(self, run_id: str) -> None:
         async with self._lock:

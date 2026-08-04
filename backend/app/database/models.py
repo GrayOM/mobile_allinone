@@ -22,6 +22,13 @@ class Project(Base, TimestampMixin):
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     ai_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     external_ai_allowed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    external_analyzer_allowed: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    external_analyzer_approved_by: Mapped[str | None] = mapped_column(String(100))
+    external_analyzer_approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     # mock_mode is kept for API/database compatibility. run_mode is authoritative.
     mock_mode: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     run_mode: Mapped[str] = mapped_column(String(16), default="live", nullable=False)
@@ -33,6 +40,9 @@ class Project(Base, TimestampMixin):
         back_populates="project", cascade="all, delete-orphan"
     )
     findings: Mapped[list["Finding"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    approvals: Mapped[list["OperationApproval"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
 
@@ -212,6 +222,30 @@ class AIInvocation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
+
+
+class OperationApproval(Base):
+    __tablename__ = "operation_approvals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("diagnostic_runs.id"), index=True)
+    resource_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    target: Mapped[str | None] = mapped_column(String(255))
+    token_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    approved_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20), default="issued", nullable=False)
+
+    project: Mapped["Project"] = relationship(back_populates="approvals")
 
 
 class IOSDeviceProfile(Base, TimestampMixin):

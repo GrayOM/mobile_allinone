@@ -11,6 +11,9 @@ export interface Project {
   description: string;
   ai_enabled: boolean;
   external_ai_allowed: boolean;
+  external_analyzer_allowed: boolean;
+  external_analyzer_approved_by: string | null;
+  external_analyzer_approved_at: string | null;
   mock_mode: boolean;
   run_mode: "mock" | "live";
   created_at: string;

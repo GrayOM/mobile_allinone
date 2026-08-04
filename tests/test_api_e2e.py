@@ -94,12 +94,45 @@ def test_custom_frida_script_requires_approval(client):
 
     approved = client.post(f"/api/frida/scripts/{script['id']}/approve")
     assert approved.status_code == 200
+    started = client.post(
+        "/api/runs",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "device_id": "mock-android-01",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+            "pause_for_login": True,
+        },
+    ).json()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        paused = client.get(f"/api/runs/{started['id']}").json()
+        if paused["status"] == "paused":
+            break
+        time.sleep(0.05)
+    assert paused["status"] == "paused"
+    approval = client.post(
+        "/api/approvals",
+        json={
+            "project_id": demo["project"]["id"],
+            "run_id": started["id"],
+            "resource_type": "frida",
+            "action": f"execute:{script['id']}",
+        },
+    ).json()
     executed = client.post(
         f"/api/frida/scripts/{script['id']}/execute",
-        json={"mock": True, "project_id": demo["project"]["id"]},
+        json={
+            "project_id": demo["project"]["id"],
+            "run_id": started["id"],
+            "approval_token": approval["token"],
+        },
     )
     assert executed.status_code == 200
     assert executed.json()["status"] == "available"
+    assert executed.json()["evidence_id"]
+    assert client.post(f"/api/runs/{started['id']}/stop").status_code == 200
     refreshed = next(
         item
         for item in client.get("/api/frida/scripts").json()

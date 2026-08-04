@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import asyncio
+import importlib.metadata
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
 import httpx
 
 from backend.app.core.command import run_command
+from backend.app.core.network import validate_mobsf_destination
 from backend.app.core.status import CapabilityStatus
 
 from .base import AnalyzerAdapter, AnalyzerFinding, AnalyzerResult
@@ -75,18 +77,45 @@ class AndroguardAnalyzerAdapter(AnalyzerAdapter):
             result.error = "Androguard는 Android APK 분석에만 사용합니다."
             return result.finish()
         try:
-            import androguard
-            from androguard.core.apk import APK
-            from loguru import logger
-
-            logger.disable("androguard")
-        except ImportError:
+            version = importlib.metadata.version("androguard")
+        except importlib.metadata.PackageNotFoundError:
             result.error = "Androguard가 설치되지 않았습니다."
             return result.finish()
 
-        result.version = getattr(androguard, "__version__", "unknown")
+        result.version = version
+        output_dir.mkdir(parents=True, exist_ok=True)
+        worker_output = output_dir / "androguard-worker.json"
+        worker_output.unlink(missing_ok=True)
+        command = [
+            sys.executable,
+            "-m",
+            "backend.app.analyzers.androguard_worker",
+            str(artifact_path),
+            str(worker_output),
+        ]
+        result.command = command
         try:
-            payload = await asyncio.to_thread(self._inspect, APK, artifact_path)
+            executed = await run_command(
+                command,
+                timeout=max(60, self.settings.external_tool_cpu_seconds + 30),
+                memory_limit_mb=self.settings.external_tool_memory_mb,
+                cpu_limit_seconds=self.settings.external_tool_cpu_seconds,
+            )
+            if not executed.ok:
+                result.status = executed.status
+                result.error = (
+                    executed.error
+                    or executed.stderr.strip()[:2000]
+                    or "Androguard Worker 실행 실패"
+                )
+                return result.finish()
+            if not worker_output.is_file() or worker_output.stat().st_size > 64 * 1024 * 1024:
+                result.status = CapabilityStatus.FAILED
+                result.error = "Androguard Worker 결과 파일이 없거나 IPC 크기 제한을 초과했습니다."
+                return result.finish()
+            payload = json.loads(worker_output.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("Androguard Worker 결과가 JSON 객체가 아닙니다.")
             result.status = CapabilityStatus.AVAILABLE
             result.enrichment = payload.pop("_enrichment", {})
             result.metadata = {
@@ -97,9 +126,11 @@ class AndroguardAnalyzerAdapter(AnalyzerAdapter):
                 ),
             }
             result.save_raw(output_dir, payload)
-        except Exception as exc:
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
             result.status = CapabilityStatus.FAILED
             result.error = f"{type(exc).__name__}: {exc}"
+        finally:
+            worker_output.unlink(missing_ok=True)
         return result.finish()
 
     @staticmethod
@@ -347,6 +378,17 @@ class SemgrepAnalyzerAdapter(AnalyzerAdapter):
 class MobSFAnalyzerAdapter(AnalyzerAdapter):
     name = "mobsf"
 
+    def __init__(
+        self,
+        settings,
+        *,
+        transmission_allowed: bool = False,
+        approved_by: str | None = None,
+    ):
+        super().__init__(settings)
+        self.transmission_allowed = transmission_allowed
+        self.approved_by = approved_by
+
     async def health(self) -> dict[str, Any]:
         if not self.settings.mobsf_url or not self.settings.mobsf_api_key:
             return {
@@ -354,6 +396,15 @@ class MobSFAnalyzerAdapter(AnalyzerAdapter):
                 "status": CapabilityStatus.NOT_CONFIGURED.value,
                 "url": self.settings.mobsf_url,
                 "install_hint": "MOBSF_URL과 MOBSF_API_KEY를 .env에 설정",
+                "integration": "rest",
+            }
+        allowed, policy_message = validate_mobsf_destination(self.settings)
+        if not allowed:
+            return {
+                "name": self.name,
+                "status": CapabilityStatus.FAILED.value,
+                "url": self.settings.mobsf_url,
+                "error": policy_message,
                 "integration": "rest",
             }
         try:
@@ -394,6 +445,25 @@ class MobSFAnalyzerAdapter(AnalyzerAdapter):
         if not self.settings.mobsf_url or not self.settings.mobsf_api_key:
             result.error = "MobSF URL/API 키가 설정되지 않았습니다."
             return result.finish()
+        destination_allowed, destination_message = validate_mobsf_destination(
+            self.settings
+        )
+        if not destination_allowed:
+            result.status = CapabilityStatus.FAILED
+            result.error = destination_message
+            result.metadata = {
+                "destination": self.settings.mobsf_url,
+                "transmission_allowed": False,
+            }
+            return result.finish()
+        if not self.transmission_allowed:
+            result.status = CapabilityStatus.MANUAL_REQUIRED
+            result.error = "프로젝트에서 외부 분석기 전송을 승인하지 않아 MobSF 업로드를 건너뛰었습니다."
+            result.metadata = {
+                "destination": self.settings.mobsf_url,
+                "transmission_allowed": False,
+            }
+            return result.finish()
         base = self.settings.mobsf_url.rstrip("/")
         headers = {"Authorization": self.settings.mobsf_api_key}
         try:
@@ -428,6 +498,9 @@ class MobSFAnalyzerAdapter(AnalyzerAdapter):
             result.metadata = {
                 "hash": upload_data.get("hash"),
                 "scan_type": upload_data.get("scan_type"),
+                "destination": base,
+                "transmission_allowed": True,
+                "approved_by": self.approved_by,
             }
             result.save_raw(output_dir, payload)
             result.findings.extend(self._normalize(payload, platform))

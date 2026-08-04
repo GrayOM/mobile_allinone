@@ -24,15 +24,11 @@ export default function DiagnosticSetupPage() {
     void Promise.all([
       api<Project[]>("/projects"),
       api<{ devices: Device[] }>("/devices"),
-      api<FridaScript[]>("/frida/scripts?platform=android"),
-    ]).then(([projectItems, deviceResult, scriptItems]) => {
+    ]).then(([projectItems, deviceResult]) => {
       setProjects(projectItems);
       setDevices(deviceResult.devices);
-      setScripts(scriptItems);
       if (!projectId && projectItems[0]) setProjectId(projectItems[0].id);
       if (!deviceId && deviceResult.devices[0]) setDeviceId(deviceResult.devices[0].id);
-      const approved = scriptItems.find((item) => item.approval_status === "approved");
-      if (approved) setSelectedScripts([approved.id]);
     });
   }, []);
 
@@ -45,22 +41,43 @@ export default function DiagnosticSetupPage() {
   }, [projectId]);
 
   const project = projects.find((item) => item.id === projectId);
-  const compatibleDevices = devices.filter((item) =>
-    project?.run_mode === "mock" ? item.adapter === "mock" : item.adapter !== "mock"
+  const selectedApp = apps.find((item) => item.id === appId);
+  const matchesAppPlatform = (device: Device) => !selectedApp || (
+    selectedApp.platform === "android"
+      ? device.platform.includes("android")
+      : device.platform.includes("ios")
   );
+  const compatibleDevices = devices.filter((item) =>
+    (project?.run_mode === "mock" ? item.adapter === "mock" : item.adapter !== "mock")
+    && matchesAppPlatform(item)
+  );
+
+  useEffect(() => {
+    if (!selectedApp) {
+      setScripts([]);
+      setSelectedScripts([]);
+      return;
+    }
+    void api<FridaScript[]>(`/frida/scripts?platform=${selectedApp.platform}`).then((items) => {
+      setScripts(items);
+      const approved = items.find((item) => item.approval_status === "approved" && item.syntax_status === "available");
+      setSelectedScripts(approved ? [approved.id] : []);
+    });
+  }, [selectedApp?.id, selectedApp?.platform]);
 
   useEffect(() => {
     if (!project) return;
     setProxyAdapter(project.run_mode === "mock" ? "mock" : "mitmproxy");
     const compatible = devices.filter((item) =>
-      project.run_mode === "mock" ? item.adapter === "mock" : item.adapter !== "mock"
+      (project.run_mode === "mock" ? item.adapter === "mock" : item.adapter !== "mock")
+      && matchesAppPlatform(item)
     );
     if (!compatible.some((item) => item.id === deviceId)) {
       const next = compatible[0]?.id ?? "";
       setDeviceId(next);
       if (next) localStorage.setItem("msw.device", next);
     }
-  }, [project, devices, deviceId]);
+  }, [project, devices, deviceId, selectedApp?.id, selectedApp?.platform]);
 
   async function start(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -202,7 +219,7 @@ export default function DiagnosticSetupPage() {
                 <select id="runtime-tool" name="runtime_tool" defaultValue="none">
                   <option value="none">사용 안 함</option>
                   <option value="objection">objection · 환경 읽기</option>
-                  <option value="drozer">drozer · Android 공격 표면 조회</option>
+                  {selectedApp?.platform === "android" && <option value="drozer">drozer · Android 공격 표면 조회</option>}
                 </select>
                 <small>진단 자동 흐름에서는 읽기 전용 작업만 실행합니다. 상태 변경 작업은 별도 승인 API가 필요합니다.</small>
               </div>

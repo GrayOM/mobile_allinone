@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, post } from "../api";
-import type { FridaScript, Project } from "../types";
+import type { DiagnosticRun, FridaScript, Project } from "../types";
 import { EmptyState, SectionHeading, StatusChip } from "../components/UI";
 
 export default function ScriptsPage() {
@@ -13,6 +13,7 @@ export default function ScriptsPage() {
   const [showGenerator, setShowGenerator] = useState(false);
   const [error, setError] = useState("");
   const [project, setProject] = useState<Project | null>(null);
+  const [pausedRuns, setPausedRuns] = useState<DiagnosticRun[]>([]);
 
   function load() {
     void api<FridaScript[]>("/frida/scripts").then((items) => {
@@ -23,7 +24,13 @@ export default function ScriptsPage() {
   useEffect(load, []);
   useEffect(() => {
     const projectId = localStorage.getItem("msw.project");
-    if (projectId) void api<Project>(`/projects/${projectId}`).then(setProject);
+    if (projectId) void Promise.all([
+      api<Project>(`/projects/${projectId}`),
+      api<DiagnosticRun[]>(`/projects/${projectId}/runs`),
+    ]).then(([projectItem, runs]) => {
+      setProject(projectItem);
+      setPausedRuns(runs.filter((run) => run.status === "paused"));
+    });
   }, []);
 
   const filtered = scripts.filter((item) => item.platform === platform);
@@ -39,14 +46,27 @@ export default function ScriptsPage() {
       setError("Mock Frida 실행은 Mock 프로젝트에서만 허용됩니다. Live 단말 실행은 진단 설정에서 진행하세요.");
       return;
     }
+    const run = pausedRuns.find((item) => (
+      selected.platform === "ios" ? item.device_id.includes("ios") : !item.device_id.includes("ios")
+    ));
+    if (!run) {
+      setError("같은 플랫폼의 Mock 진단을 일시정지한 뒤 실행하세요. 직접 Frida 실행도 Run Lease와 증적에 연결됩니다.");
+      return;
+    }
     setRunning(true);
     try {
-      const value = await post<Record<string, unknown>>(`/frida/scripts/${selected.id}/execute`, {
-        device_id: "mock-android-01",
-        target: "com.example.demo",
-        mode: "spawn",
-        mock: true,
+      const approval = await post<{ token: string }>("/approvals", {
         project_id: project.id,
+        run_id: run.id,
+        resource_type: "frida",
+        action: `execute:${selected.id}`,
+        approved_by: "local_user",
+      });
+      const value = await post<Record<string, unknown>>(`/frida/scripts/${selected.id}/execute`, {
+        mode: "spawn",
+        project_id: project.id,
+        run_id: run.id,
+        approval_token: approval.token,
       });
       setResult(value);
       load();
@@ -206,7 +226,7 @@ export default function ScriptsPage() {
               </div>
               <pre className="code-view code-view--tall">{selected.content}</pre>
               <div className="form-actions">
-                <button className="button button--signal" onClick={() => void execute()} disabled={running || selected.approval_status !== "approved" || selected.syntax_status !== "available" || project?.run_mode !== "mock"}>
+                <button className="button button--signal" onClick={() => void execute()} disabled={running || selected.approval_status !== "approved" || selected.syntax_status !== "available" || project?.run_mode !== "mock" || !pausedRuns.length}>
                   {running ? "Mock 실행 중…" : "Mock 단말에서 실행"}
                 </button>
                 {selected.approval_status !== "approved" && (

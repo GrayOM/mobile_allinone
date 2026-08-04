@@ -17,6 +17,7 @@
 - AI 스크립트는 JSON Schema 검증, JavaScript 구문 검사, 사용자 승인을 거친 뒤에만 실행한다.
 - API 키와 비밀정보는 `.env`에서만 읽고 코드·`config.yaml`에 저장하지 않는다.
 - 외부 AI 전송은 프로젝트의 `ai_enabled`, `external_ai_allowed` 정책을 따른다.
+- MobSF 앱 원본 전송은 프로젝트의 `external_analyzer_allowed`와 목적지 허용목록을 모두 따른다.
 - 프로젝트 실행 모드는 `mock | live`로 분리하며 Live에서 Mock Adapter로 fallback하지 않는다.
 - Mock에서 생성한 앱·실행·증적·패킷·발견항목·AI 결과에는 `synthetic=true`를 영구 보존한다.
 - 기존 사용자 파일과 관련 없는 변경은 건드리지 않는다.
@@ -81,6 +82,10 @@ tests/               단위·API·Mock E2E 테스트
 - 중지·실패·서버 종료 시 외부 프로세스 트리를 정리하고, 재시작 시 활성 Run을 `interrupted`로 복구한다.
 - 실행 중인 Run이 있는 프로젝트 삭제는 409로 차단한다.
 - 장시간 외부 작업 전 DB transaction을 commit해 SQLite 잠금을 유지하지 않는다.
+- 앱·단말 Adapter·Frida 스크립트 플랫폼이 다르면 API와 Orchestrator 양쪽에서 실행을 차단한다.
+- Live Run은 `app_id`와 검증된 package name/Bundle ID가 필수이며 기본 대상값으로 대체하지 않는다.
+- 직접 단말·Runtime·Frida 작업은 일시정지된 Run Lease에 연결하고, 고위험 작업은 DB에 해시로 저장한 5분 만료 1회 승인 토큰과 증적을 사용한다.
+- 서버는 기본 loopback 전용이다. 특정 LAN IP 실행은 프로세스별 API·관리자 토큰과 Trusted Host를 강제하며 API 문서는 기본 비활성화한다.
 
 ### Android
 
@@ -102,13 +107,14 @@ tests/               단위·API·Mock E2E 테스트
 - `frida-ps`: Frida 연결 상태
 - IPA 서명·재서명과 macOS 의존 작업은 `manual_required`
 - 비탈옥 단말의 임의 컨테이너 파일 접근도 지원 범위 밖이면 `manual_required`
+- SSH host·username과 Bundle ID를 엄격히 검증하고 원격 Shell 인자는 개별 quote한다.
 
 ### 정적 분석기 연합
 
 다음 분석 결과를 공통 구조로 통합한다.
 
 - `native_static`: ZIP·Manifest/Plist·문자열·코드 신호 휴리스틱
-- Androguard: 기본 Python 의존성, APK 바이너리 AXML·메타데이터
+- Androguard: 별도 제한 Worker 프로세스, APK 바이너리 AXML·메타데이터
 - apktool/jadx: 선택 외부 도구
 - APKiD: 보호·패커·난독화·anti-analysis 시그니처
 - Semgrep: JADX 결과에 `rules/semgrep` 규칙 적용
@@ -144,7 +150,7 @@ tests/               단위·API·Mock E2E 테스트
 
 - objection: 환경·파일 조회와 승인형 보안통제 작업
 - drozer: 패키지·공격 표면·Provider 조회와 승인형 컴포넌트 호출
-- 읽기 작업 외의 중·고위험 작업은 `approved=true`가 없으면 `manual_required`
+- 읽기 작업 외의 중·고위험 작업은 Run에 묶인 1회 승인 토큰이 없으면 실행하지 않는다.
 
 ### 프록시
 
@@ -154,12 +160,14 @@ tests/               단위·API·Mock E2E 테스트
 - POST·PUT·PATCH·DELETE 요청을 자동 재전송하지 않는다.
 - mitmproxy는 특정 Windows LAN IP에만 바인딩하고 진단 단말의 출발지 IP만 addon에서 허용한다.
 - 동적 테스트 종료 후 프록시 Stop·Flush·최종 Drain 순서로 패킷을 저장한다.
+- mitmdump Listener 바인딩 실패는 임계영역에서 새 포트를 할당해 최대 3회 재시도한다.
 
 ### 입력·외부 도구 방어
 
 - APK/IPA는 Entry 수, 전체·개별 비압축 크기, 압축률, 중첩 압축, 경로, 중복, 암호화, symlink를 사전 검사한다.
 - 제한 초과는 warning이 아니라 422 rejected로 종료하며 외부 분석기를 실행하지 않는다.
 - 외부 분석 도구는 프로세스 그룹으로 실행하고 wall time·프로세스 트리 메모리·CPU 시간을 제한한다.
+- MobSF는 프로젝트 승인과 loopback·사내 목적지 허용목록을 통과한 경우에만 앱을 전송하며 `tool_runs`에 목적지와 승인자를 남긴다.
 
 ## 4. 주요 데이터 모델
 
@@ -170,6 +178,7 @@ tests/               단위·API·Mock E2E 테스트
 - `finding_sources`: 정규화 발견항목과 원시 탐지 연결
 - `control_tests`: 앱 기준선 및 진단 실행별 MASTG 상태
 - `ai_invocations`: AI Provider·모델·상태·원문 기록
+- `operation_approvals`: 직접 작업의 승인 범위·승인자·만료·소비 상태와 토큰 SHA-256
 
 현재 Alembic은 사용하지 않는다. 안전 경계 컬럼은 `schema_migrations`와 시작 전 DB 백업을 사용하는 명시적 SQLite migration으로 추가한다. 이후 스키마 변경도 `create_all`만 믿지 말고 같은 방식 또는 Alembic 도입 후 진행한다.
 
@@ -197,6 +206,7 @@ data/
 /api/devices
 /api/devices/action
 /api/devices/ios/profiles
+/api/approvals
 
 /api/runs
 /api/runs/{id}/pause|resume|stop
@@ -301,9 +311,15 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 
 MOBSF_URL=
 MOBSF_API_KEY=
+MSW_MOBSF_ALLOWED_NETWORKS=127.0.0.0/8,::1/128
+MSW_MOBSF_ALLOWED_HOSTS=
 MSW_MASK_EXTERNAL_AI_DATA=true
 MSW_STORE_AI_RAW_RESPONSES=false
 MSW_PROXY_LISTEN_HOST=127.0.0.1
+MSW_LAN_ACCESS=false
+MSW_API_TOKEN=
+MSW_ADMIN_TOKEN=
+MSW_ENABLE_API_DOCS=false
 ```
 
 실행 파일은 `config.yaml` 또는 설정 화면에서 지정한다. 설정 화면 저장 후 서버 재시작이 필요하다.
@@ -314,7 +330,7 @@ MSW_PROXY_LISTEN_HOST=127.0.0.1
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          22 passed
+pytest -q                          31 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```

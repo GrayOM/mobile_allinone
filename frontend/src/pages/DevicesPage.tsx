@@ -35,7 +35,6 @@ export default function DevicesPage() {
       adapter: device.adapter,
       device_id: device.id,
       action,
-      package_name: "com.example.demo",
     });
     setOperation(result);
   }

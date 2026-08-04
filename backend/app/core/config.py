@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from backend.app.core.targets import is_loopback_host, is_valid_host
 
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -66,6 +68,11 @@ class AppSettings(BaseModel):
     app_name: str = "Mobile Security Workbench"
     host: str = "127.0.0.1"
     port: int = 8765
+    lan_access: bool = False
+    api_token: str | None = None
+    admin_token: str | None = None
+    trusted_hosts: list[str] = Field(default_factory=list)
+    enable_api_docs: bool = False
     data_dir: Path = ROOT_DIR / "data"
     database_url: str = f"sqlite:///{(ROOT_DIR / 'data' / 'workbench.db').as_posix()}"
     frontend_dist: Path = ROOT_DIR / "frontend" / "dist"
@@ -95,8 +102,30 @@ class AppSettings(BaseModel):
     external_tool_cpu_seconds: int = 300
     mobsf_url: str | None = None
     mobsf_api_key: str | None = None
+    mobsf_allowed_networks: list[str] = Field(
+        default_factory=lambda: ["127.0.0.0/8", "::1/128"]
+    )
+    mobsf_allowed_hosts: list[str] = Field(default_factory=list)
     semgrep_rules_path: Path = ROOT_DIR / "rules" / "semgrep"
     tools: ToolPaths = Field(default_factory=ToolPaths)
+
+    @model_validator(mode="after")
+    def validate_server_exposure(self):
+        host = self.host.strip().strip("[]").rstrip(".")
+        if host in {"0.0.0.0", "::", "*"} or not is_valid_host(host):
+            raise ValueError("서버는 wildcard가 아닌 특정 loopback 또는 LAN 주소에만 바인딩할 수 있습니다.")
+        self.host = host
+        if not is_loopback_host(host):
+            if not self.lan_access:
+                raise ValueError("loopback 외 주소는 MSW_LAN_ACCESS=true로 명시적으로 허용해야 합니다.")
+            if len(self.api_token or "") < 32 or len(self.admin_token or "") < 32:
+                raise ValueError("LAN 실행에는 32자 이상의 임시 API 토큰과 관리자 토큰이 필요합니다.")
+        return self
+
+    @property
+    def effective_trusted_hosts(self) -> list[str]:
+        values = {"127.0.0.1", "localhost", self.host, *self.trusted_hosts}
+        return sorted(value for value in values if value)
 
     @property
     def uploads_dir(self) -> Path:
@@ -159,6 +188,17 @@ def get_settings() -> AppSettings:
     env_values: dict[str, Any] = {
         "host": os.getenv("MSW_HOST", values.get("host", "127.0.0.1")),
         "port": int(os.getenv("MSW_PORT", values.get("port", 8765))),
+        "lan_access": _env_bool("MSW_LAN_ACCESS", values.get("lan_access", False)),
+        "api_token": os.getenv("MSW_API_TOKEN"),
+        "admin_token": os.getenv("MSW_ADMIN_TOKEN"),
+        "trusted_hosts": [
+            item.strip()
+            for item in os.getenv("MSW_TRUSTED_HOSTS", "").split(",")
+            if item.strip()
+        ] or values.get("trusted_hosts", []),
+        "enable_api_docs": _env_bool(
+            "MSW_ENABLE_API_DOCS", values.get("enable_api_docs", False)
+        ),
         "default_mock_mode": _env_bool(
             "MSW_DEFAULT_MOCK_MODE", values.get("default_mock_mode", False)
         ),
@@ -180,6 +220,16 @@ def get_settings() -> AppSettings:
         ),
         "mobsf_url": os.getenv("MOBSF_URL", values.get("mobsf_url")),
         "mobsf_api_key": os.getenv("MOBSF_API_KEY"),
+        "mobsf_allowed_networks": [
+            item.strip()
+            for item in os.getenv("MSW_MOBSF_ALLOWED_NETWORKS", "").split(",")
+            if item.strip()
+        ] or values.get("mobsf_allowed_networks", ["127.0.0.0/8", "::1/128"]),
+        "mobsf_allowed_hosts": [
+            item.strip().lower()
+            for item in os.getenv("MSW_MOBSF_ALLOWED_HOSTS", "").split(",")
+            if item.strip()
+        ] or values.get("mobsf_allowed_hosts", []),
     }
     if os.getenv("MSW_DATA_DIR"):
         configured_data_dir = Path(os.environ["MSW_DATA_DIR"])

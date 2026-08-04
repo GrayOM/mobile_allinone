@@ -5,11 +5,13 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.api.router import router
 from backend.app.core.config import get_settings
+from backend.app.core.security import ApiSecurityMiddleware
 from backend.app.database.session import SessionLocal, init_database
 from backend.app.database.models import DiagnosticRun
 from backend.app.core.status import RunStatus
@@ -53,11 +55,15 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    settings = get_settings()
     app = FastAPI(
         title="Mobile Security Workbench",
         version="0.2.0",
         description="Evidence-first local mobile application security diagnostics",
         lifespan=lifespan,
+        docs_url="/docs" if settings.enable_api_docs else None,
+        redoc_url="/redoc" if settings.enable_api_docs else None,
+        openapi_url="/openapi.json" if settings.enable_api_docs else None,
     )
     app.add_middleware(
         CORSMiddleware,
@@ -71,9 +77,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(ApiSecurityMiddleware, settings=settings)
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=settings.effective_trusted_hosts,
+    )
     app.include_router(router)
 
-    settings = get_settings()
     assets = settings.frontend_dist / "assets"
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=assets), name="assets")
@@ -95,7 +105,7 @@ def create_app() -> FastAPI:
                 "service": "Mobile Security Workbench",
                 "status": "backend_ready",
                 "message": "frontend 빌드가 없습니다. frontend에서 npm install && npm run build를 실행하세요.",
-                "api_docs": "/docs",
+                "api_docs": "/docs" if settings.enable_api_docs else None,
             }
         )
     return app

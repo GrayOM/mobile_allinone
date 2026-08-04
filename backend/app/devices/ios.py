@@ -3,11 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 from pathlib import Path
 
 from backend.app.core.command import CommandResult, run_command
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus, Platform
+from backend.app.core.targets import (
+    SSH_USERNAME_PATTERN,
+    is_valid_app_identifier,
+    is_valid_host,
+)
 from backend.app.devices.base import DeviceAdapter, DeviceInfo, DeviceOperation
 
 
@@ -24,7 +30,11 @@ class IOSDeviceAdapter(DeviceAdapter):
         include_usb: bool = True,
     ):
         self.settings = settings or get_settings()
-        self.host = host
+        if host and not is_valid_host(host):
+            raise ValueError("iOS SSH 호스트는 유효한 IP 주소 또는 hostname이어야 합니다.")
+        if not SSH_USERNAME_PATTERN.fullmatch(username):
+            raise ValueError("iOS SSH 사용자명 형식이 올바르지 않습니다.")
+        self.host = host.strip().rstrip(".") if host else None
         self.port = port
         self.username = username
         self.include_usb = include_usb
@@ -58,6 +68,7 @@ class IOSDeviceAdapter(DeviceAdapter):
                 CapabilityStatus.NOT_CONFIGURED,
                 "iOS SSH 호스트와 Windows OpenSSH 경로를 설정하세요.",
             )
+        remote_command = " ".join(shlex.quote(part) for part in command)
         result = await run_command(
             [
                 self.ssh,
@@ -68,11 +79,20 @@ class IOSDeviceAdapter(DeviceAdapter):
                 "-p",
                 str(self.port),
                 f"{self.username}@{self.host}",
-                *command,
+                remote_command,
             ],
             timeout=self.settings.command_timeout_seconds,
         )
         return self._operation(result, "SSH 명령을 실행했습니다.")
+
+    @staticmethod
+    def _invalid_bundle_id(package_name: str) -> DeviceOperation | None:
+        if is_valid_app_identifier("ios", package_name):
+            return None
+        return DeviceOperation(
+            CapabilityStatus.FAILED,
+            "iOS Bundle ID 형식이 올바르지 않아 단말 명령을 차단했습니다.",
+        )
 
     async def _pmd(self, device_id: str, *command: str, timeout: int = 60) -> CommandResult:
         if not self.pymobiledevice3:
@@ -235,8 +255,13 @@ class IOSDeviceAdapter(DeviceAdapter):
     async def list_packages(self, device_id: str) -> DeviceOperation:
         if device_id.startswith("ios-ssh:"):
             return await self._ssh(
-                "find /Applications /var/containers/Bundle/Application "
-                "-maxdepth 3 -name '*.app' 2>/dev/null"
+                "find",
+                "/Applications",
+                "/var/containers/Bundle/Application",
+                "-maxdepth",
+                "3",
+                "-name",
+                "*.app",
             )
         if self.ideviceinstaller:
             result = await run_command(
@@ -267,6 +292,9 @@ class IOSDeviceAdapter(DeviceAdapter):
         )
 
     async def uninstall_app(self, device_id: str, package_name: str) -> DeviceOperation:
+        invalid = self._invalid_bundle_id(package_name)
+        if invalid:
+            return invalid
         if self.ideviceinstaller and not device_id.startswith("ios-ssh:"):
             result = await run_command(
                 [self.ideviceinstaller, "-u", device_id, "-U", package_name],
@@ -276,6 +304,9 @@ class IOSDeviceAdapter(DeviceAdapter):
         return self._manual("ideviceinstaller가 없어 iOS 앱 삭제는 수동 작업이 필요합니다.")
 
     async def start_app(self, device_id: str, package_name: str) -> DeviceOperation:
+        invalid = self._invalid_bundle_id(package_name)
+        if invalid:
+            return invalid
         if device_id.startswith("ios-ssh:"):
             return await self._ssh("open", package_name)
         if self.pymobiledevice3:
@@ -297,6 +328,9 @@ class IOSDeviceAdapter(DeviceAdapter):
         return self._manual("pymobiledevice3 또는 SSH 실행 환경을 설정하세요.")
 
     async def stop_app(self, device_id: str, package_name: str) -> DeviceOperation:
+        invalid = self._invalid_bundle_id(package_name)
+        if invalid:
+            return invalid
         if device_id.startswith("ios-ssh:"):
             return await self._ssh("killall", package_name)
         return self._manual("비탈옥 iOS 앱 종료는 현재 수동 작업이 필요합니다.")
@@ -374,7 +408,7 @@ class IOSDeviceAdapter(DeviceAdapter):
                 self.scp,
                 "-P",
                 str(self.port),
-                f"{self.username}@{self.host}:{remote_path}",
+                f"{self.username}@{self.host}:{shlex.quote(remote_path)}",
                 str(destination),
             ],
             timeout=120,

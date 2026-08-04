@@ -8,6 +8,7 @@ from sqlalchemy import Engine, inspect, text
 
 
 MIGRATION_ID = "20260804_safety_boundaries_v1"
+MIGRATION_ID_V2 = "20260804_live_controls_v2"
 
 
 ADDITIONS: dict[str, dict[str, str]] = {
@@ -34,8 +35,18 @@ ADDITIONS: dict[str, dict[str, str]] = {
     "control_tests": {"synthetic": "BOOLEAN NOT NULL DEFAULT 0"},
 }
 
+V2_ADDITIONS: dict[str, dict[str, str]] = {
+    "projects": {
+        "external_analyzer_allowed": "BOOLEAN NOT NULL DEFAULT 0",
+        "external_analyzer_approved_by": "VARCHAR(100)",
+        "external_analyzer_approved_at": "DATETIME",
+    },
+}
 
-def _backup_sqlite_database(engine: Engine) -> Path | None:
+
+def _backup_sqlite_database(
+    engine: Engine, migration_id: str = MIGRATION_ID
+) -> Path | None:
     database = engine.url.database
     if not database or database == ":memory:":
         return None
@@ -45,12 +56,12 @@ def _backup_sqlite_database(engine: Engine) -> Path | None:
     backup_dir = source.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    destination = backup_dir / f"{source.stem}-before-{MIGRATION_ID}-{stamp}{source.suffix}"
+    destination = backup_dir / f"{source.stem}-before-{migration_id}-{stamp}{source.suffix}"
     shutil.copy2(source, destination)
     return destination
 
 
-def apply_migrations(engine: Engine) -> None:
+def _apply_v1(engine: Engine) -> None:
     if engine.dialect.name != "sqlite":
         return
     with engine.begin() as connection:
@@ -153,3 +164,51 @@ def apply_migrations(engine: Engine) -> None:
                 "backup": str(backup) if backup else None,
             },
         )
+
+
+def _apply_v2(engine: Engine) -> None:
+    with engine.begin() as connection:
+        applied = connection.scalar(
+            text("SELECT id FROM schema_migrations WHERE id = :id"),
+            {"id": MIGRATION_ID_V2},
+        )
+    if applied:
+        return
+    inspector = inspect(engine)
+    pending = {
+        table: {
+            column: definition
+            for column, definition in columns.items()
+            if column not in {item["name"] for item in inspector.get_columns(table)}
+        }
+        for table, columns in V2_ADDITIONS.items()
+        if inspector.has_table(table)
+    }
+    pending = {table: columns for table, columns in pending.items() if columns}
+    backup = (
+        _backup_sqlite_database(engine, MIGRATION_ID_V2) if pending else None
+    )
+    with engine.begin() as connection:
+        for table, columns in pending.items():
+            for column, definition in columns.items():
+                connection.execute(
+                    text(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}')
+                )
+        connection.execute(
+            text(
+                "INSERT INTO schema_migrations(id, applied_at, backup_path) "
+                "VALUES (:id, :applied_at, :backup)"
+            ),
+            {
+                "id": MIGRATION_ID_V2,
+                "applied_at": datetime.now(timezone.utc).isoformat(),
+                "backup": str(backup) if backup else None,
+            },
+        )
+
+
+def apply_migrations(engine: Engine) -> None:
+    if engine.dialect.name != "sqlite":
+        return
+    _apply_v1(engine)
+    _apply_v2(engine)

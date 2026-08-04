@@ -7,6 +7,7 @@ from pathlib import Path
 from backend.app.core.command import CommandResult, run_command
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus, Platform
+from backend.app.core.targets import is_valid_app_identifier
 from backend.app.devices.base import DeviceAdapter, DeviceInfo, DeviceOperation
 
 
@@ -21,6 +22,15 @@ class AndroidDeviceAdapter(DeviceAdapter):
         return DeviceOperation(
             CapabilityStatus.NOT_CONFIGURED,
             "ADB를 찾을 수 없습니다. 설정 화면에서 adb.exe 경로를 지정하세요.",
+        )
+
+    @staticmethod
+    def _invalid_package(package_name: str) -> DeviceOperation | None:
+        if is_valid_app_identifier("android", package_name):
+            return None
+        return DeviceOperation(
+            CapabilityStatus.FAILED,
+            "Android 패키지명 형식이 올바르지 않아 단말 명령을 차단했습니다.",
         )
 
     async def _adb(self, device_id: str | None, *args: str, timeout: int | None = None):
@@ -127,12 +137,18 @@ class AndroidDeviceAdapter(DeviceAdapter):
         return self._operation(result, "APK를 설치했습니다.")
 
     async def uninstall_app(self, device_id: str, package_name: str) -> DeviceOperation:
+        invalid = self._invalid_package(package_name)
+        if invalid:
+            return invalid
         if not self.adb:
             return self._missing()
         result = await self._adb(device_id, "uninstall", package_name, timeout=60)
         return self._operation(result, "앱을 삭제했습니다.")
 
     async def start_app(self, device_id: str, package_name: str) -> DeviceOperation:
+        invalid = self._invalid_package(package_name)
+        if invalid:
+            return invalid
         if not self.adb:
             return self._missing()
         result = await self._adb(
@@ -148,6 +164,9 @@ class AndroidDeviceAdapter(DeviceAdapter):
         return self._operation(result, "앱을 실행했습니다.")
 
     async def stop_app(self, device_id: str, package_name: str) -> DeviceOperation:
+        invalid = self._invalid_package(package_name)
+        if invalid:
+            return invalid
         if not self.adb:
             return self._missing()
         result = await self._adb(device_id, "shell", "am", "force-stop", package_name)
@@ -229,6 +248,9 @@ class AndroidDeviceAdapter(DeviceAdapter):
         return op
 
     async def process_info(self, device_id: str, package_name: str) -> DeviceOperation:
+        invalid = self._invalid_package(package_name)
+        if invalid:
+            return invalid
         if not self.adb:
             return self._missing()
         result = await self._adb(device_id, "shell", "pidof", package_name)
@@ -264,4 +286,3 @@ class AndroidDeviceAdapter(DeviceAdapter):
             device_id, "forward", f"tcp:{local_port}", f"tcp:{remote_port}"
         )
         return self._operation(result, f"tcp:{local_port} → tcp:{remote_port} 포워딩을 설정했습니다.")
-

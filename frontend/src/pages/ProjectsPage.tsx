@@ -77,6 +77,7 @@ export default function ProjectsPage() {
         description: data.get("description"),
         ai_enabled: data.get("ai_enabled") === "on",
         external_ai_allowed: data.get("external_ai_allowed") === "on",
+        external_analyzer_allowed: data.get("external_analyzer_allowed") === "on",
         run_mode: data.get("run_mode"),
       });
       setProjects((items) => [created, ...items]);
@@ -183,6 +184,10 @@ export default function ProjectsPage() {
               <input type="checkbox" name="external_ai_allowed" />
               <span><strong>외부 AI 전송 허용</strong><small>마스킹 후 NVIDIA·Claude로 전송합니다.</small></span>
             </label>
+            <label className="check-card">
+              <input type="checkbox" name="external_analyzer_allowed" />
+              <span><strong>MobSF 앱 전송 허용</strong><small>허용된 MobSF 서버로 APK·IPA 원본을 전송하고 이력을 남깁니다.</small></span>
+            </label>
             <div className="field">
               <label htmlFor="project-run-mode">실행 모드</label>
               <select id="project-run-mode" name="run_mode" defaultValue="live">
@@ -229,6 +234,7 @@ export default function ProjectsPage() {
                 <div className="chip-row">
                   <StatusChip value={project.run_mode === "mock" ? "manual_required" : "available"} label={project.run_mode === "mock" ? "Mock · 합성 데이터" : "Live · 실제 결과"} />
                   <StatusChip value={project.external_ai_allowed ? "available" : "not_configured"} label={project.external_ai_allowed ? "외부 AI 허용" : "외부 AI 차단"} />
+                  <StatusChip value={project.external_analyzer_allowed ? "available" : "not_configured"} label={project.external_analyzer_allowed ? "MobSF 전송 허용" : "MobSF 전송 차단"} />
                   <button className="button button--danger button--small" onClick={() => void deleteCurrentProject()}>프로젝트 삭제</button>
                 </div>
               </div>

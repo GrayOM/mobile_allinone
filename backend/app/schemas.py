@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from backend.app.core.status import RunMode
+from backend.app.core.status import FindingVerdict, RunMode
+from backend.app.core.targets import SSH_USERNAME_PATTERN, is_valid_host
 
 
 class ORMModel(BaseModel):
@@ -17,6 +18,7 @@ class ProjectCreate(BaseModel):
     description: str = ""
     ai_enabled: bool = True
     external_ai_allowed: bool = False
+    external_analyzer_allowed: bool = False
     run_mode: RunMode = RunMode.LIVE
     mock_mode: bool | None = None
 
@@ -33,6 +35,7 @@ class ProjectUpdate(BaseModel):
     description: str | None = None
     ai_enabled: bool | None = None
     external_ai_allowed: bool | None = None
+    external_analyzer_allowed: bool | None = None
     mock_mode: bool | None = None
     run_mode: RunMode | None = None
 
@@ -51,6 +54,9 @@ class ProjectOut(ORMModel):
     description: str
     ai_enabled: bool
     external_ai_allowed: bool
+    external_analyzer_allowed: bool
+    external_analyzer_approved_by: str | None
+    external_analyzer_approved_at: datetime | None
     mock_mode: bool
     run_mode: str
     created_at: datetime
@@ -142,7 +148,7 @@ class EvidenceOut(ORMModel):
 
 class FridaScriptCreate(BaseModel):
     name: str
-    platform: str
+    platform: str = Field(pattern="^(android|ios)$")
     category: str
     target_framework: str = "generic"
     conditions: list[str] = Field(default_factory=list)
@@ -190,16 +196,22 @@ class ProxyFlowOut(ORMModel):
 class AIFindingCandidate(BaseModel):
     title: str
     category: str
-    platform: str
+    platform: str = Field(pattern="^(android|ios)$")
     severity: str = Field(pattern="^(critical|high|medium|low|info)$")
     location: str
-    verdict: str
+    verdict: FindingVerdict
     confidence: float = Field(ge=0, le=1)
     rationale: str
     reproduction: list[str]
     evidence_ids: list[str]
     false_positive_risk: str
     additional_checks: list[str]
+
+    @model_validator(mode="after")
+    def confirmed_requires_evidence(self):
+        if self.verdict == FindingVerdict.CONFIRMED and not self.evidence_ids:
+            raise ValueError("confirmed 판정에는 최소 1개의 증적 ID가 필요합니다.")
+        return self
 
 
 class AIAnalysis(BaseModel):
@@ -212,7 +224,7 @@ class AIAnalysis(BaseModel):
 
 class FridaScriptCandidate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    platform: str
+    platform: str = Field(pattern="^(android|ios)$")
     category: str
     target_framework: str = "generic"
     conditions: list[str] = Field(default_factory=list)
@@ -238,6 +250,21 @@ class IOSDeviceProfileCreate(BaseModel):
     username: str = Field(default="root", min_length=1, max_length=100)
     frida_endpoint: str | None = Field(default=None, max_length=255)
     notes: str = ""
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        normalized = value.strip().rstrip(".")
+        if not is_valid_host(normalized):
+            raise ValueError("SSH 호스트는 유효한 IP 주소 또는 hostname이어야 합니다.")
+        return normalized
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        if not SSH_USERNAME_PATTERN.fullmatch(value):
+            raise ValueError("SSH 사용자명 형식이 올바르지 않습니다.")
+        return value
 
 
 class IOSDeviceProfileOut(ORMModel):

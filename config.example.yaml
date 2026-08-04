@@ -1,5 +1,7 @@
 host: 127.0.0.1
 port: 8765
+lan_access: false
+enable_api_docs: false
 default_mock_mode: false
 auto_open_browser: true
 max_upload_mb: 512
@@ -14,6 +16,10 @@ external_tool_memory_mb: 2048
 external_tool_cpu_seconds: 300
 # MobSF API 키는 config.yaml이 아니라 .env의 MOBSF_API_KEY에 둡니다.
 # mobsf_url: http://127.0.0.1:8000
+mobsf_allowed_networks:
+  - 127.0.0.0/8
+  - ::1/128
+mobsf_allowed_hosts: []
 semgrep_rules_path: rules/semgrep
 tools:
   adb: adb

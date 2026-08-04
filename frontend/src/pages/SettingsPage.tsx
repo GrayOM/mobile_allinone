@@ -3,7 +3,16 @@ import { api, post, put } from "../api";
 import { SectionHeading, StatusChip } from "../components/UI";
 
 interface SettingsData {
-  server: { host: string; port: number; data_dir: string; max_upload_mb: number };
+  server: {
+    host: string;
+    port: number;
+    data_dir: string;
+    max_upload_mb: number;
+    lan_access: boolean;
+    authentication_required: boolean;
+    api_docs_enabled: boolean;
+    trusted_hosts: string[];
+  };
   ai: {
     nvidia_configured: boolean;
     nvidia_model: string;
@@ -22,6 +31,8 @@ interface SettingsData {
   analysis: {
     mobsf_configured: boolean;
     mobsf_url: string | null;
+    mobsf_allowed_networks: string[];
+    mobsf_allowed_hosts: string[];
     semgrep_rules_path: string;
     catalog: Record<string, unknown>;
     archive_limits: {
@@ -85,8 +96,6 @@ export default function SettingsPage() {
 
   async function testAI(mock: boolean, simulateFailure = false) {
     const result = await post<Record<string, unknown>>("/ai/test", {
-      task: "모바일 진단 AI Provider 연결 테스트",
-      context: { platform: "android", sample: "masked-demo-only" },
       use_mock: mock,
       simulate_nvidia_failure: simulateFailure,
     });
@@ -113,7 +122,9 @@ export default function SettingsPage() {
           <div><dt>접속 주소</dt><dd>http://{settings.server.host}:{settings.server.port}</dd></div>
           <div><dt>데이터 저장소</dt><dd><code>{settings.server.data_dir}</code></dd></div>
           <div><dt>업로드 제한</dt><dd>{settings.server.max_upload_mb} MB</dd></div>
-          <div><dt>외부 노출</dt><dd><StatusChip value="available" label="Loopback 기본값" /></dd></div>
+          <div><dt>외부 노출</dt><dd><StatusChip value={settings.server.lan_access ? "manual_required" : "available"} label={settings.server.lan_access ? "LAN · 임시 토큰 필수" : "Loopback 전용"} /></dd></div>
+          <div><dt>Trusted Host</dt><dd><code>{settings.server.trusted_hosts.join(", ")}</code></dd></div>
+          <div><dt>API 문서</dt><dd>{settings.server.api_docs_enabled ? "명시적 활성화" : "기본 비활성화"}</dd></div>
           <div><dt>프록시 바인딩</dt><dd><code>{settings.proxy.default_listen_host}</code> · 단말 IP 허용목록 필수</dd></div>
           <div><dt>프록시 포트</dt><dd>진단마다 동적 할당</dd></div>
         </dl>
@@ -140,6 +151,7 @@ export default function SettingsPage() {
         <dl className="settings-facts">
           <div><dt>Semgrep 규칙</dt><dd><code>{settings.analysis.semgrep_rules_path}</code></dd></div>
           <div><dt>MobSF REST</dt><dd><StatusChip value={settings.analysis.mobsf_configured ? "available" : "not_configured"} label={settings.analysis.mobsf_url || "URL/API key 필요"} /></dd></div>
+          <div><dt>MobSF 목적지 정책</dt><dd><code>{[...settings.analysis.mobsf_allowed_networks, ...settings.analysis.mobsf_allowed_hosts].join(", ") || "허용 대상 없음"}</code></dd></div>
           <div><dt>통제 카탈로그</dt><dd>{String(settings.analysis.catalog.name ?? "OWASP MASTG")}</dd></div>
           <div><dt>통합 정책</dt><dd>도구 원문·버전·해시 보존 / 실패 상태 명시</dd></div>
           <div><dt>압축 해제 상한</dt><dd>{settings.analysis.archive_limits.max_uncompressed_mb} MB · {settings.analysis.archive_limits.max_entries.toLocaleString()} entries</dd></div>

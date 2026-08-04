@@ -1,5 +1,26 @@
 const API_BASE = "/api";
 
+const ACCESS_TOKEN_KEY = "msw.accessToken";
+const ADMIN_TOKEN_KEY = "msw.adminToken";
+
+export function captureAccessTokensFromLocation(): void {
+  if (!window.location.hash) return;
+  const values = new URLSearchParams(window.location.hash.slice(1));
+  const accessToken = values.get("access_token");
+  const adminToken = values.get("admin_token");
+  if (!accessToken && !adminToken) return;
+  if (accessToken) sessionStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
+  if (adminToken) sessionStorage.setItem(ADMIN_TOKEN_KEY, adminToken);
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+}
+
+function applySecurityHeaders(headers: Headers): void {
+  const accessToken = sessionStorage.getItem(ACCESS_TOKEN_KEY);
+  const adminToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
+  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  if (adminToken) headers.set("X-MSW-Admin-Token", adminToken);
+}
+
 export class ApiError extends Error {
   status: number;
 
@@ -25,6 +46,7 @@ export async function api<T>(
   options: RequestInit = {},
 ): Promise<T> {
   const headers = new Headers(options.headers);
+  applySecurityHeaders(headers);
   if (options.body && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
@@ -69,6 +91,10 @@ export async function upload<T>(
     const data = new FormData();
     data.append("file", file);
     request.open("POST", `${API_BASE}${path}`);
+    const accessToken = sessionStorage.getItem(ACCESS_TOKEN_KEY);
+    const adminToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
+    if (accessToken) request.setRequestHeader("Authorization", `Bearer ${accessToken}`);
+    if (adminToken) request.setRequestHeader("X-MSW-Admin-Token", adminToken);
     request.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
     };
@@ -90,8 +116,9 @@ export async function upload<T>(
 
 export function runWebSocket(runId: string): WebSocket {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const accessToken = sessionStorage.getItem(ACCESS_TOKEN_KEY);
+  const query = accessToken ? `?access_token=${encodeURIComponent(accessToken)}` : "";
   return new WebSocket(
-    `${protocol}//${window.location.host}${API_BASE}/runs/${runId}/ws`,
+    `${protocol}//${window.location.host}${API_BASE}/runs/${runId}/ws${query}`,
   );
 }
-

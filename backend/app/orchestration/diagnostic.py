@@ -15,6 +15,11 @@ from backend.app.ai.storage import save_ai_raw_response
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.events import EventBus, event_bus
 from backend.app.core.status import CapabilityStatus, RunMode, RunStatus
+from backend.app.core.targets import (
+    normalize_platform,
+    platform_for_adapter,
+    require_app_identifier,
+)
 from backend.app.database.models import (
     AIInvocation,
     AppArtifact,
@@ -38,7 +43,7 @@ from backend.app.proxy import (
     MockProxyAdapter,
 )
 from backend.app.runtime import DrozerRuntimeAdapter, ObjectionRuntimeAdapter
-from backend.app.orchestration.resources import ResourceLeaseManager
+from backend.app.orchestration.resources import ResourceLeaseManager, allocate_available_port
 
 
 class DiagnosticStopped(Exception):
@@ -62,6 +67,11 @@ class DiagnosticOrchestrator:
         self._stop_requested: set[str] = set()
         self._proxy_adapters: dict[str, Any] = {}
         self._leases = ResourceLeaseManager()
+        self._proxy_start_lock = asyncio.Lock()
+
+    @property
+    def leases(self) -> ResourceLeaseManager:
+        return self._leases
 
     def launch(self, run_id: str) -> None:
         current = self._tasks.get(run_id)
@@ -186,6 +196,42 @@ class DiagnosticOrchestrator:
         if adapter == "mock":
             return MockProxyAdapter()
         raise ValueError(f"지원하지 않는 프록시 Adapter입니다: {adapter}")
+
+    async def _start_proxy_with_retry(self, db: Session, run: DiagnosticRun, proxy):
+        if run.proxy_adapter != "mitmproxy":
+            return proxy, await proxy.start(run.id)
+        attempted_ports: list[int] = []
+        async with self._proxy_start_lock:
+            for attempt in range(3):
+                if attempt:
+                    host = str(
+                        run.options.get("proxy_listen_host")
+                        or self.settings.proxy_listen_host
+                    )
+                    port = allocate_available_port(host)
+                    for _ in range(10):
+                        if port not in attempted_ports:
+                            break
+                        port = allocate_available_port(host)
+                    if port in attempted_ports:
+                        raise RuntimeError("새 프록시 포트를 고유하게 할당하지 못했습니다.")
+                    await self._leases.replace_port(run.id, port)
+                    options = dict(run.options)
+                    options["proxy_port"] = port
+                    run.options = options
+                    db.commit()
+                    proxy = self._proxy(run)
+                    self._proxy_adapters[run.id] = proxy
+                attempted_ports.append(int(run.options.get("proxy_port") or 0))
+                capture = await proxy.start(run.id)
+                if capture.status != CapabilityStatus.FAILED:
+                    return proxy, capture
+                await proxy.stop(run.id)
+            capture.message += (
+                f" 사용 가능한 포트로 3회 재시도했지만 시작하지 못했습니다: "
+                f"{attempted_ports}"
+            )
+            return proxy, capture
 
     async def _emit_evidence(self, run_id: str, evidence: Evidence) -> None:
         await self.events.publish(
@@ -364,7 +410,7 @@ class DiagnosticOrchestrator:
         )
         generated = FridaScript(
             name=candidate.name,
-            platform=candidate.platform,
+            platform=platform,
             category=candidate.category,
             target_framework=candidate.target_framework,
             conditions=candidate.conditions,
@@ -489,6 +535,30 @@ class DiagnosticOrchestrator:
                 app = db.get(AppArtifact, run.app_id) if run.app_id else None
                 if not project:
                     raise RuntimeError("프로젝트를 찾을 수 없습니다.")
+                device_platform = platform_for_adapter(
+                    run.device_adapter, run.device_id
+                )
+                if app:
+                    app_platform = normalize_platform(app.platform)
+                    if app_platform != device_platform:
+                        raise RuntimeError(
+                            f"{app_platform} 앱과 {device_platform} 단말 Adapter가 일치하지 않습니다."
+                        )
+                    try:
+                        package_name = require_app_identifier(
+                            app.platform, app.package_name
+                        )
+                    except ValueError as exc:
+                        if run.run_mode == RunMode.LIVE.value:
+                            raise RuntimeError(
+                                f"Live 진단 대상 식별자 확인이 필요합니다: {exc}"
+                            ) from exc
+                        package_name = "mock.synthetic.application"
+                elif run.run_mode == RunMode.LIVE.value:
+                    raise RuntimeError("Live 진단에는 대상 앱이 필요합니다.")
+                else:
+                    app_platform = device_platform
+                    package_name = "mock.synthetic.application"
                 run.started_at = datetime.now(timezone.utc)
                 db.commit()
                 proxy_port = (
@@ -542,7 +612,9 @@ class DiagnosticOrchestrator:
                     )
                     await self._emit_evidence(run.id, static_evidence)
 
-                proxy_capture = await proxy.start(run.id)
+                proxy, proxy_capture = await self._start_proxy_with_retry(
+                    db, run, proxy
+                )
                 await self.events.publish(
                     run.id, "proxy_status", proxy_capture.to_dict()
                 )
@@ -553,9 +625,6 @@ class DiagnosticOrchestrator:
                 }:
                     raise RuntimeError(proxy_capture.message)
 
-                package_name = (
-                    app.package_name if app and app.package_name else "com.example.demo"
-                )
                 if app:
                     await self._stage(db, run, "install", 22, "대상 앱을 단말에 설치합니다.")
                     install = await device.install_app(run.device_id, Path(app.stored_path))
@@ -617,12 +686,13 @@ class DiagnosticOrchestrator:
                 )
                 selected_ids = list(run.options.get("frida_script_ids", []))
                 query = select(FridaScript).where(
-                    FridaScript.approval_status == "approved"
+                    FridaScript.approval_status == "approved",
+                    FridaScript.platform == app_platform,
                 )
                 if selected_ids:
                     query = query.where(FridaScript.id.in_(selected_ids))
                 else:
-                    query = query.where(FridaScript.platform == (app.platform if app else "android")).limit(1)
+                    query = query.limit(1)
                 scripts = db.scalars(query).all()
                 db.commit()
                 for script in scripts:
@@ -692,7 +762,7 @@ class DiagnosticOrchestrator:
                             project,
                             script,
                             execution,
-                            app.platform if app else "android",
+                            app_platform,
                         )
 
                 runtime_tool = str(run.options.get("runtime_tool") or "none")
@@ -809,7 +879,7 @@ class DiagnosticOrchestrator:
                     for item in flows[:12]
                 ]
                 ai_context = {
-                    "platform": app.platform if app else "android",
+                    "platform": app_platform,
                     "static_signals": (app.analysis_result if app else {}).get("signals", {}),
                     "runtime_log": dynamic_logs.output[-2000:],
                     "proxy_flows": proxy_summaries,
@@ -879,22 +949,28 @@ class DiagnosticOrchestrator:
                         ).all()
                     }
                     for analysis in ai_result.analysis.findings:
-                        linked_ids = [
+                        linked_ids = list(dict.fromkeys(
                             evidence_id
                             for evidence_id in analysis.evidence_ids
                             if evidence_id in valid_evidence
-                        ]
-                        is_candidate = analysis.confidence < self.settings.ai_min_quality
-                        if is_candidate:
+                        ))
+                        requested_verdict = analysis.verdict.value
+                        is_candidate = (
+                            analysis.confidence < self.settings.ai_min_quality
+                            or not linked_ids
+                        )
+                        if is_candidate or (
+                            requested_verdict == "confirmed" and not linked_ids
+                        ):
                             verdict = "needs_review"
                         else:
-                            verdict = analysis.verdict
+                            verdict = requested_verdict
                         finding = Finding(
                             project_id=project.id,
                             run_id=run.id,
                             title=analysis.title,
                             category=analysis.category,
-                            platform=analysis.platform,
+                            platform=app_platform,
                             severity=analysis.severity,
                             location=analysis.location,
                             verdict=verdict,

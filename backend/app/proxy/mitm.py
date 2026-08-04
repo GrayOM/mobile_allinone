@@ -91,12 +91,31 @@ class MitmProxyAdapter(ProxyAdapter):
         # Register before the readiness wait so cancellation during startup can still
         # find and terminate the process in the orchestrator's finally block.
         self._processes[run_id] = process
-        await asyncio.sleep(0.35)
-        if process.returncode is not None:
+        ready = False
+        for _ in range(15):
+            await asyncio.sleep(0.1)
+            if process.returncode is not None:
+                break
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, self.port), timeout=0.2
+                )
+                writer.close()
+                await writer.wait_closed()
+                ready = True
+                break
+            except (OSError, asyncio.TimeoutError):
+                continue
+        if process.returncode is not None or not ready:
             self._processes.pop(run_id, None)
+            if process.returncode is None:
+                await terminate_process_tree(process)
             return ProxyCapture(
                 CapabilityStatus.FAILED,
-                f"mitmdump가 즉시 종료되었습니다(exit={process.returncode}). 포트와 설치 상태를 확인하세요.",
+                (
+                    f"mitmdump Listener 준비 실패(exit={process.returncode}). "
+                    "포트 바인딩과 설치 상태를 확인하세요."
+                ),
                 self.host,
                 self.port,
             )
