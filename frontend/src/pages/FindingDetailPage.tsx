@@ -31,6 +31,11 @@ export default function FindingDetailPage() {
 
   if (!finding) return <div className="loading-block">발견항목을 불러오는 중…</div>;
 
+  const linkedEvidenceIds = new Set(sources.flatMap((source) => source.evidence_ids));
+  const displayedEvidence = linkedEvidenceIds.size
+    ? evidence.filter((item) => linkedEvidenceIds.has(item.id))
+    : evidence.filter((item) => item.finding_id === finding.id);
+
   return (
     <div className="finding-detail stack stack--lg">
       <div className="detail-breadcrumb"><Link to="/findings">발견항목</Link><span>/</span>{finding.id.slice(0, 8)}</div>
@@ -44,6 +49,7 @@ export default function FindingDetailPage() {
           <div className="chip-row">
             <StatusChip value={finding.verdict} />
             <span className="plain-chip">{finding.source}</span>
+            {finding.synthetic && <span className="plain-chip">SYNTHETIC MOCK</span>}
             <span className="plain-chip">{formatDate(finding.created_at)}</span>
           </div>
         </div>
@@ -108,9 +114,9 @@ export default function FindingDetailPage() {
           </div>
           {finding.run_id && <Link to={`/runs/${finding.run_id}`}>실시간 실행 보기 →</Link>}
         </div>
-        {evidence.length ? (
+        {displayedEvidence.length ? (
           <div className="evidence-timeline">
-            {evidence.map((item) => (
+            {displayedEvidence.map((item) => (
               <article className="evidence-item" key={item.id}>
                 <div className="evidence-item__index">{String(item.sequence).padStart(2, "0")}</div>
                 <div className="evidence-item__card">

@@ -5,7 +5,7 @@ from typing import Any
 
 from backend.app.ai.base import AIProvider, AIProviderResult, AIScriptResult
 from backend.app.core.status import CapabilityStatus
-from backend.app.schemas import AIAnalysis, FridaScriptCandidate
+from backend.app.schemas import AIAnalysis, AIFindingCandidate, FridaScriptCandidate
 
 
 class MockAIProvider(AIProvider):
@@ -17,14 +17,17 @@ class MockAIProvider(AIProvider):
     ) -> AIProviderResult:
         await asyncio.sleep(0.08)
         evidence_ids = [
-            str(item)
-            for item in context.get("evidence_ids", [])
-            if isinstance(item, (str, int))
+            str(item["id"])
+            for item in context.get("evidence_catalog", [])
+            if isinstance(item, dict)
+            and item.get("id")
+            and item.get("type") in {"network_capture", "device_log"}
         ]
-        analysis = AIAnalysis(
+        finding = AIFindingCandidate(
             title="인증 토큰이 프록시 응답에서 관찰됨",
             category="sensitive_data_exposure",
             platform=str(context.get("platform", "android")),
+            severity="medium",
             location="POST /v1/session 응답 본문",
             verdict="needs_review",
             confidence=0.82,
@@ -45,6 +48,7 @@ class MockAIProvider(AIProvider):
                 "세션 만료·폐기 정책 확인",
             ],
         )
+        analysis = AIAnalysis(findings=[finding])
         return AIProviderResult(
             CapabilityStatus.AVAILABLE,
             self.name,
@@ -52,8 +56,9 @@ class MockAIProvider(AIProvider):
             "Mock AI 분석을 완료했습니다.",
             analysis=analysis,
             raw_response=analysis.model_dump_json(),
-            quality_score=analysis.confidence,
+            quality_score=finding.confidence,
             masked=masked,
+            synthetic=True,
         )
 
     async def generate_frida_script(
@@ -93,4 +98,5 @@ class MockAIProvider(AIProvider):
             raw_response=candidate.model_dump_json(),
             quality_score=candidate.confidence,
             masked=masked,
+            synthetic=True,
         )

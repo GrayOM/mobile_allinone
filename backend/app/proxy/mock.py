@@ -23,6 +23,7 @@ class MockProxyAdapter(ProxyAdapter):
             "Mock Proxy를 사용할 수 있습니다.",
             self.host,
             self.port,
+            synthetic=True,
         )
 
     async def start(self, run_id: str) -> ProxyCapture:
@@ -50,6 +51,8 @@ class MockProxyAdapter(ProxyAdapter):
                 response_headers,
                 response_body,
                 sensitive_candidates=candidates,
+                source_ip="127.0.0.1",
+                synthetic=True,
             ),
             ProxyFlowData(
                 "GET",
@@ -67,6 +70,8 @@ class MockProxyAdapter(ProxyAdapter):
                         "masked": "Bear…real",
                     }
                 ],
+                source_ip="127.0.0.1",
+                synthetic=True,
             ),
         ]
         return ProxyCapture(
@@ -79,6 +84,7 @@ class MockProxyAdapter(ProxyAdapter):
                 f"Mock 단말 프록시 주소를 {self.host}:{self.port}로 간주합니다.",
                 "데이터 생성·수정·삭제 요청은 이 데모에서 자동 재전송하지 않습니다.",
             ],
+            synthetic=True,
         )
 
     async def stop(self, run_id: str) -> ProxyCapture:
@@ -87,6 +93,7 @@ class MockProxyAdapter(ProxyAdapter):
             "Mock 패킷 캡처를 종료했습니다.",
             self.host,
             self.port,
+            synthetic=True,
         )
 
     async def read_flows(self, run_id: str) -> list[ProxyFlowData]:
@@ -108,5 +115,5 @@ class MockProxyAdapter(ProxyAdapter):
             self.host,
             self.port,
             capture_file=str(destination),
+            synthetic=True,
         )
-

@@ -69,7 +69,7 @@ class AppSettings(BaseModel):
     data_dir: Path = ROOT_DIR / "data"
     database_url: str = f"sqlite:///{(ROOT_DIR / 'data' / 'workbench.db').as_posix()}"
     frontend_dist: Path = ROOT_DIR / "frontend" / "dist"
-    default_mock_mode: bool = True
+    default_mock_mode: bool = False
     auto_open_browser: bool = True
     command_timeout_seconds: int = 30
     max_upload_mb: int = 512
@@ -81,6 +81,18 @@ class AppSettings(BaseModel):
     claude_model: str = "claude-sonnet-4-6"
     ai_min_quality: float = 0.55
     mask_external_ai_data: bool = True
+    store_ai_raw_responses: bool = False
+    ai_sensitive_keys: list[str] = Field(default_factory=list)
+    proxy_listen_host: str = "127.0.0.1"
+    archive_max_entries: int = 20_000
+    archive_max_uncompressed_mb: int = 1_024
+    archive_max_entry_mb: int = 256
+    archive_max_entry_ratio: float = 200.0
+    archive_max_total_ratio: float = 100.0
+    archive_max_nested_count: int = 10
+    archive_max_nested_mb: int = 50
+    external_tool_memory_mb: int = 2_048
+    external_tool_cpu_seconds: int = 300
     mobsf_url: str | None = None
     mobsf_api_key: str | None = None
     semgrep_rules_path: Path = ROOT_DIR / "rules" / "semgrep"
@@ -148,7 +160,7 @@ def get_settings() -> AppSettings:
         "host": os.getenv("MSW_HOST", values.get("host", "127.0.0.1")),
         "port": int(os.getenv("MSW_PORT", values.get("port", 8765))),
         "default_mock_mode": _env_bool(
-            "MSW_DEFAULT_MOCK_MODE", values.get("default_mock_mode", True)
+            "MSW_DEFAULT_MOCK_MODE", values.get("default_mock_mode", False)
         ),
         "auto_open_browser": _env_bool(
             "MSW_AUTO_OPEN_BROWSER", values.get("auto_open_browser", True)
@@ -158,6 +170,13 @@ def get_settings() -> AppSettings:
         "mask_external_ai_data": _env_bool(
             "MSW_MASK_EXTERNAL_AI_DATA",
             values.get("mask_external_ai_data", True),
+        ),
+        "store_ai_raw_responses": _env_bool(
+            "MSW_STORE_AI_RAW_RESPONSES",
+            values.get("store_ai_raw_responses", False),
+        ),
+        "proxy_listen_host": os.getenv(
+            "MSW_PROXY_LISTEN_HOST", values.get("proxy_listen_host", "127.0.0.1")
         ),
         "mobsf_url": os.getenv("MOBSF_URL", values.get("mobsf_url")),
         "mobsf_api_key": os.getenv("MOBSF_API_KEY"),

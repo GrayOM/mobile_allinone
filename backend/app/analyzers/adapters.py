@@ -192,7 +192,12 @@ class APKiDAnalyzerAdapter(AnalyzerAdapter):
             return result.finish()
         command = [executable, "-j", str(artifact_path)]
         result.command = command
-        executed = await run_command(command, timeout=180)
+        executed = await run_command(
+            command,
+            timeout=180,
+            memory_limit_mb=self.settings.external_tool_memory_mb,
+            cpu_limit_seconds=self.settings.external_tool_cpu_seconds,
+        )
         if not executed.ok:
             result.status = executed.status
             result.error = executed.error or executed.stderr.strip()[:1000]
@@ -291,7 +296,12 @@ class SemgrepAnalyzerAdapter(AnalyzerAdapter):
             str(decompiled_dir),
         ]
         result.command = command
-        executed = await run_command(command, timeout=300)
+        executed = await run_command(
+            command,
+            timeout=300,
+            memory_limit_mb=self.settings.external_tool_memory_mb,
+            cpu_limit_seconds=self.settings.external_tool_cpu_seconds,
+        )
         if executed.return_code not in {0, 1}:
             result.status = executed.status
             result.error = executed.error or executed.stderr.strip()[:1000]

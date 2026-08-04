@@ -8,6 +8,8 @@ import re
 import shutil
 import uuid
 import zipfile
+import ipaddress
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +41,7 @@ from backend.app.analyzers import (
 from backend.app.catalog import CATALOG_SOURCE, MASTG_CONTROLS
 from backend.app.core.config import ROOT_DIR, AppSettings, get_settings
 from backend.app.core.events import event_bus
-from backend.app.core.status import CapabilityStatus, Platform
+from backend.app.core.status import CapabilityStatus, Platform, RunMode, RunStatus
 from backend.app.database.models import (
     AIInvocation,
     AppArtifact,
@@ -61,6 +63,8 @@ from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDevi
 from backend.app.evidence.report import EvidenceReportRenderer
 from backend.app.frida import FridaManager
 from backend.app.orchestration import DiagnosticOrchestrator
+from backend.app.orchestration.resources import allocate_available_port
+from backend.app.ai.storage import save_ai_raw_response
 from backend.app.proxy import (
     BurpProxyAdapter,
     FiddlerProxyAdapter,
@@ -156,7 +160,10 @@ def list_projects(db: Session = Depends(get_db)):
 
 @router.post("/projects", response_model=ProjectOut, status_code=201)
 def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
-    project = Project(**payload.model_dump())
+    values = payload.model_dump(mode="json")
+    values["run_mode"] = payload.run_mode.value
+    values["mock_mode"] = payload.run_mode == RunMode.MOCK
+    project = Project(**values)
     db.add(project)
     db.commit()
     db.refresh(project)
@@ -173,8 +180,14 @@ def update_project(
     project_id: str, payload: ProjectUpdate, db: Session = Depends(get_db)
 ):
     project = _project_or_404(db, project_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True, mode="json")
+    requested_mode = changes.get("run_mode")
+    if requested_mode and requested_mode != project.run_mode and (project.apps or project.runs):
+        raise HTTPException(409, "앱 또는 진단 이력이 있는 프로젝트의 실행 모드는 변경할 수 없습니다.")
+    for key, value in changes.items():
         setattr(project, key, value)
+    if requested_mode:
+        project.mock_mode = requested_mode == RunMode.MOCK.value
     db.commit()
     db.refresh(project)
     return project
@@ -185,6 +198,20 @@ def delete_project(
     request: Request, project_id: str, db: Session = Depends(get_db)
 ):
     project = _project_or_404(db, project_id)
+    active = db.scalar(
+        select(DiagnosticRun.id).where(
+            DiagnosticRun.project_id == project_id,
+            DiagnosticRun.status.in_(
+                [
+                    RunStatus.CREATED.value,
+                    RunStatus.RUNNING.value,
+                    RunStatus.PAUSED.value,
+                ]
+            ),
+        ).limit(1)
+    )
+    if active:
+        raise HTTPException(409, "실행 중인 진단을 중지한 뒤 프로젝트를 삭제하세요.")
     settings = _settings(request)
     apps = list(project.apps)
     runs = list(project.runs)
@@ -270,6 +297,7 @@ async def _store_and_analyze(
         version=result.version,
         analysis_status=result.status,
         analysis_result=result.to_dict(),
+        synthetic=project.run_mode == RunMode.MOCK.value,
     )
     db.add(artifact)
     db.flush()
@@ -294,9 +322,12 @@ async def reanalyze_app(
         raise HTTPException(404, "등록된 앱 원본 파일을 찾을 수 없습니다.")
     settings = _settings(request)
     analyzer = StaticAnalyzer(settings)
-    result = await analyzer.analyze(
-        source_path, settings.analysis_dir / source_path.stem
-    )
+    try:
+        result = await analyzer.analyze(
+            source_path, settings.analysis_dir / source_path.stem
+        )
+    except (ValueError, OSError, zipfile.BadZipFile) as exc:
+        raise HTTPException(422, f"앱 재분석 실패: {exc}") from exc
     artifact.sha256 = result.sha256
     artifact.size_bytes = result.file_size
     artifact.platform = result.platform
@@ -349,6 +380,7 @@ def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
                 "raw_sha256": item.raw_sha256,
                 "error": item.error,
                 "metadata": item.metadata_json,
+                "synthetic": item.synthetic,
                 "started_at": item.started_at,
                 "finished_at": item.finished_at,
             }
@@ -366,6 +398,7 @@ def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
                 "location": item.location,
                 "confidence": item.confidence,
                 "references": item.references,
+                "synthetic": item.synthetic,
             }
             for item in raw_findings
         ],
@@ -390,6 +423,7 @@ def _control_to_dict(item: ControlTest) -> dict[str, Any]:
         "replacement_ids": item.replacement_ids,
         "source_url": item.source_url,
         "evidence_ids": item.evidence_ids,
+        "synthetic": item.synthetic,
         "updated_at": item.updated_at,
     }
 
@@ -448,6 +482,7 @@ async def bootstrap_demo(request: Request, db: Session = Depends(get_db)):
         ai_enabled=True,
         external_ai_allowed=False,
         mock_mode=True,
+        run_mode=RunMode.MOCK.value,
     )
     db.add(project)
     db.commit()
@@ -585,6 +620,8 @@ async def device_action(
             username=os.getenv("MSW_IOS_SSH_USER", "root"),
         )
     else:
+        if payload.adapter != "mock":
+            raise HTTPException(422, "지원하지 않는 단말 Adapter입니다.")
         adapter = MockDeviceAdapter()
     if payload.package_name and not PACKAGE_PATTERN.fullmatch(payload.package_name):
         raise HTTPException(422, "패키지명 형식이 올바르지 않습니다.")
@@ -653,6 +690,23 @@ async def create_run(
     request: Request, payload: RunCreate, db: Session = Depends(get_db)
 ):
     project = _project_or_404(db, payload.project_id)
+    allowed_devices = {"mock", "android_adb", "ios_windows"}
+    allowed_proxies = {"mock", "mitmproxy", "burp", "fiddler"}
+    if payload.device_adapter not in allowed_devices:
+        raise HTTPException(422, "지원하지 않는 단말 Adapter입니다.")
+    if payload.proxy_adapter not in allowed_proxies:
+        raise HTTPException(422, "지원하지 않는 프록시 Adapter입니다.")
+    run_mode = RunMode(project.run_mode)
+    if run_mode == RunMode.LIVE and (
+        payload.device_adapter == "mock" or payload.proxy_adapter == "mock"
+    ):
+        raise HTTPException(422, "Live 프로젝트에서는 Mock 단말·프록시를 사용할 수 없습니다.")
+    if run_mode == RunMode.MOCK and (
+        payload.device_adapter != "mock" or payload.proxy_adapter != "mock"
+    ):
+        raise HTTPException(422, "Mock 프로젝트는 Mock 단말과 Mock 프록시만 사용할 수 있습니다.")
+    if payload.device_adapter == "mock" and not payload.device_id.startswith("mock-"):
+        raise HTTPException(422, "Mock Adapter에는 Mock 단말 ID가 필요합니다.")
     if payload.app_id:
         app = _app_or_404(db, payload.app_id)
         if app.project_id != project.id:
@@ -664,12 +718,54 @@ async def create_run(
             "pause_for_login": payload.pause_for_login,
         }
     )
+    active_device_run = db.scalar(
+        select(DiagnosticRun.id).where(
+            DiagnosticRun.device_id == payload.device_id,
+            DiagnosticRun.status.in_(
+                [RunStatus.CREATED.value, RunStatus.RUNNING.value, RunStatus.PAUSED.value]
+            ),
+        ).limit(1)
+    )
+    if active_device_run:
+        raise HTTPException(409, f"선택한 단말은 진단 {active_device_run}에서 사용 중입니다.")
+    if payload.proxy_adapter == "mitmproxy":
+        listen_host = str(options.get("proxy_listen_host") or _settings(request).proxy_listen_host)
+        if listen_host in {"0.0.0.0", "::", "*"}:
+            raise HTTPException(422, "mitmproxy는 특정 Windows LAN IP에만 바인딩해야 합니다.")
+        try:
+            listener_ip = ipaddress.ip_address(listen_host)
+        except ValueError as exc:
+            raise HTTPException(422, "프록시 Listener는 Windows의 특정 IP 주소여야 합니다.") from exc
+        if listener_ip.is_unspecified or listener_ip.is_multicast or listener_ip.is_loopback:
+            raise HTTPException(422, "프록시 Listener에는 단말이 접근 가능한 특정 Windows LAN IP가 필요합니다.")
+        allowed_client = str(options.get("proxy_allowed_client_ip") or "").strip()
+        if not allowed_client:
+            raise HTTPException(422, "mitmproxy에는 진단 단말의 허용 IP가 필요합니다.")
+        try:
+            ipaddress.ip_address(allowed_client)
+        except ValueError as exc:
+            raise HTTPException(422, "프록시 허용 단말 IP 형식이 올바르지 않습니다.") from exc
+        try:
+            proxy_port = int(options.get("proxy_port") or allocate_available_port(listen_host))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(422, f"프록시 Listener를 준비할 수 없습니다: {exc}") from exc
+        if not 1 <= proxy_port <= 65535:
+            raise HTTPException(422, "프록시 포트 범위가 올바르지 않습니다.")
+        options.update(
+            {
+                "proxy_listen_host": listen_host,
+                "proxy_allowed_client_ip": allowed_client,
+                "proxy_port": proxy_port,
+            }
+        )
     run = DiagnosticRun(
         project_id=project.id,
         app_id=payload.app_id,
         device_id=payload.device_id,
         device_adapter=payload.device_adapter,
         proxy_adapter=payload.proxy_adapter,
+        run_mode=run_mode.value,
+        synthetic=run_mode == RunMode.MOCK,
         status="created",
         current_stage="ready",
         progress=0,
@@ -708,7 +804,9 @@ async def stop_run(request: Request, run_id: str, db: Session = Depends(get_db))
     _run_or_404(db, run_id)
     if not await _orchestrator(request).stop(run_id):
         raise HTTPException(409, "실행 중인 진단이 아닙니다.")
-    return {"status": "stopping"}
+    db.expire_all()
+    run = _run_or_404(db, run_id)
+    return {"status": run.status}
 
 
 @router.get("/runs/{run_id}/evidence", response_model=list[EvidenceOut])
@@ -878,7 +976,7 @@ async def create_frida_script(
     manager = FridaManager(_settings(request))
     syntax_status, _ = await manager.check_syntax(payload.content)
     script = FridaScript(
-        **payload.model_dump(),
+        **{**payload.model_dump(), "source": "custom"},
         approval_status="pending_approval",
         syntax_status=syntax_status.value,
     )
@@ -888,19 +986,33 @@ async def create_frida_script(
     return script
 
 
+class FridaApproveRequest(BaseModel):
+    approver: str = Field(default="local_user", min_length=1, max_length=100)
+
+
 @router.post("/frida/scripts/{script_id}/approve", response_model=FridaScriptOut)
 async def approve_frida_script(
-    request: Request, script_id: str, db: Session = Depends(get_db)
+    request: Request,
+    script_id: str,
+    payload: FridaApproveRequest | None = None,
+    db: Session = Depends(get_db),
 ):
     script = db.get(FridaScript, script_id)
     if not script:
         raise HTTPException(404, "Frida 스크립트를 찾을 수 없습니다.")
     status, message = await FridaManager(_settings(request)).check_syntax(script.content)
     script.syntax_status = status.value
-    if status == CapabilityStatus.FAILED:
+    if status != CapabilityStatus.AVAILABLE:
+        script.approval_status = "pending_validation"
+        script.approved_by = None
+        script.approved_at = None
+        script.approved_sha256 = None
         db.commit()
-        raise HTTPException(422, f"구문 검사 실패: {message}")
+        raise HTTPException(422, f"완전한 구문 검사가 필요합니다: {message}")
     script.approval_status = "approved"
+    script.approved_by = (payload or FridaApproveRequest()).approver
+    script.approved_at = datetime.now(timezone.utc)
+    script.approved_sha256 = hashlib.sha256(script.content.encode("utf-8")).hexdigest()
     db.commit()
     db.refresh(script)
     return script
@@ -910,7 +1022,8 @@ class FridaExecuteRequest(BaseModel):
     device_id: str = "mock-android-01"
     target: str = "com.example.demo"
     mode: str = "spawn"
-    mock: bool = True
+    mock: bool = False
+    project_id: str | None = None
 
 
 @router.post("/frida/scripts/{script_id}/execute")
@@ -925,6 +1038,22 @@ async def execute_frida_script(
         raise HTTPException(404, "Frida 스크립트를 찾을 수 없습니다.")
     if script.approval_status != "approved":
         raise HTTPException(409, "승인된 스크립트만 실행할 수 있습니다.")
+    content_sha256 = hashlib.sha256(script.content.encode("utf-8")).hexdigest()
+    if not script.approved_sha256 or script.approved_sha256 != content_sha256:
+        script.approval_status = "pending_approval"
+        script.approved_by = None
+        script.approved_at = None
+        script.approved_sha256 = None
+        db.commit()
+        raise HTTPException(409, "승인 후 스크립트 내용이 변경되어 재승인이 필요합니다.")
+    if script.syntax_status != CapabilityStatus.AVAILABLE.value:
+        raise HTTPException(409, "Node.js 구문 검사를 통과한 스크립트만 실행할 수 있습니다.")
+    if payload.mock:
+        if not payload.project_id:
+            raise HTTPException(422, "Mock 실행에는 Mock 프로젝트 ID가 필요합니다.")
+        project = _project_or_404(db, payload.project_id)
+        if project.run_mode != RunMode.MOCK.value:
+            raise HTTPException(422, "Live 프로젝트에서는 Mock Frida를 실행할 수 없습니다.")
     result = await FridaManager(_settings(request)).execute(
         device_id=payload.device_id,
         target=payload.target,
@@ -933,9 +1062,9 @@ async def execute_frida_script(
         mode=payload.mode,
         mock=payload.mock,
     )
-    if result.status == CapabilityStatus.AVAILABLE:
+    if not payload.mock and result.status == CapabilityStatus.AVAILABLE:
         script.success_count += 1
-    else:
+    elif not payload.mock:
         script.failure_count += 1
     db.commit()
     return result.to_dict()
@@ -964,7 +1093,9 @@ async def generate_frida_script(
     project = _project_or_404(db, payload.project_id)
     if not project.ai_enabled:
         raise HTTPException(409, "이 프로젝트는 AI 사용이 비활성화되어 있습니다.")
-    if not payload.use_mock and not project.mock_mode and not project.external_ai_allowed:
+    if payload.use_mock and project.run_mode != RunMode.MOCK.value:
+        raise HTTPException(422, "Live 프로젝트에서는 Mock AI를 사용할 수 없습니다.")
+    if not payload.use_mock and project.run_mode == RunMode.LIVE.value and not project.external_ai_allowed:
         raise HTTPException(409, "이 프로젝트는 외부 AI 전송이 비활성화되어 있습니다.")
 
     context = {
@@ -978,7 +1109,7 @@ async def generate_frida_script(
         "simulate_nvidia_failure": payload.simulate_nvidia_failure,
     }
     settings = _settings(request)
-    if payload.use_mock or project.mock_mode:
+    if project.run_mode == RunMode.MOCK.value:
         selected = await MockAIProvider().generate_frida_script(
             payload.task, context, masked=True
         )
@@ -994,11 +1125,11 @@ async def generate_frida_script(
 
     for attempt in attempts:
         raw_path = None
-        if attempt.raw_response:
-            raw_path = settings.ai_raw_dir / (
-                f"frida-{project.id}-{uuid.uuid4()}-{attempt.provider}.json"
-            )
-            raw_path.write_text(attempt.raw_response, encoding="utf-8")
+        raw_path = save_ai_raw_response(
+            settings,
+            f"frida-{project.id}-{uuid.uuid4()}-{attempt.provider}.json",
+            attempt.raw_response,
+        )
         db.add(
             AIInvocation(
                 project_id=project.id,
@@ -1014,6 +1145,7 @@ async def generate_frida_script(
                     if attempt.status != CapabilityStatus.AVAILABLE
                     else None
                 ),
+                synthetic=project.run_mode == RunMode.MOCK.value,
             )
         )
 
@@ -1239,6 +1371,14 @@ def read_settings(request: Request):
             "claude_configured": bool(settings.claude_api_key),
             "claude_model": settings.claude_model,
             "mask_external_ai_data": settings.mask_external_ai_data,
+            "store_raw_responses": settings.store_ai_raw_responses,
+            "custom_sensitive_key_count": len(settings.ai_sensitive_keys),
+        },
+        "proxy": {
+            "default_listen_host": settings.proxy_listen_host,
+            "binding_policy": "specific_ip_only",
+            "client_allowlist_required": True,
+            "port_policy": "per_run_dynamic",
         },
         "analysis": {
             "mobsf_configured": bool(
@@ -1247,6 +1387,19 @@ def read_settings(request: Request):
             "mobsf_url": settings.mobsf_url,
             "semgrep_rules_path": str(settings.semgrep_rules_path),
             "catalog": CATALOG_SOURCE,
+            "archive_limits": {
+                "max_entries": settings.archive_max_entries,
+                "max_uncompressed_mb": settings.archive_max_uncompressed_mb,
+                "max_entry_mb": settings.archive_max_entry_mb,
+                "max_entry_ratio": settings.archive_max_entry_ratio,
+                "max_total_ratio": settings.archive_max_total_ratio,
+                "max_nested_count": settings.archive_max_nested_count,
+                "max_nested_mb": settings.archive_max_nested_mb,
+            },
+            "external_tool_limits": {
+                "memory_mb": settings.external_tool_memory_mb,
+                "cpu_seconds": settings.external_tool_cpu_seconds,
+            },
         },
         "tools": tools,
     }

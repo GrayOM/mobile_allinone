@@ -26,6 +26,7 @@ from backend.app.analyzers.adapters import (
     MobSFAnalyzerAdapter,
     SemgrepAnalyzerAdapter,
 )
+from backend.app.analyzers.archive_safety import validate_archive
 from backend.app.analyzers.base import AnalyzerResult, finding_fingerprint
 
 
@@ -166,6 +167,10 @@ class StaticAnalyzer:
 
     async def analyze(self, path: Path, output_dir: Path | None = None) -> StaticAnalysisResult:
         analysis_started = datetime.now(timezone.utc)
+        if not zipfile.is_zipfile(path):
+            raise ValueError("파일이 유효한 ZIP 기반 APK/IPA가 아닙니다.")
+        with zipfile.ZipFile(path) as safety_archive:
+            safety_report = validate_archive(safety_archive, self.settings)
         platform = self.detect_platform(path)
         result = StaticAnalysisResult(
             status="running",
@@ -184,10 +189,7 @@ class StaticAnalyzer:
                 )
             },
         )
-        if not zipfile.is_zipfile(path):
-            result.status = "failed"
-            result.warnings.append("파일이 유효한 ZIP 기반 APK/IPA가 아닙니다.")
-            return result
+        result.structure["archive_safety"] = safety_report.to_dict()
 
         with zipfile.ZipFile(path) as archive:
             self._analyze_structure(archive, result)
@@ -354,6 +356,7 @@ class StaticAnalyzer:
     ) -> None:
         infos = archive.infolist()
         total_uncompressed = sum(info.file_size for info in infos)
+        safety = result.structure.get("archive_safety")
         result.structure = {
             "entry_count": len(infos),
             "compressed_bytes": sum(info.compress_size for info in infos),
@@ -371,14 +374,13 @@ class StaticAnalyzer:
                     if name.startswith("lib/") and len(PurePosixPath(name).parts) > 2
                 }
             ),
+            "archive_safety": safety,
         }
         result.native_libraries = sorted(
             name
             for name in archive.namelist()
             if name.lower().endswith((".so", ".dylib"))
         )
-        if total_uncompressed > 2 * 1024 * 1024 * 1024:
-            result.warnings.append("압축 해제 크기가 2GB를 넘어 도구 기반 디컴파일을 생략할 수 있습니다.")
 
     def _analyze_android_archive(
         self, archive: zipfile.ZipFile, result: StaticAnalysisResult
@@ -653,6 +655,8 @@ class StaticAnalyzer:
             command = await run_command(
                 [apktool, "d", "-f", "-s", str(path), "-o", str(decoded_dir)],
                 timeout=180,
+                memory_limit_mb=self.settings.external_tool_memory_mb,
+                cpu_limit_seconds=self.settings.external_tool_cpu_seconds,
             )
             result.tools["apktool"]["last_status"] = command.status.value
             result.tools["apktool"]["last_command"] = command.display_command
@@ -673,6 +677,8 @@ class StaticAnalyzer:
             command = await run_command(
                 [aapt, "dump", "badging", str(path)],
                 timeout=60,
+                memory_limit_mb=self.settings.external_tool_memory_mb,
+                cpu_limit_seconds=self.settings.external_tool_cpu_seconds,
             )
             result.tools["aapt"]["last_status"] = command.status.value
             if command.ok:
@@ -692,6 +698,8 @@ class StaticAnalyzer:
             command = await run_command(
                 [jadx, "--no-res", "-d", str(jadx_dir), str(path)],
                 timeout=300,
+                memory_limit_mb=self.settings.external_tool_memory_mb,
+                cpu_limit_seconds=self.settings.external_tool_cpu_seconds,
             )
             result.tools["jadx"]["last_status"] = command.status.value
             result.tools["jadx"]["last_command"] = command.display_command

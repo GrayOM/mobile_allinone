@@ -23,6 +23,7 @@ class FridaExecution:
     messages: list[dict[str, Any]] = field(default_factory=list)
     stdout: str = ""
     stderr: str = ""
+    synthetic: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -64,10 +65,10 @@ class FridaManager:
         mock: bool = False,
     ) -> FridaExecution:
         syntax_status, syntax_message = await self.check_syntax(script_content)
-        if syntax_status == CapabilityStatus.FAILED:
+        if syntax_status != CapabilityStatus.AVAILABLE:
             return FridaExecution(
-                CapabilityStatus.FAILED,
-                f"스크립트 구문 오류: {syntax_message}",
+                syntax_status,
+                f"스크립트 구문 검증을 완료할 수 없습니다: {syntax_message}",
                 mode,
                 target,
                 script_name,
@@ -101,6 +102,7 @@ class FridaManager:
                 command=f"mock frida --{mode} {target} --script {script_name}",
                 messages=messages,
                 stdout="\n".join(json.dumps(item, ensure_ascii=False) for item in messages),
+                synthetic=True,
             )
 
         frida = self.settings.resolved_tool("frida")
@@ -151,4 +153,3 @@ class FridaManager:
             stdout=result.stdout,
             stderr=result.stderr,
         )
-

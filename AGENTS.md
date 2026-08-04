@@ -1,7 +1,7 @@
 # Mobile Security Workbench — 세션 인수인계
 
-> 최종 갱신: 2026-07-30  
-> 작업 위치: `/mnt/c/Users/PSM/Desktop/project/mobile_allinone`  
+> 최종 갱신: 2026-08-04
+> 작업 위치: `/mnt/c/Users/PSM/Desktop/project/mobile_allinone`
 > 새 세션에서는 이 파일을 먼저 읽고, 완료된 기능을 처음부터 다시 만들지 않는다.
 
 ## 1. 프로젝트 목적과 절대 원칙
@@ -17,6 +17,8 @@
 - AI 스크립트는 JSON Schema 검증, JavaScript 구문 검사, 사용자 승인을 거친 뒤에만 실행한다.
 - API 키와 비밀정보는 `.env`에서만 읽고 코드·`config.yaml`에 저장하지 않는다.
 - 외부 AI 전송은 프로젝트의 `ai_enabled`, `external_ai_allowed` 정책을 따른다.
+- 프로젝트 실행 모드는 `mock | live`로 분리하며 Live에서 Mock Adapter로 fallback하지 않는다.
+- Mock에서 생성한 앱·실행·증적·패킷·발견항목·AI 결과에는 `synthetic=true`를 영구 보존한다.
 - 기존 사용자 파일과 관련 없는 변경은 건드리지 않는다.
 
 ## 2. 현재 기술 구조
@@ -70,6 +72,16 @@ tests/               단위·API·Mock E2E 테스트
 - 취약점별 HTML 증적 설명서
 - Windows 로컬 웹 실행
 
+### 운영 안전 경계
+
+- 프로젝트 `run_mode`를 `mock | live`로 분리하고 앱·진단 이력이 생긴 뒤 변경을 차단한다.
+- Live 프로젝트는 Mock Device·Proxy·AI를 거부하고, 알 수 없는 Adapter는 422로 종료한다.
+- Mock 결과에는 DB/API/UI 전 구간 `synthetic=true` 또는 `SYNTHETIC MOCK` 표식을 남긴다.
+- 단말별 활성 Run 하나만 허용하고, mitmproxy 포트는 실행마다 동적 할당·임대한다.
+- 중지·실패·서버 종료 시 외부 프로세스 트리를 정리하고, 재시작 시 활성 Run을 `interrupted`로 복구한다.
+- 실행 중인 Run이 있는 프로젝트 삭제는 409로 차단한다.
+- 장시간 외부 작업 전 DB transaction을 commit해 SQLite 잠금을 유지하지 않는다.
+
 ### Android
 
 - ADB 단말 탐색
@@ -122,6 +134,11 @@ tests/               단위·API·Mock E2E 테스트
 - Frida 실패 시 옵션이 켜져 있으면 관련 코드·로그·기존 스크립트만 AI에 전달해 수정 후보를 만든다.
 - 생성 후보는 저장만 하고 절대 자동 실행하지 않는다.
 - Provider, 모델, 상태, 품질과 원문 경로는 `ai_invocations`에 기록한다.
+- Node.js 구문 상태가 `available`인 스크립트만 승인·실행할 수 있다.
+- 승인자·승인 시각·승인 당시 SHA-256을 보존하고 내용이 달라지면 승인을 자동 취소한다.
+- AI 응답은 여러 Finding을 생성하며, 각 Finding은 현재 Run에 속한 증적 ID만 연결한다.
+- 낮은 신뢰도 결과는 `needs_review`로 남기고 AI 원문 저장은 기본 비활성화한다.
+- 외부 AI 입력은 Header/JSON/Query/Cookie/개인정보/고엔트로피 문자열을 구조적으로 마스킹한다.
 
 ### 런타임 OSS Adapter
 
@@ -135,6 +152,14 @@ tests/               단위·API·Mock E2E 테스트
 - 요청·응답, Header/Body, Status와 민감정보 후보를 저장한다.
 - Burp/Fiddler는 현재 수동 연동 Adapter다.
 - POST·PUT·PATCH·DELETE 요청을 자동 재전송하지 않는다.
+- mitmproxy는 특정 Windows LAN IP에만 바인딩하고 진단 단말의 출발지 IP만 addon에서 허용한다.
+- 동적 테스트 종료 후 프록시 Stop·Flush·최종 Drain 순서로 패킷을 저장한다.
+
+### 입력·외부 도구 방어
+
+- APK/IPA는 Entry 수, 전체·개별 비압축 크기, 압축률, 중첩 압축, 경로, 중복, 암호화, symlink를 사전 검사한다.
+- 제한 초과는 warning이 아니라 422 rejected로 종료하며 외부 분석기를 실행하지 않는다.
+- 외부 분석 도구는 프로세스 그룹으로 실행하고 wall time·프로세스 트리 메모리·CPU 시간을 제한한다.
 
 ## 4. 주요 데이터 모델
 
@@ -146,7 +171,7 @@ tests/               단위·API·Mock E2E 테스트
 - `control_tests`: 앱 기준선 및 진단 실행별 MASTG 상태
 - `ai_invocations`: AI Provider·모델·상태·원문 기록
 
-현재는 Alembic을 사용하지 않고 앱 시작 시 `create_all`로 새 테이블을 만든다. 기존 컬럼을 변경해야 하는 작업부터는 명시적인 SQLite migration 전략을 먼저 설계한다.
+현재 Alembic은 사용하지 않는다. 안전 경계 컬럼은 `schema_migrations`와 시작 전 DB 백업을 사용하는 명시적 SQLite migration으로 추가한다. 이후 스키마 변경도 `create_all`만 믿지 말고 같은 방식 또는 Alembic 도입 후 진행한다.
 
 분석 출력 디렉터리는 DB의 artifact ID가 아니라 업로드 파일의 UUID stem을 사용한다.
 
@@ -277,6 +302,8 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 MOBSF_URL=
 MOBSF_API_KEY=
 MSW_MASK_EXTERNAL_AI_DATA=true
+MSW_STORE_AI_RAW_RESPONSES=false
+MSW_PROXY_LISTEN_HOST=127.0.0.1
 ```
 
 실행 파일은 `config.yaml` 또는 설정 화면에서 지정한다. 설정 화면 저장 후 서버 재시작이 필요하다.
@@ -287,7 +314,7 @@ MSW_MASK_EXTERNAL_AI_DATA=true
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          14 passed
+pytest -q                          22 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -300,6 +327,9 @@ npm audit --audit-level=high      0 vulnerabilities
 - AI Mock Frida 후보 생성 후 `pending_approval` 확인
 - 승인 전 실행 요청이 409로 차단되는 것 확인
 - 통제 커버리지 데스크톱·모바일 렌더링과 브라우저 콘솔 오류 0건 확인
+- Live/Mock 혼용 차단, 실행 중 삭제 차단·중지 대기, ZIP 경로·압축률 거부 확인
+- 구조 기반 AI 마스킹과 Finding별 증적 ID 연결 확인
+- 1440×1000·390×844에서 설정 화면과 Mock/Live 진단 경계를 확인하고 브라우저 콘솔 오류 0건 확인
 
 테스트 명령:
 
@@ -350,7 +380,7 @@ npm audit --audit-level=high
 5. 실제 iOS 단말 매트릭스별 검증과 AFC/HouseArrest 확장
 6. 제조사 보안통제용 플러그인형 검증 팩
 7. 장시간 수집 작업의 취소·재연결·스트리밍 제어
-8. SQLite migration과 조직용 인증·감사 로그
+8. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
 
 ## 13. 참고 문서
 

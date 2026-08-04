@@ -86,6 +86,7 @@ def replace_analysis_records(
             },
             started_at=_parse_time(item.get("started_at")) or datetime.now().astimezone(),
             finished_at=_parse_time(item.get("finished_at")),
+            synthetic=artifact.synthetic,
         )
         db.add(row)
         db.flush()
@@ -110,6 +111,7 @@ def replace_analysis_records(
             confidence=item.confidence,
             references=item.references,
             raw_payload=item.raw,
+            synthetic=artifact.synthetic,
         )
         db.add(row)
         db.flush()
@@ -141,6 +143,7 @@ def replace_analysis_records(
                 "MASTG 테스트 상태와 동적 증적을 연결하세요.",
             ],
             source="static:" + "+".join(source_names),
+            synthetic=artifact.synthetic,
         )
         db.add(finding)
         db.flush()
@@ -175,6 +178,7 @@ def replace_analysis_records(
                 replacement_ids=item.get("replacement_ids", []),
                 source_url=item.get("source_url", ""),
                 evidence_ids=[],
+                synthetic=artifact.synthetic,
             )
         )
     db.flush()

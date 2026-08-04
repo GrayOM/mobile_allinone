@@ -66,7 +66,7 @@ export default function FindingsPage() {
               <span className={`severity-label severity-label--${finding.severity}`}>{finding.severity}</span>
               <div>
                 <strong>{finding.title}</strong>
-                <small>{finding.category.replaceAll("_", " ")} · {finding.platform}</small>
+                <small>{finding.category.replaceAll("_", " ")} · {finding.platform}{finding.synthetic ? " · SYNTHETIC" : ""}</small>
               </div>
               <StatusChip value={finding.verdict} />
               <div className="confidence">

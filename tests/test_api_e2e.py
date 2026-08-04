@@ -34,6 +34,8 @@ def test_mock_demo_runs_end_to_end(client):
     assert started.status_code == 201
     run = _wait_for_run(client, started.json()["id"])
     assert run["status"] == "completed", run["error"]
+    assert run["run_mode"] == "mock"
+    assert run["synthetic"] is True
 
     evidence = client.get(f"/api/runs/{run['id']}/evidence").json()
     flows = client.get(f"/api/runs/{run['id']}/flows").json()
@@ -44,13 +46,19 @@ def test_mock_demo_runs_end_to_end(client):
         item["evidence_type"] for item in evidence
     }
     assert len(flows) == 2
+    assert all(item["synthetic"] is True for item in evidence)
+    assert all(item["synthetic"] is True for item in flows)
     assert findings and findings[0]["source"] == "ai:mock"
+    assert findings[0]["synthetic"] is True
+    sources = client.get(f"/api/findings/{findings[0]['id']}/sources").json()
+    assert sources[0]["evidence_ids"]
 
     report = client.post(f"/api/findings/{findings[0]['id']}/report")
     assert report.status_code == 200
     html = client.get(report.json()["url"])
     assert html.status_code == 200
     assert "증적 설명서" in html.text
+    assert "SYNTHETIC MOCK" in html.text
     assert "원본 파일 내려받기" in html.text
 
     deleted = client.delete(f"/api/projects/{demo['project']['id']}")
@@ -60,6 +68,7 @@ def test_mock_demo_runs_end_to_end(client):
 
 
 def test_custom_frida_script_requires_approval(client):
+    demo = client.post("/api/demo/bootstrap").json()
     created = client.post(
         "/api/frida/scripts",
         json={
@@ -87,10 +96,16 @@ def test_custom_frida_script_requires_approval(client):
     assert approved.status_code == 200
     executed = client.post(
         f"/api/frida/scripts/{script['id']}/execute",
-        json={"mock": True},
+        json={"mock": True, "project_id": demo["project"]["id"]},
     )
     assert executed.status_code == 200
     assert executed.json()["status"] == "available"
+    refreshed = next(
+        item
+        for item in client.get("/api/frida/scripts").json()
+        if item["id"] == script["id"]
+    )
+    assert refreshed["success_count"] == script["success_count"]
 
 
 def test_login_pause_and_resume(client):

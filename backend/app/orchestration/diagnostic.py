@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,9 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.ai import AIProviderChain, MockAIProvider
+from backend.app.ai.storage import save_ai_raw_response
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.events import EventBus, event_bus
-from backend.app.core.status import CapabilityStatus, RunStatus
+from backend.app.core.status import CapabilityStatus, RunMode, RunStatus
 from backend.app.database.models import (
     AIInvocation,
     AppArtifact,
@@ -20,6 +22,7 @@ from backend.app.database.models import (
     DiagnosticRun,
     Evidence,
     Finding,
+    FindingSource,
     FridaScript,
     Project,
     ProxyFlow,
@@ -35,6 +38,7 @@ from backend.app.proxy import (
     MockProxyAdapter,
 )
 from backend.app.runtime import DrozerRuntimeAdapter, ObjectionRuntimeAdapter
+from backend.app.orchestration.resources import ResourceLeaseManager
 
 
 class DiagnosticStopped(Exception):
@@ -57,6 +61,7 @@ class DiagnosticOrchestrator:
         self._pause_events: dict[str, asyncio.Event] = {}
         self._stop_requested: set[str] = set()
         self._proxy_adapters: dict[str, Any] = {}
+        self._leases = ResourceLeaseManager()
 
     def launch(self, run_id: str) -> None:
         current = self._tasks.get(run_id)
@@ -101,8 +106,9 @@ class DiagnosticOrchestrator:
         )
         return True
 
-    async def stop(self, run_id: str) -> bool:
-        if run_id not in self._tasks:
+    async def stop(self, run_id: str, *, wait: bool = True) -> bool:
+        task = self._tasks.get(run_id)
+        if not task or task.done():
             return False
         self._stop_requested.add(run_id)
         event = self._pause_events.get(run_id)
@@ -111,7 +117,21 @@ class DiagnosticOrchestrator:
         await self.events.publish(
             run_id, "run_status", {"status": "stopping", "message": "중지를 요청했습니다."}
         )
+        if wait and task is not asyncio.current_task():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=30)
+            except asyncio.TimeoutError:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         return True
+
+    async def shutdown(self) -> None:
+        run_ids = [run_id for run_id, task in self._tasks.items() if not task.done()]
+        if run_ids:
+            await asyncio.gather(
+                *(self.stop(run_id, wait=True) for run_id in run_ids),
+                return_exceptions=True,
+            )
 
     async def _checkpoint(self, run_id: str) -> None:
         if run_id in self._stop_requested:
@@ -146,16 +166,26 @@ class DiagnosticOrchestrator:
             return AndroidDeviceAdapter(self.settings)
         if adapter == "ios_windows":
             return IOSDeviceAdapter(self.settings)
-        return MockDeviceAdapter()
+        if adapter == "mock":
+            return MockDeviceAdapter()
+        raise ValueError(f"지원하지 않는 단말 Adapter입니다: {adapter}")
 
-    def _proxy(self, adapter: str):
+    def _proxy(self, run: DiagnosticRun):
+        adapter = run.proxy_adapter
         if adapter == "mitmproxy":
-            return MitmProxyAdapter(self.settings)
+            return MitmProxyAdapter(
+                self.settings,
+                host=str(run.options.get("proxy_listen_host") or self.settings.proxy_listen_host),
+                port=int(run.options.get("proxy_port") or 8080),
+                allowed_client_ip=str(run.options.get("proxy_allowed_client_ip") or "") or None,
+            )
         if adapter == "fiddler":
             return FiddlerProxyAdapter()
         if adapter == "burp":
             return BurpProxyAdapter()
-        return MockProxyAdapter()
+        if adapter == "mock":
+            return MockProxyAdapter()
+        raise ValueError(f"지원하지 않는 프록시 Adapter입니다: {adapter}")
 
     async def _emit_evidence(self, run_id: str, evidence: Evidence) -> None:
         await self.events.publish(
@@ -223,6 +253,7 @@ class DiagnosticOrchestrator:
                     replacement_ids=item.replacement_ids,
                     source_url=item.source_url,
                     evidence_ids=[],
+                    synthetic=run.synthetic,
                 )
             )
         db.commit()
@@ -272,7 +303,7 @@ class DiagnosticOrchestrator:
                 run.options.get("simulate_nvidia_failure")
             ),
         }
-        if project.mock_mode:
+        if run.run_mode == RunMode.MOCK.value:
             selected = await self.mock_ai.generate_frida_script(
                 "실패한 Frida 스크립트 수정 후보 생성", context, masked=True
             )
@@ -296,11 +327,11 @@ class DiagnosticOrchestrator:
 
         for attempt in attempts:
             raw_path = None
-            if attempt.raw_response:
-                raw_path = self.settings.ai_raw_dir / (
-                    f"{run.id}-{source_script.id}-{attempt.provider}-frida.json"
-                )
-                raw_path.write_text(attempt.raw_response, encoding="utf-8")
+            raw_path = save_ai_raw_response(
+                self.settings,
+                f"{run.id}-{source_script.id}-{attempt.provider}-frida.json",
+                attempt.raw_response,
+            )
             db.add(
                 AIInvocation(
                     project_id=project.id,
@@ -317,6 +348,7 @@ class DiagnosticOrchestrator:
                         if attempt.status != CapabilityStatus.AVAILABLE
                         else None
                     ),
+                    synthetic=run.synthetic,
                 )
             )
         if selected.status != CapabilityStatus.AVAILABLE or not selected.candidate:
@@ -379,6 +411,46 @@ class DiagnosticOrchestrator:
         )
         return generated
 
+    async def _store_proxy_flows(
+        self, db: Session, run: DiagnosticRun, proxy, flows
+    ) -> None:
+        for item in flows:
+            row = ProxyFlow(
+                run_id=run.id,
+                method=item.method,
+                url=item.url,
+                request_headers=item.request_headers,
+                request_body=item.request_body,
+                status_code=item.status_code,
+                response_headers=item.response_headers,
+                response_body=item.response_body,
+                sensitive_candidates=item.sensitive_candidates,
+                source_ip=item.source_ip,
+                synthetic=run.synthetic or item.synthetic,
+                captured_at=item.captured_at,
+            )
+            db.add(row)
+            await self.events.publish(run.id, "proxy_flow", item.to_dict())
+        db.commit()
+        packet_evidence = self.evidence.add_json(
+            db,
+            run_id=run.id,
+            filename="proxy-flows.json",
+            title="HTTP 요청·응답",
+            evidence_type="network_capture",
+            data=[item.to_dict() for item in flows],
+            description="프록시 종료와 파일 Flush 후 수집한 최종 흐름입니다. 상태 변경 요청을 자동 재전송하지 않았습니다.",
+        )
+        await self._emit_evidence(run.id, packet_evidence)
+        self._complete_controls(
+            db,
+            run.id,
+            {"MASTG-TEST-0020", "MASTG-TEST-0022", "MASTG-TEST-0066", "MASTG-TEST-0068"},
+            result="needs_review" if flows else "unknown",
+            summary=f"최종 프록시 흐름 {len(flows)}개를 TLS·인증서 고정 검증 증적으로 연결했습니다.",
+            evidence_ids=[packet_evidence.id],
+        )
+
     async def _capture(
         self, db: Session, run: DiagnosticRun, device, filename: str, title: str, description: str
     ) -> Evidence | None:
@@ -406,6 +478,8 @@ class DiagnosticOrchestrator:
         return evidence
 
     async def _execute(self, run_id: str) -> None:
+        proxy = None
+        lease_acquired = False
         try:
             with SessionLocal() as db:
                 run = db.get(DiagnosticRun, run_id)
@@ -417,8 +491,15 @@ class DiagnosticOrchestrator:
                     raise RuntimeError("프로젝트를 찾을 수 없습니다.")
                 run.started_at = datetime.now(timezone.utc)
                 db.commit()
+                proxy_port = (
+                    int(run.options.get("proxy_port"))
+                    if run.proxy_adapter == "mitmproxy" and run.options.get("proxy_port")
+                    else None
+                )
+                await self._leases.acquire(run.id, run.device_id, proxy_port)
+                lease_acquired = True
                 device = self._device(run.device_adapter)
-                proxy = self._proxy(run.proxy_adapter)
+                proxy = self._proxy(run)
                 self._proxy_adapters[run.id] = proxy
                 self._seed_run_controls(db, run, app)
 
@@ -465,6 +546,12 @@ class DiagnosticOrchestrator:
                 await self.events.publish(
                     run.id, "proxy_status", proxy_capture.to_dict()
                 )
+                if proxy_capture.status in {
+                    CapabilityStatus.NOT_CONFIGURED,
+                    CapabilityStatus.FAILED,
+                    CapabilityStatus.UNSUPPORTED,
+                }:
+                    raise RuntimeError(proxy_capture.message)
 
                 package_name = (
                     app.package_name if app and app.package_name else "com.example.demo"
@@ -537,7 +624,20 @@ class DiagnosticOrchestrator:
                 else:
                     query = query.where(FridaScript.platform == (app.platform if app else "android")).limit(1)
                 scripts = db.scalars(query).all()
+                db.commit()
                 for script in scripts:
+                    content_sha256 = hashlib.sha256(script.content.encode("utf-8")).hexdigest()
+                    if (
+                        script.syntax_status != CapabilityStatus.AVAILABLE.value
+                        or not script.approved_sha256
+                        or script.approved_sha256 != content_sha256
+                    ):
+                        script.approval_status = "pending_approval"
+                        script.approved_by = None
+                        script.approved_at = None
+                        script.approved_sha256 = None
+                        db.commit()
+                        continue
                     execution = await self.frida.execute(
                         device_id=run.device_id,
                         target=package_name,
@@ -546,9 +646,9 @@ class DiagnosticOrchestrator:
                         mode=str(run.options.get("frida_mode", "spawn")),
                         mock=run.device_adapter == "mock",
                     )
-                    if execution.status == CapabilityStatus.AVAILABLE:
+                    if not run.synthetic and execution.status == CapabilityStatus.AVAILABLE:
                         script.success_count += 1
-                    else:
+                    elif not run.synthetic:
                         script.failure_count += 1
                     db.commit()
                     script_evidence = self.evidence.add(
@@ -652,52 +752,7 @@ class DiagnosticOrchestrator:
                     db, run, "network_dynamic", 70, "프록시 패킷과 동적 증적을 수집합니다."
                 )
                 await asyncio.sleep(0.1)
-                flows = await proxy.read_flows(run.id)
-                flow_ids: list[str] = []
-                for item in flows:
-                    row = ProxyFlow(
-                        run_id=run.id,
-                        method=item.method,
-                        url=item.url,
-                        request_headers=item.request_headers,
-                        request_body=item.request_body,
-                        status_code=item.status_code,
-                        response_headers=item.response_headers,
-                        response_body=item.response_body,
-                        sensitive_candidates=item.sensitive_candidates,
-                        captured_at=item.captured_at,
-                    )
-                    db.add(row)
-                    db.flush()
-                    flow_ids.append(row.id)
-                    await self.events.publish(run.id, "proxy_flow", item.to_dict())
-                db.commit()
-                packet_evidence = self.evidence.add_json(
-                    db,
-                    run_id=run.id,
-                    filename="proxy-flows.json",
-                    title="HTTP 요청·응답",
-                    evidence_type="network_capture",
-                    data=[item.to_dict() for item in flows],
-                    description="수집한 흐름의 원문입니다. 상태 변경 요청을 자동 재전송하지 않았습니다.",
-                )
-                await self._emit_evidence(run.id, packet_evidence)
-                self._complete_controls(
-                    db,
-                    run.id,
-                    {
-                        "MASTG-TEST-0020",
-                        "MASTG-TEST-0022",
-                        "MASTG-TEST-0066",
-                        "MASTG-TEST-0068",
-                    },
-                    result="needs_review" if flows else "unknown",
-                    summary=(
-                        f"프록시 흐름 {len(flows)}개를 TLS·인증서 고정 "
-                        "검증 증적으로 연결했습니다."
-                    ),
-                    evidence_ids=[packet_evidence.id],
-                )
+                flows = []
 
                 await self._capture(
                     db,
@@ -721,19 +776,45 @@ class DiagnosticOrchestrator:
                     evidence_ids=[dynamic_evidence.id],
                 )
 
+                stop_proxy = await asyncio.shield(proxy.stop(run.id))
+                await self.events.publish(run.id, "proxy_status", stop_proxy.to_dict())
+                await asyncio.sleep(0.1)
+                flows = await proxy.read_flows(run.id)
+                await self._store_proxy_flows(db, run, proxy, flows)
+
                 await self._stage(db, run, "ai_analysis", 84, "증적 후보를 분류합니다.")
-                evidence_ids = [
-                    item.id
-                    for item in db.scalars(
-                        select(Evidence).where(Evidence.run_id == run.id)
-                    ).all()
+                evidence_rows = db.scalars(
+                    select(Evidence).where(Evidence.run_id == run.id)
+                ).all()
+                evidence_ids = [item.id for item in evidence_rows]
+                evidence_catalog = [
+                    {
+                        "id": item.id,
+                        "type": item.evidence_type,
+                        "title": item.title,
+                        "sequence": item.sequence,
+                    }
+                    for item in evidence_rows
+                ]
+                db.commit()
+                proxy_summaries = [
+                    {
+                        "method": item.method,
+                        "url": item.url,
+                        "status_code": item.status_code,
+                        "request_header_names": sorted(item.request_headers),
+                        "response_header_names": sorted(item.response_headers),
+                        "sensitive_candidates": item.sensitive_candidates,
+                    }
+                    for item in flows[:12]
                 ]
                 ai_context = {
                     "platform": app.platform if app else "android",
                     "static_signals": (app.analysis_result if app else {}).get("signals", {}),
-                    "runtime_log": dynamic_logs.output[-8000:],
-                    "proxy_flows": [item.to_dict() for item in flows[:12]],
+                    "runtime_log": dynamic_logs.output[-2000:],
+                    "proxy_flows": proxy_summaries,
                     "evidence_ids": evidence_ids,
+                    "evidence_catalog": evidence_catalog,
                     "simulate_nvidia_failure": bool(
                         run.options.get("simulate_nvidia_failure")
                     ),
@@ -741,7 +822,7 @@ class DiagnosticOrchestrator:
                 ai_result = None
                 attempts = []
                 if project.ai_enabled:
-                    if project.mock_mode:
+                    if run.run_mode == RunMode.MOCK.value:
                         ai_result = await self.mock_ai.analyze(
                             "모바일 진단 증적 분류", ai_context, masked=True
                         )
@@ -762,10 +843,11 @@ class DiagnosticOrchestrator:
                             },
                         )
                 for attempt in attempts:
-                    raw_path = None
-                    if attempt.raw_response:
-                        raw_path = self.settings.ai_raw_dir / f"{run.id}-{attempt.provider}.txt"
-                        raw_path.write_text(attempt.raw_response, encoding="utf-8")
+                    raw_path = save_ai_raw_response(
+                        self.settings,
+                        f"{run.id}-{attempt.provider}.txt",
+                        attempt.raw_response,
+                    )
                     db.add(
                         AIInvocation(
                             project_id=project.id,
@@ -780,6 +862,7 @@ class DiagnosticOrchestrator:
                             error=attempt.message
                             if attempt.status != CapabilityStatus.AVAILABLE
                             else None,
+                            synthetic=run.synthetic,
                         )
                     )
                     await self.events.publish(
@@ -787,50 +870,79 @@ class DiagnosticOrchestrator:
                     )
                 db.commit()
 
-                finding = None
+                created_findings: list[Finding] = []
                 if ai_result and ai_result.analysis:
-                    analysis = ai_result.analysis
-                    finding = Finding(
-                        project_id=project.id,
-                        run_id=run.id,
-                        title=analysis.title,
-                        category=analysis.category,
-                        platform=analysis.platform,
-                        severity="medium",
-                        location=analysis.location,
-                        verdict=analysis.verdict,
-                        confidence=analysis.confidence,
-                        rationale=analysis.rationale,
-                        reproduction=analysis.reproduction,
-                        false_positive_risk=analysis.false_positive_risk,
-                        additional_checks=analysis.additional_checks,
-                        source=f"ai:{ai_result.provider}",
-                    )
-                    db.add(finding)
+                    valid_evidence = {
+                        item.id: item
+                        for item in db.scalars(
+                            select(Evidence).where(Evidence.run_id == run.id)
+                        ).all()
+                    }
+                    for analysis in ai_result.analysis.findings:
+                        linked_ids = [
+                            evidence_id
+                            for evidence_id in analysis.evidence_ids
+                            if evidence_id in valid_evidence
+                        ]
+                        is_candidate = analysis.confidence < self.settings.ai_min_quality
+                        if is_candidate:
+                            verdict = "needs_review"
+                        else:
+                            verdict = analysis.verdict
+                        finding = Finding(
+                            project_id=project.id,
+                            run_id=run.id,
+                            title=analysis.title,
+                            category=analysis.category,
+                            platform=analysis.platform,
+                            severity=analysis.severity,
+                            location=analysis.location,
+                            verdict=verdict,
+                            confidence=analysis.confidence,
+                            rationale=analysis.rationale,
+                            reproduction=analysis.reproduction,
+                            false_positive_risk=analysis.false_positive_risk,
+                            additional_checks=analysis.additional_checks,
+                            source=(
+                                f"ai_candidate:{ai_result.provider}"
+                                if is_candidate
+                                else f"ai:{ai_result.provider}"
+                            ),
+                            synthetic=run.synthetic,
+                        )
+                        db.add(finding)
+                        db.flush()
+                        fingerprint = hashlib.sha256(
+                            analysis.model_dump_json().encode("utf-8")
+                        ).hexdigest()
+                        db.add(
+                            FindingSource(
+                                finding_id=finding.id,
+                                raw_finding_id=None,
+                                source_tool=f"ai:{ai_result.provider}",
+                                source_rule_id="ai.evidence_analysis",
+                                fingerprint=fingerprint,
+                                evidence_ids=linked_ids,
+                            )
+                        )
+                        created_findings.append(finding)
+                        await self.events.publish(
+                            run.id,
+                            "finding",
+                            {
+                                "id": finding.id,
+                                "title": finding.title,
+                                "severity": finding.severity,
+                                "confidence": finding.confidence,
+                                "verdict": finding.verdict,
+                                "evidence_ids": linked_ids,
+                            },
+                        )
                     db.commit()
-                    db.refresh(finding)
-                    for evidence in db.scalars(
-                        select(Evidence).where(Evidence.run_id == run.id)
-                    ):
-                        evidence.finding_id = finding.id
-                    db.commit()
-                    await self.events.publish(
-                        run.id,
-                        "finding",
-                        {
-                            "id": finding.id,
-                            "title": finding.title,
-                            "severity": finding.severity,
-                            "confidence": finding.confidence,
-                            "verdict": finding.verdict,
-                        },
-                    )
 
                 await self._stage(
                     db, run, "finalize", 96, "증적 인덱스를 검증하고 캡처를 종료합니다."
                 )
-                stop_proxy = await proxy.stop(run.id)
-                await self.events.publish(run.id, "proxy_status", stop_proxy.to_dict())
                 run.status = RunStatus.COMPLETED.value
                 run.current_stage = "completed"
                 run.progress = 100
@@ -843,7 +955,7 @@ class DiagnosticOrchestrator:
                         "status": "completed",
                         "progress": 100,
                         "message": "진단과 증적 연결을 완료했습니다.",
-                        "finding_id": finding.id if finding else None,
+                        "finding_ids": [item.id for item in created_findings],
                     },
                 )
         except DiagnosticStopped:
@@ -857,6 +969,16 @@ class DiagnosticOrchestrator:
             await self.events.publish(
                 run_id, "run_status", {"status": "stopped", "message": "진단을 중지했습니다."}
             )
+        except asyncio.CancelledError:
+            with SessionLocal() as db:
+                run = db.get(DiagnosticRun, run_id)
+                if run:
+                    run.status = RunStatus.INTERRUPTED.value
+                    run.current_stage = "interrupted"
+                    run.error = "진단 Task가 종료되어 안전하게 중단되었습니다."
+                    run.finished_at = datetime.now(timezone.utc)
+                    db.commit()
+            raise
         except Exception as exc:
             with SessionLocal() as db:
                 run = db.get(DiagnosticRun, run_id)
@@ -872,6 +994,14 @@ class DiagnosticOrchestrator:
                 {"status": "failed", "message": f"{type(exc).__name__}: {exc}"},
             )
         finally:
+            if proxy is not None:
+                try:
+                    await asyncio.shield(proxy.stop(run_id))
+                except Exception:
+                    pass
+            if lease_acquired:
+                await self._leases.release(run_id)
             self._stop_requested.discard(run_id)
             self._pause_events.pop(run_id, None)
             self._proxy_adapters.pop(run_id, None)
+            self._tasks.pop(run_id, None)

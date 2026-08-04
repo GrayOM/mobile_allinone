@@ -11,7 +11,11 @@ from fastapi.staticfiles import StaticFiles
 from backend.app.api.router import router
 from backend.app.core.config import get_settings
 from backend.app.database.session import SessionLocal, init_database
-from backend.app.frida.library import seed_builtin_scripts
+from backend.app.database.models import DiagnosticRun
+from backend.app.core.status import RunStatus
+from sqlalchemy import select
+from backend.app.database.base import utcnow
+from backend.app.frida.library import seed_builtin_scripts, validate_builtin_scripts
 from backend.app.orchestration import DiagnosticOrchestrator
 
 
@@ -21,10 +25,31 @@ async def lifespan(app: FastAPI):
     settings.ensure_directories()
     init_database()
     with SessionLocal() as db:
+        interrupted = db.scalars(
+            select(DiagnosticRun).where(
+                DiagnosticRun.status.in_(
+                    [
+                        RunStatus.CREATED.value,
+                        RunStatus.RUNNING.value,
+                        RunStatus.PAUSED.value,
+                    ]
+                )
+            )
+        ).all()
+        for run in interrupted:
+            run.status = RunStatus.INTERRUPTED.value
+            run.current_stage = "interrupted"
+            run.error = "서버 재시작으로 이전 진단을 중단 상태로 복구했습니다."
+            run.finished_at = utcnow()
+        db.commit()
         seed_builtin_scripts(db)
+        await validate_builtin_scripts(db, settings)
     app.state.settings = settings
     app.state.orchestrator = DiagnosticOrchestrator(settings)
-    yield
+    try:
+        yield
+    finally:
+        await app.state.orchestrator.shutdown()
 
 
 def create_app() -> FastAPI:

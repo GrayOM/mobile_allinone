@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
@@ -85,9 +87,34 @@ def seed_builtin_scripts(db: Session) -> None:
                 risk=metadata.risk,
                 content=path.read_text(encoding="utf-8"),
                 source="builtin",
-                approval_status="approved",
+                approval_status="pending_validation",
                 syntax_status="unchecked",
             )
         )
     db.commit()
 
+
+async def validate_builtin_scripts(db: Session, settings) -> None:
+    from backend.app.core.status import CapabilityStatus
+    from backend.app.frida.manager import FridaManager
+
+    scripts = db.scalars(
+        select(FridaScript).where(FridaScript.source == "builtin")
+    ).all()
+    manager = FridaManager(settings)
+    for script in scripts:
+        status, _ = await manager.check_syntax(script.content)
+        script.syntax_status = status.value
+        if status == CapabilityStatus.AVAILABLE:
+            script.approval_status = "approved"
+            script.approved_by = "builtin_release_validation"
+            script.approved_at = datetime.now(timezone.utc)
+            script.approved_sha256 = hashlib.sha256(
+                script.content.encode("utf-8")
+            ).hexdigest()
+        else:
+            script.approval_status = "pending_validation"
+            script.approved_by = None
+            script.approved_at = None
+            script.approved_sha256 = None
+    db.commit()

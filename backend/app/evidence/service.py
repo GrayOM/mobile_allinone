@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import AppSettings, get_settings
-from backend.app.database.models import Evidence
+from backend.app.database.models import DiagnosticRun, Evidence
 
 
 class EvidenceService:
@@ -41,6 +41,7 @@ class EvidenceService:
         mime_type: str | None = None,
         command: str | None = None,
         inline_data: dict[str, Any] | list[Any] | None = None,
+        synthetic: bool | None = None,
     ) -> Evidence:
         path = Path(file_path) if file_path else None
         sha256 = None
@@ -51,6 +52,9 @@ class EvidenceService:
                     digest.update(chunk)
             sha256 = digest.hexdigest()
             mime_type = mime_type or mimetypes.guess_type(path.name)[0]
+        if synthetic is None:
+            run = db.get(DiagnosticRun, run_id)
+            synthetic = bool(run.synthetic) if run else False
         evidence = Evidence(
             run_id=run_id,
             finding_id=finding_id,
@@ -63,6 +67,7 @@ class EvidenceService:
             command=command,
             inline_data=inline_data,
             sha256=sha256,
+            synthetic=synthetic,
         )
         db.add(evidence)
         db.commit()
@@ -103,4 +108,3 @@ def _json_size(value: Any) -> int:
         return len(json.dumps(value, ensure_ascii=False, default=str))
     except (TypeError, ValueError):
         return 999_999
-

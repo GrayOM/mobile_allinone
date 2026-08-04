@@ -1,10 +1,17 @@
 host: 127.0.0.1
 port: 8765
-default_mock_mode: true
+default_mock_mode: false
 auto_open_browser: true
 max_upload_mb: 512
 command_timeout_seconds: 30
 mask_external_ai_data: true
+store_ai_raw_responses: false
+proxy_listen_host: 127.0.0.1
+archive_max_uncompressed_mb: 1024
+archive_max_entry_mb: 256
+archive_max_nested_mb: 50
+external_tool_memory_mb: 2048
+external_tool_cpu_seconds: 300
 # MobSF API 키는 config.yaml이 아니라 .env의 MOBSF_API_KEY에 둡니다.
 # mobsf_url: http://127.0.0.1:8000
 semgrep_rules_path: rules/semgrep

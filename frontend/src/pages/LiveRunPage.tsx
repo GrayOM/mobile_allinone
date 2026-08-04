@@ -97,7 +97,7 @@ export default function LiveRunPage() {
         <div>
           <div className="live-header__line">
             <span className={`connection-led ${connected ? "connection-led--on" : ""}`} />
-            {connected ? "실시간 채널 연결" : "재연결 대기"} · RUN {run.id.slice(0, 8)}
+            {connected ? "실시간 채널 연결" : "재연결 대기"} · {run.synthetic ? "SYNTHETIC MOCK" : "LIVE"} · RUN {run.id.slice(0, 8)}
           </div>
           <h2>{stageLabels[run.current_stage] ?? run.current_stage}</h2>
         </div>
@@ -189,6 +189,14 @@ export default function LiveRunPage() {
 
         <section className="console-panel packet-console">
           <div className="console-head"><span>PROXY TRAFFIC</span><small>{flows.length} flows</small></div>
+          {run.proxy_adapter === "mitmproxy" && (
+            <div className="proxy-boundary">
+              <span>LISTENER</span>
+              <strong>{String(run.options.proxy_listen_host ?? "—")}:{String(run.options.proxy_port ?? "dynamic")}</strong>
+              <span>ALLOWED DEVICE</span>
+              <strong>{String(run.options.proxy_allowed_client_ip ?? "—")}</strong>
+            </div>
+          )}
           <div className="packet-list">
             {flows.length ? flows.map((flow) => (
               <details className="packet-row" key={flow.id}>
@@ -201,6 +209,7 @@ export default function LiveRunPage() {
                 <pre>{JSON.stringify({
                   request: { headers: flow.request_headers, body: flow.request_body },
                   response: { status: flow.status_code, headers: flow.response_headers, body: flow.response_body },
+                  source_ip: flow.source_ip,
                   sensitive_candidates: flow.sensitive_candidates,
                 }, null, 2)}</pre>
               </details>

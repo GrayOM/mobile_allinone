@@ -18,6 +18,9 @@ def test_analysis_provenance_and_control_ledger_api(client):
     assert any(item["tool_name"] == "native_static" for item in payload["tool_runs"])
     assert payload["raw_findings"]
     assert payload["controls"]
+    assert all(item["synthetic"] is True for item in payload["tool_runs"])
+    assert all(item["synthetic"] is True for item in payload["raw_findings"])
+    assert all(item["synthetic"] is True for item in payload["controls"])
     assert all(item["mastg_id"].startswith("MASTG-TEST-") for item in payload["controls"])
 
     coverage = client.get(f"/api/coverage?app_id={app_id}").json()

@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, post } from "../api";
-import type { FridaScript } from "../types";
+import type { FridaScript, Project } from "../types";
 import { EmptyState, SectionHeading, StatusChip } from "../components/UI";
 
 export default function ScriptsPage() {
@@ -12,6 +12,7 @@ export default function ScriptsPage() {
   const [generating, setGenerating] = useState(false);
   const [showGenerator, setShowGenerator] = useState(false);
   const [error, setError] = useState("");
+  const [project, setProject] = useState<Project | null>(null);
 
   function load() {
     void api<FridaScript[]>("/frida/scripts").then((items) => {
@@ -20,6 +21,10 @@ export default function ScriptsPage() {
     });
   }
   useEffect(load, []);
+  useEffect(() => {
+    const projectId = localStorage.getItem("msw.project");
+    if (projectId) void api<Project>(`/projects/${projectId}`).then(setProject);
+  }, []);
 
   const filtered = scripts.filter((item) => item.platform === platform);
   const selected = scripts.find((item) => item.id === selectedId) ?? filtered[0];
@@ -30,6 +35,10 @@ export default function ScriptsPage() {
 
   async function execute() {
     if (!selected) return;
+    if (!project || project.run_mode !== "mock") {
+      setError("Mock Frida 실행은 Mock 프로젝트에서만 허용됩니다. Live 단말 실행은 진단 설정에서 진행하세요.");
+      return;
+    }
     setRunning(true);
     try {
       const value = await post<Record<string, unknown>>(`/frida/scripts/${selected.id}/execute`, {
@@ -37,6 +46,7 @@ export default function ScriptsPage() {
         target: "com.example.demo",
         mode: "spawn",
         mock: true,
+        project_id: project.id,
       });
       setResult(value);
       load();
@@ -139,7 +149,7 @@ export default function ScriptsPage() {
               <textarea id="candidate-log" name="runtime_log" rows={5} placeholder="실패 직전 Frida·단말 로그만 입력" />
             </div>
             <label className="check-card">
-              <input type="checkbox" name="use_mock" defaultChecked />
+              <input type="checkbox" name="use_mock" defaultChecked={project?.run_mode === "mock"} disabled={project?.run_mode !== "mock"} />
               <span><strong>Mock Provider</strong><small>외부 전송 없이 승인 흐름을 시험합니다.</small></span>
             </label>
             <label className="check-card">
@@ -196,15 +206,15 @@ export default function ScriptsPage() {
               </div>
               <pre className="code-view code-view--tall">{selected.content}</pre>
               <div className="form-actions">
-                <button className="button button--signal" onClick={() => void execute()} disabled={running || selected.approval_status !== "approved"}>
+                <button className="button button--signal" onClick={() => void execute()} disabled={running || selected.approval_status !== "approved" || selected.syntax_status !== "available" || project?.run_mode !== "mock"}>
                   {running ? "Mock 실행 중…" : "Mock 단말에서 실행"}
                 </button>
                 {selected.approval_status !== "approved" && (
-                  <button className="button button--primary" onClick={() => void approve()}>
+                  <button className="button button--primary" onClick={() => void approve()} disabled={selected.syntax_status !== "available"}>
                     구문 재검사 후 승인
                   </button>
                 )}
-                {selected.approval_status !== "approved" && <small>승인된 스크립트만 실행할 수 있습니다.</small>}
+                {selected.approval_status !== "approved" && <small>Node.js 구문 검사를 통과한 스크립트만 승인할 수 있습니다.</small>}
               </div>
               {result && <pre className="code-view">{JSON.stringify(result, null, 2)}</pre>}
             </>

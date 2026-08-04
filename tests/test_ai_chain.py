@@ -8,7 +8,7 @@ from backend.app.ai.base import AIProvider, AIProviderResult
 from backend.app.ai.chain import AIProviderChain
 from backend.app.core.config import AppSettings
 from backend.app.core.status import CapabilityStatus
-from backend.app.schemas import AIAnalysis
+from backend.app.schemas import AIAnalysis, AIFindingCandidate
 
 
 class FailingNvidia(AIProvider):
@@ -35,17 +35,22 @@ class SuccessfulClaude(AIProvider):
         self, task: str, context: dict[str, Any], *, masked: bool = True
     ) -> AIProviderResult:
         analysis = AIAnalysis(
-            title="Fallback result",
-            category="test",
-            platform="android",
-            location="test",
-            verdict="needs_review",
-            confidence=0.9,
-            rationale="validated fallback",
-            reproduction=["one"],
-            evidence_ids=[],
-            false_positive_risk="none",
-            additional_checks=[],
+            findings=[
+                AIFindingCandidate(
+                    title="Fallback result",
+                    category="test",
+                    platform="android",
+                    severity="medium",
+                    location="test",
+                    verdict="needs_review",
+                    confidence=0.9,
+                    rationale="validated fallback",
+                    reproduction=["one"],
+                    evidence_ids=[],
+                    false_positive_risk="none",
+                    additional_checks=[],
+                )
+            ]
         )
         return AIProviderResult(
             CapabilityStatus.AVAILABLE,
@@ -71,4 +76,3 @@ async def test_nvidia_failure_falls_back_to_claude():
     assert selected.provider == "claude"
     assert selected.status == CapabilityStatus.AVAILABLE
     assert selected.fallback_reason == "rate_limit"
-

@@ -22,7 +22,9 @@ class Project(Base, TimestampMixin):
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     ai_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     external_ai_allowed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    mock_mode: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # mock_mode is kept for API/database compatibility. run_mode is authoritative.
+    mock_mode: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    run_mode: Mapped[str] = mapped_column(String(16), default="live", nullable=False)
 
     apps: Mapped[list["AppArtifact"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
@@ -50,6 +52,7 @@ class AppArtifact(Base, TimestampMixin):
     version: Mapped[str | None] = mapped_column(String(100))
     analysis_status: Mapped[str] = mapped_column(String(32), default="pending")
     analysis_result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     project: Mapped["Project"] = relationship(back_populates="apps")
     runs: Mapped[list["DiagnosticRun"]] = relationship(back_populates="app")
@@ -73,6 +76,8 @@ class DiagnosticRun(Base, TimestampMixin):
     device_id: Mapped[str] = mapped_column(String(255), nullable=False)
     device_adapter: Mapped[str] = mapped_column(String(50), default="mock")
     proxy_adapter: Mapped[str] = mapped_column(String(50), default="mock")
+    run_mode: Mapped[str] = mapped_column(String(16), default="live", nullable=False)
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="created", index=True)
     current_stage: Mapped[str] = mapped_column(String(100), default="ready")
     progress: Mapped[int] = mapped_column(Integer, default=0)
@@ -112,6 +117,7 @@ class Finding(Base, TimestampMixin):
     false_positive_risk: Mapped[str] = mapped_column(Text, default="")
     additional_checks: Mapped[list[str]] = mapped_column(JSON, default=list)
     source: Mapped[str] = mapped_column(String(50), default="static")
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     project: Mapped["Project"] = relationship(back_populates="findings")
     run: Mapped["DiagnosticRun | None"] = relationship(back_populates="findings")
@@ -136,6 +142,7 @@ class Evidence(Base):
     command: Mapped[str | None] = mapped_column(Text)
     inline_data: Mapped[dict[str, Any] | list[Any] | None] = mapped_column(JSON)
     sha256: Mapped[str | None] = mapped_column(String(64))
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     captured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
     )
@@ -156,10 +163,13 @@ class FridaScript(Base, TimestampMixin):
     risk: Mapped[str] = mapped_column(String(20), default="medium")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(String(30), default="builtin")
-    approval_status: Mapped[str] = mapped_column(String(30), default="approved")
+    approval_status: Mapped[str] = mapped_column(String(30), default="pending_approval")
     syntax_status: Mapped[str] = mapped_column(String(30), default="unchecked")
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    approved_by: Mapped[str | None] = mapped_column(String(100))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_sha256: Mapped[str | None] = mapped_column(String(64))
 
 
 class ProxyFlow(Base):
@@ -175,6 +185,8 @@ class ProxyFlow(Base):
     response_headers: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     response_body: Mapped[str] = mapped_column(Text, default="")
     sensitive_candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    source_ip: Mapped[str | None] = mapped_column(String(64))
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     captured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
     )
@@ -196,6 +208,7 @@ class AIInvocation(Base):
     quality_score: Mapped[float | None] = mapped_column(Float)
     raw_response_path: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
@@ -229,6 +242,7 @@ class ToolRun(Base):
     raw_sha256: Mapped[str | None] = mapped_column(String(64))
     error: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
@@ -254,6 +268,7 @@ class RawFinding(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     references: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
@@ -301,5 +316,6 @@ class ControlTest(Base, TimestampMixin):
     replacement_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     source_url: Mapped[str] = mapped_column(Text, default="")
     evidence_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     app: Mapped["AppArtifact"] = relationship(back_populates="control_tests")

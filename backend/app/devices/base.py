@@ -23,6 +23,7 @@ class DeviceInfo:
     capabilities: list[str] = field(default_factory=list)
     adapter: str = ""
     details: dict[str, Any] = field(default_factory=dict)
+    synthetic: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -41,6 +42,7 @@ class DeviceOperation:
     output: str = ""
     file_path: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
+    synthetic: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -110,4 +112,3 @@ class DeviceAdapter(ABC):
         self, device_id: str, local_port: int, remote_port: int
     ) -> DeviceOperation:
         raise NotImplementedError
-

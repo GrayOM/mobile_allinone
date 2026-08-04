@@ -20,6 +20,8 @@ class ProxyFlowData:
     response_body: str = ""
     captured_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     sensitive_candidates: list[dict[str, Any]] = field(default_factory=list)
+    source_ip: str | None = None
+    synthetic: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -36,6 +38,8 @@ class ProxyCapture:
     capture_file: str | None = None
     process_id: int | None = None
     instructions: list[str] = field(default_factory=list)
+    allowed_client_ip: str | None = None
+    synthetic: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -65,4 +69,3 @@ class ProxyAdapter(ABC):
     @abstractmethod
     async def export(self, run_id: str, destination: Path) -> ProxyCapture:
         raise NotImplementedError
-

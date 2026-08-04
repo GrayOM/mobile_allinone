@@ -2269,6 +2269,30 @@ a:hover {
   padding: 9px;
 }
 
+.proxy-boundary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px 9px;
+  padding: 8px 13px;
+  color: var(--slate-600);
+  background: var(--teal-50);
+  border-bottom: 1px solid var(--line);
+  font: 8px "Cascadia Mono", monospace;
+}
+
+.proxy-boundary span {
+  color: var(--teal-700);
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.proxy-boundary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-800);
+}
+
 .packet-row {
   border-bottom: 1px solid var(--line);
 }
@@ -3819,6 +3843,10 @@ a:hover {
   .live-grid {
     display: flex;
     flex-direction: column;
+  }
+
+  .proxy-boundary {
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
   .phone-stage {

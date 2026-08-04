@@ -53,6 +53,27 @@ components return `manual_required` until the API request includes explicit
 approval. AI-generated Frida code is always stored as `pending_approval`; it is
 never executed in the generation request or automatic repair step.
 
+Every runtime command is bound to the selected device. pymobiledevice3 receives
+the selected UDID, iOS Frida uses `-D <device-id>`, and drozer gets a per-run ADB
+forward to the selected Android device instead of sharing its default port.
+
+## Live execution safety boundary
+
+Projects have an immutable-after-use `mock` or `live` run mode. Live runs reject
+Mock device, proxy and AI adapters; unknown adapter names return an error instead
+of falling back to Mock. Synthetic apps, runs, findings, evidence, flows, tool
+results and AI invocations carry a persistent marker.
+
+mitmproxy binds to a user-selected Windows LAN IP, uses a dynamically allocated
+port and requires an allowed client IP. The addon rejects other source addresses.
+The orchestrator stops the complete proxy process tree on completion, stop,
+failure and server shutdown, then drains the final JSONL capture.
+
+APK/IPA input is rejected before external tools run when archive entry, expanded
+size, compression-ratio, nested archive, duplicate-name, traversal, encryption or
+symlink limits are exceeded. Optional analyzer subprocesses run in their own
+process group with wall-time, process-tree memory and CPU-time limits.
+
 ## Windows installation
 
 The base installer includes Androguard because it is the default in-process APK

@@ -115,12 +115,17 @@ class MockDeviceAdapter(DeviceAdapter):
                 ],
                 adapter=self.name,
                 details={"demo": True, "safe": True},
+                synthetic=True,
             )
         ]
 
+    @staticmethod
+    def _result(*args, **kwargs) -> DeviceOperation:
+        return DeviceOperation(*args, **kwargs, synthetic=True)
+
     async def list_packages(self, device_id: str) -> DeviceOperation:
         await self._delay()
-        return DeviceOperation(
+        return self._result(
             CapabilityStatus.AVAILABLE,
             "Mock 앱 목록을 조회했습니다.",
             data={"packages": ["com.example.demo", "com.example.securebank"]},
@@ -128,7 +133,7 @@ class MockDeviceAdapter(DeviceAdapter):
 
     async def install_app(self, device_id: str, app_path: Path) -> DeviceOperation:
         await self._delay()
-        return DeviceOperation(
+        return self._result(
             CapabilityStatus.AVAILABLE,
             f"Mock 단말에 {app_path.name} 설치를 모의했습니다.",
             command=f"mock install {app_path.name}",
@@ -136,12 +141,12 @@ class MockDeviceAdapter(DeviceAdapter):
 
     async def uninstall_app(self, device_id: str, package_name: str) -> DeviceOperation:
         await self._delay()
-        return DeviceOperation(CapabilityStatus.AVAILABLE, "Mock 앱을 삭제했습니다.")
+        return self._result(CapabilityStatus.AVAILABLE, "Mock 앱을 삭제했습니다.")
 
     async def start_app(self, device_id: str, package_name: str) -> DeviceOperation:
         await self._delay()
         self.started_packages.add(package_name)
-        return DeviceOperation(
+        return self._result(
             CapabilityStatus.AVAILABLE,
             "Mock 앱을 실행했습니다.",
             command=f"mock launch {package_name}",
@@ -151,13 +156,13 @@ class MockDeviceAdapter(DeviceAdapter):
     async def stop_app(self, device_id: str, package_name: str) -> DeviceOperation:
         await self._delay()
         self.started_packages.discard(package_name)
-        return DeviceOperation(CapabilityStatus.AVAILABLE, "Mock 앱을 종료했습니다.")
+        return self._result(CapabilityStatus.AVAILABLE, "Mock 앱을 종료했습니다.")
 
     async def screenshot(self, device_id: str, destination: Path) -> DeviceOperation:
         await self._delay()
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(MOCK_SCREEN_PNG)
-        return DeviceOperation(
+        return self._result(
             CapabilityStatus.AVAILABLE,
             "Mock 화면을 캡처했습니다.",
             command="mock screencap",
@@ -170,7 +175,7 @@ class MockDeviceAdapter(DeviceAdapter):
         await self._delay()
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"MOCK_MP4_EVIDENCE")
-        return DeviceOperation(
+        return self._result(
             CapabilityStatus.AVAILABLE,
             "Mock 화면 녹화를 생성했습니다.",
             file_path=str(destination),
@@ -187,7 +192,7 @@ class MockDeviceAdapter(DeviceAdapter):
             "07-30 10:00:02.120 I NetworkClient: POST https://api.demo.invalid/session\n"
         )
         destination.write_text(log, encoding="utf-8")
-        return DeviceOperation(
+        return self._result(
             CapabilityStatus.AVAILABLE,
             "Mock Logcat을 수집했습니다.",
             command="mock logcat",
@@ -204,7 +209,7 @@ class MockDeviceAdapter(DeviceAdapter):
             json.dumps({"source": remote_path, "mock": True}, ensure_ascii=False),
             encoding="utf-8",
         )
-        return DeviceOperation(
+        return self._result(
             CapabilityStatus.AVAILABLE,
             "Mock 파일을 수집했습니다.",
             file_path=str(destination),
@@ -213,14 +218,14 @@ class MockDeviceAdapter(DeviceAdapter):
     async def process_info(self, device_id: str, package_name: str) -> DeviceOperation:
         await self._delay()
         running = package_name in self.started_packages
-        return DeviceOperation(
+        return self._result(
             CapabilityStatus.AVAILABLE,
             "Mock 프로세스 정보를 확인했습니다.",
             data={"pids": ["4242"] if running else [], "running": running},
         )
 
     async def frida_status(self, device_id: str) -> DeviceOperation:
-        return DeviceOperation(
+        return self._result(
             CapabilityStatus.AVAILABLE,
             "Mock Frida Server가 연결되었습니다.",
             data={"version": "mock-16.x"},
@@ -230,7 +235,7 @@ class MockDeviceAdapter(DeviceAdapter):
         self, device_id: str, local_port: int, remote_port: int
     ) -> DeviceOperation:
         await self._delay()
-        return DeviceOperation(
+        return self._result(
             CapabilityStatus.AVAILABLE,
             f"Mock 포트 포워딩 {local_port} → {remote_port}을 설정했습니다.",
         )

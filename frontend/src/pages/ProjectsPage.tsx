@@ -77,7 +77,7 @@ export default function ProjectsPage() {
         description: data.get("description"),
         ai_enabled: data.get("ai_enabled") === "on",
         external_ai_allowed: data.get("external_ai_allowed") === "on",
-        mock_mode: data.get("mock_mode") === "on",
+        run_mode: data.get("run_mode"),
       });
       setProjects((items) => [created, ...items]);
       selectProject(created.id);
@@ -183,10 +183,14 @@ export default function ProjectsPage() {
               <input type="checkbox" name="external_ai_allowed" />
               <span><strong>외부 AI 전송 허용</strong><small>마스킹 후 NVIDIA·Claude로 전송합니다.</small></span>
             </label>
-            <label className="check-card">
-              <input type="checkbox" name="mock_mode" defaultChecked />
-              <span><strong>Mock 모드</strong><small>외부 단말 없이 전체 흐름을 실행합니다.</small></span>
-            </label>
+            <div className="field">
+              <label htmlFor="project-run-mode">실행 모드</label>
+              <select id="project-run-mode" name="run_mode" defaultValue="live">
+                <option value="live">Live · 실제 단말과 실제 결과</option>
+                <option value="mock">Mock · 합성 데이터 데모</option>
+              </select>
+              <small>앱이나 진단 이력이 생기면 실행 모드는 변경할 수 없습니다.</small>
+            </div>
             <div className="form-actions field--wide">
               <button type="button" className="button button--quiet" onClick={() => setShowCreate(false)}>취소</button>
               <button className="button button--primary" disabled={creating}>{creating ? "생성 중…" : "프로젝트 저장"}</button>
@@ -206,7 +210,7 @@ export default function ProjectsPage() {
             >
               <strong>{item.name}</strong>
               <small>{formatDate(item.updated_at)}</small>
-              <span>{item.mock_mode ? "MOCK" : "LIVE"}</span>
+              <span>{item.run_mode.toUpperCase()}</span>
             </button>
           )) : (
             <EmptyState title="프로젝트가 없습니다" description="첫 진단 범위를 만들어 시작하세요." />
@@ -223,7 +227,7 @@ export default function ProjectsPage() {
                   <p>{project.description || "프로젝트 설명이 없습니다."}</p>
                 </div>
                 <div className="chip-row">
-                  <StatusChip value={project.mock_mode ? "available" : "manual_required"} label={project.mock_mode ? "Mock mode" : "Live mode"} />
+                  <StatusChip value={project.run_mode === "mock" ? "manual_required" : "available"} label={project.run_mode === "mock" ? "Mock · 합성 데이터" : "Live · 실제 결과"} />
                   <StatusChip value={project.external_ai_allowed ? "available" : "not_configured"} label={project.external_ai_allowed ? "외부 AI 허용" : "외부 AI 차단"} />
                   <button className="button button--danger button--small" onClick={() => void deleteCurrentProject()}>프로젝트 삭제</button>
                 </div>

@@ -28,6 +28,12 @@ class RunStatus(StringEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     STOPPED = "stopped"
+    INTERRUPTED = "interrupted"
+
+
+class RunMode(StringEnum):
+    MOCK = "mock"
+    LIVE = "live"
 
 
 class FindingVerdict(StringEnum):

@@ -10,12 +10,30 @@ interface SettingsData {
     claude_configured: boolean;
     claude_model: string;
     mask_external_ai_data: boolean;
+    store_raw_responses: boolean;
+    custom_sensitive_key_count: number;
+  };
+  proxy: {
+    default_listen_host: string;
+    binding_policy: string;
+    client_allowlist_required: boolean;
+    port_policy: string;
   };
   analysis: {
     mobsf_configured: boolean;
     mobsf_url: string | null;
     semgrep_rules_path: string;
     catalog: Record<string, unknown>;
+    archive_limits: {
+      max_entries: number;
+      max_uncompressed_mb: number;
+      max_entry_mb: number;
+      max_entry_ratio: number;
+      max_total_ratio: number;
+      max_nested_count: number;
+      max_nested_mb: number;
+    };
+    external_tool_limits: { memory_mb: number; cpu_seconds: number };
   };
   tools: Array<{
     name: string;
@@ -96,6 +114,8 @@ export default function SettingsPage() {
           <div><dt>데이터 저장소</dt><dd><code>{settings.server.data_dir}</code></dd></div>
           <div><dt>업로드 제한</dt><dd>{settings.server.max_upload_mb} MB</dd></div>
           <div><dt>외부 노출</dt><dd><StatusChip value="available" label="Loopback 기본값" /></dd></div>
+          <div><dt>프록시 바인딩</dt><dd><code>{settings.proxy.default_listen_host}</code> · 단말 IP 허용목록 필수</dd></div>
+          <div><dt>프록시 포트</dt><dd>진단마다 동적 할당</dd></div>
         </dl>
       </section>
 
@@ -122,6 +142,8 @@ export default function SettingsPage() {
           <div><dt>MobSF REST</dt><dd><StatusChip value={settings.analysis.mobsf_configured ? "available" : "not_configured"} label={settings.analysis.mobsf_url || "URL/API key 필요"} /></dd></div>
           <div><dt>통제 카탈로그</dt><dd>{String(settings.analysis.catalog.name ?? "OWASP MASTG")}</dd></div>
           <div><dt>통합 정책</dt><dd>도구 원문·버전·해시 보존 / 실패 상태 명시</dd></div>
+          <div><dt>압축 해제 상한</dt><dd>{settings.analysis.archive_limits.max_uncompressed_mb} MB · {settings.analysis.archive_limits.max_entries.toLocaleString()} entries</dd></div>
+          <div><dt>외부 도구 제한</dt><dd>메모리 {settings.analysis.external_tool_limits.memory_mb} MB · CPU {settings.analysis.external_tool_limits.cpu_seconds}초</dd></div>
         </dl>
       </section>
 
@@ -172,6 +194,10 @@ export default function SettingsPage() {
           <article className="provider-card">
             <div><strong>전송 마스킹</strong><StatusChip value={settings.ai.mask_external_ai_data ? "available" : "manual_required"} /></div>
             <p>토큰, 쿠키, 이메일, 전화번호와 실제 도메인 후보를 전송 전에 치환합니다.</p>
+          </article>
+          <article className="provider-card">
+            <div><strong>AI 원문 저장</strong><StatusChip value={settings.ai.store_raw_responses ? "manual_required" : "available"} label={settings.ai.store_raw_responses ? "명시적 활성화" : "기본 비활성화"} /></div>
+            <p>사용자 정의 민감 키 {settings.ai.custom_sensitive_key_count}개 · 저장 시에도 마스킹합니다.</p>
           </article>
         </div>
         <div className="button-row">

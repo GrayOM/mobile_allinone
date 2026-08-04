@@ -9,7 +9,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import ROOT_DIR, AppSettings, get_settings
-from backend.app.database.models import DiagnosticRun, Evidence, Finding, Project
+from backend.app.database.models import (
+    DiagnosticRun,
+    Evidence,
+    Finding,
+    FindingSource,
+    Project,
+)
 
 
 class EvidenceReportRenderer:
@@ -28,11 +34,22 @@ class EvidenceReportRenderer:
         run = db.get(DiagnosticRun, finding.run_id) if finding.run_id else None
         evidence = []
         if run:
+            linked_ids: set[str] = set()
+            sources = db.scalars(
+                select(FindingSource).where(FindingSource.finding_id == finding.id)
+            ).all()
+            for source in sources:
+                linked_ids.update(source.evidence_ids)
+            evidence_filter = (
+                Evidence.id.in_(linked_ids)
+                if linked_ids
+                else Evidence.finding_id == finding.id
+            )
             rows = db.scalars(
                 select(Evidence)
                 .where(
                     Evidence.run_id == run.id,
-                    (Evidence.finding_id == finding.id) | (Evidence.finding_id.is_(None)),
+                    evidence_filter,
                 )
                 .order_by(Evidence.sequence, Evidence.captured_at)
             ).all()
@@ -79,4 +96,3 @@ class EvidenceReportRenderer:
             "sha256": item.sha256,
             "embedded_image": embedded_image,
         }
-

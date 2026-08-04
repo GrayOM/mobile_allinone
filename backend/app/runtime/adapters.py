@@ -8,6 +8,7 @@ from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus
 
 from .base import RuntimeOperation, RuntimeToolAdapter
+from backend.app.orchestration.resources import allocate_available_port
 
 
 class ObjectionRuntimeAdapter(RuntimeToolAdapter):
@@ -184,6 +185,15 @@ class DrozerRuntimeAdapter(RuntimeToolAdapter):
                 risk,
                 "drozer 실행 파일을 찾을 수 없습니다.",
             )
+        adb = self.settings.resolved_tool("adb")
+        if not adb:
+            return RuntimeOperation(
+                CapabilityStatus.NOT_CONFIGURED,
+                self.name,
+                action,
+                risk,
+                "선택 단말에 drozer Agent 포트를 연결하려면 ADB가 필요합니다.",
+            )
         arguments = arguments or {}
         component = str(arguments.get("component") or "")
         if action == "activity_start" and not component:
@@ -198,14 +208,44 @@ class DrozerRuntimeAdapter(RuntimeToolAdapter):
             target=shlex.quote(target),
             component=shlex.quote(component),
         )
+        agent_port = allocate_available_port("127.0.0.1")
+        forward = await run_command(
+            [
+                adb,
+                "-s",
+                device_id,
+                "forward",
+                f"tcp:{agent_port}",
+                "tcp:31415",
+            ],
+            timeout=30,
+        )
+        if not forward.ok:
+            return RuntimeOperation(
+                forward.status,
+                self.name,
+                action,
+                risk,
+                forward.error or forward.stderr.strip() or "drozer Agent 포트 연결 실패",
+                command=forward.display_command,
+            )
         command = [
             self.executable,
             "console",
             "connect",
+            "--server",
+            f"127.0.0.1:{agent_port}",
+            "--no-password",
             "--command",
             f"run {module_command}",
         ]
-        executed = await run_command(command, timeout=120)
+        try:
+            executed = await run_command(command, timeout=120)
+        finally:
+            await run_command(
+                [adb, "-s", device_id, "forward", "--remove", f"tcp:{agent_port}"],
+                timeout=15,
+            )
         return RuntimeOperation(
             executed.status,
             self.name,
@@ -216,5 +256,9 @@ class DrozerRuntimeAdapter(RuntimeToolAdapter):
             else executed.error or executed.stderr.strip() or "drozer 실행 실패",
             command=executed.display_command,
             output=executed.stdout or executed.stderr,
-            data={"device_id": device_id, "agent_port": 31415},
+            data={
+                "device_id": device_id,
+                "local_agent_port": agent_port,
+                "remote_agent_port": 31415,
+            },
         )

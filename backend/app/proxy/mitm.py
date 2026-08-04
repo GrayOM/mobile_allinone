@@ -7,6 +7,7 @@ from pathlib import Path
 
 from backend.app.core.config import ROOT_DIR, AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus
+from backend.app.core.process import subprocess_group_options, terminate_process_tree
 from backend.app.proxy.base import ProxyAdapter, ProxyCapture, ProxyFlowData
 from backend.app.proxy.detection import detect_sensitive
 
@@ -17,12 +18,14 @@ class MitmProxyAdapter(ProxyAdapter):
     def __init__(
         self,
         settings: AppSettings | None = None,
-        host: str = "0.0.0.0",
+        host: str = "127.0.0.1",
         port: int = 8080,
+        allowed_client_ip: str | None = None,
     ):
         self.settings = settings or get_settings()
         self.host = host
         self.port = port
+        self.allowed_client_ip = allowed_client_ip
         self.mitmdump = self.settings.resolved_tool("mitmdump")
         self.capture_dir = self.settings.data_dir / "proxy"
         self.capture_dir.mkdir(parents=True, exist_ok=True)
@@ -67,6 +70,8 @@ class MitmProxyAdapter(ProxyAdapter):
         capture_path.unlink(missing_ok=True)
         env = os.environ.copy()
         env["MSW_MITM_OUTPUT"] = str(capture_path)
+        if self.allowed_client_ip:
+            env["MSW_MITM_ALLOWED_CLIENT_IP"] = self.allowed_client_ip
         addon = ROOT_DIR / "scripts" / "mitm_capture_addon.py"
         process = await asyncio.create_subprocess_exec(
             self.mitmdump,
@@ -77,20 +82,24 @@ class MitmProxyAdapter(ProxyAdapter):
             "-s",
             str(addon),
             "--set",
-            "block_global=false",
+            "block_global=true",
             env=env,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            **subprocess_group_options(),
         )
+        # Register before the readiness wait so cancellation during startup can still
+        # find and terminate the process in the orchestrator's finally block.
+        self._processes[run_id] = process
         await asyncio.sleep(0.35)
         if process.returncode is not None:
+            self._processes.pop(run_id, None)
             return ProxyCapture(
                 CapabilityStatus.FAILED,
                 f"mitmdump가 즉시 종료되었습니다(exit={process.returncode}). 포트와 설치 상태를 확인하세요.",
                 self.host,
                 self.port,
             )
-        self._processes[run_id] = process
         return ProxyCapture(
             CapabilityStatus.AVAILABLE,
             "mitmproxy 패킷 캡처를 시작했습니다.",
@@ -103,17 +112,13 @@ class MitmProxyAdapter(ProxyAdapter):
                 "단말에서 http://mitm.it 에 접속해 승인된 테스트 CA를 설치할 수 있습니다.",
                 "앱의 인증서 고정이 있으면 보안통제 우회 내성 검증에서 별도로 확인합니다.",
             ],
+            allowed_client_ip=self.allowed_client_ip,
         )
 
     async def stop(self, run_id: str) -> ProxyCapture:
         process = self._processes.pop(run_id, None)
         if process and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+            await terminate_process_tree(process)
         return ProxyCapture(
             CapabilityStatus.AVAILABLE,
             "mitmproxy 캡처를 종료했습니다.",
@@ -149,6 +154,7 @@ class MitmProxyAdapter(ProxyAdapter):
                         + detect_sensitive(
                             response_headers, response_body, side="response"
                         ),
+                        source_ip=item.get("source_ip"),
                     )
                 )
             except (json.JSONDecodeError, TypeError):
@@ -172,4 +178,3 @@ class MitmProxyAdapter(ProxyAdapter):
             self.port,
             str(destination),
         )
-

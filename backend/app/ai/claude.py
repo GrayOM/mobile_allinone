@@ -39,7 +39,7 @@ class ClaudeAIProvider(AIProvider):
                 masked=masked,
             )
         context_text, _ = (
-            mask_context(context)
+            mask_context(context, self.settings.ai_sensitive_keys)
             if masked
             else (json.dumps(context, ensure_ascii=False, default=str), [])
         )
@@ -119,7 +119,7 @@ class ClaudeAIProvider(AIProvider):
                 masked=masked,
             )
         context_text, _ = (
-            mask_context(context)
+            mask_context(context, self.settings.ai_sensitive_keys)
             if masked
             else (json.dumps(context, ensure_ascii=False, default=str), [])
         )

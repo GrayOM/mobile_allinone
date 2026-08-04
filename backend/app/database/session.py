@@ -24,8 +24,10 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 def init_database() -> None:
     from backend.app.database import models  # noqa: F401
+    from backend.app.database.migrations import apply_migrations
 
     Base.metadata.create_all(bind=engine)
+    apply_migrations(engine)
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -34,4 +36,3 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
-

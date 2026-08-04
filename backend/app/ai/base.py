@@ -19,6 +19,7 @@ class AIProviderResult:
     quality_score: float | None = None
     masked: bool = True
     fallback_reason: str | None = None
+    synthetic: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -39,6 +40,7 @@ class AIScriptResult:
     quality_score: float | None = None
     masked: bool = True
     fallback_reason: str | None = None
+    synthetic: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)

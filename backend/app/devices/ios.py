@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from backend.app.core.command import CommandResult, run_command
@@ -72,6 +73,19 @@ class IOSDeviceAdapter(DeviceAdapter):
             timeout=self.settings.command_timeout_seconds,
         )
         return self._operation(result, "SSH 명령을 실행했습니다.")
+
+    async def _pmd(self, device_id: str, *command: str, timeout: int = 60) -> CommandResult:
+        if not self.pymobiledevice3:
+            return CommandResult(
+                CapabilityStatus.NOT_CONFIGURED,
+                ["pymobiledevice3", *command],
+                error="pymobiledevice3를 찾을 수 없습니다.",
+            )
+        env = os.environ.copy()
+        env["PYMOBILEDEVICE3_UDID"] = device_id
+        return await run_command(
+            [self.pymobiledevice3, *command], timeout=timeout, env=env
+        )
 
     async def _libimobile_info(self, udid: str) -> dict[str, str]:
         if not self.ideviceinfo:
@@ -230,9 +244,7 @@ class IOSDeviceAdapter(DeviceAdapter):
             )
             return self._operation(result, "iOS 설치 앱 목록을 조회했습니다.")
         if self.pymobiledevice3:
-            result = await run_command(
-                [self.pymobiledevice3, "apps", "list"], timeout=60
-            )
+            result = await self._pmd(device_id, "apps", "list", timeout=60)
             return self._operation(result, "iOS 설치 앱 목록을 조회했습니다.")
         return DeviceOperation(
             CapabilityStatus.NOT_CONFIGURED,
@@ -267,14 +279,12 @@ class IOSDeviceAdapter(DeviceAdapter):
         if device_id.startswith("ios-ssh:"):
             return await self._ssh("open", package_name)
         if self.pymobiledevice3:
-            result = await run_command(
-                [
-                    self.pymobiledevice3,
-                    "developer",
-                    "dvt",
-                    "launch",
-                    package_name,
-                ],
+            result = await self._pmd(
+                device_id,
+                "developer",
+                "dvt",
+                "launch",
+                package_name,
                 timeout=60,
             )
             operation = self._operation(result, "iOS 앱 실행을 요청했습니다.")
@@ -389,7 +399,9 @@ class IOSDeviceAdapter(DeviceAdapter):
                 CapabilityStatus.NOT_CONFIGURED,
                 "frida-ps를 찾을 수 없습니다.",
             )
-        result = await run_command([self.frida_ps, "-Uai"], timeout=20)
+        result = await run_command(
+            [self.frida_ps, "-D", device_id, "-a", "-i"], timeout=20
+        )
         operation = self._operation(result, "Frida iOS 연결을 확인했습니다.")
         if result.ok and not result.stdout.strip():
             operation.status = CapabilityStatus.NOT_CONFIGURED
@@ -400,14 +412,12 @@ class IOSDeviceAdapter(DeviceAdapter):
         self, device_id: str, local_port: int, remote_port: int
     ) -> DeviceOperation:
         if self.pymobiledevice3 and not device_id.startswith("ios-ssh:"):
-            result = await run_command(
-                [
-                    self.pymobiledevice3,
-                    "usbmux",
-                    "forward",
-                    str(local_port),
-                    str(remote_port),
-                ],
+            result = await self._pmd(
+                device_id,
+                "usbmux",
+                "forward",
+                str(local_port),
+                str(remote_port),
                 timeout=30,
             )
             return self._operation(result, "iOS USB 포트 포워딩을 시작했습니다.")

@@ -11,7 +11,10 @@ export default function DiagnosticSetupPage() {
   const [apps, setApps] = useState<AppArtifact[]>([]);
   const [appId, setAppId] = useState(() => localStorage.getItem("msw.app") ?? "");
   const [devices, setDevices] = useState<Device[]>([]);
-  const [deviceId, setDeviceId] = useState(() => localStorage.getItem("msw.device") ?? "mock-android-01");
+  const [deviceId, setDeviceId] = useState(() => localStorage.getItem("msw.device") ?? "");
+  const [proxyAdapter, setProxyAdapter] = useState("mitmproxy");
+  const [proxyListenHost, setProxyListenHost] = useState("");
+  const [proxyAllowedClientIp, setProxyAllowedClientIp] = useState("");
   const [scripts, setScripts] = useState<FridaScript[]>([]);
   const [selectedScripts, setSelectedScripts] = useState<string[]>([]);
   const [starting, setStarting] = useState(false);
@@ -41,6 +44,24 @@ export default function DiagnosticSetupPage() {
     });
   }, [projectId]);
 
+  const project = projects.find((item) => item.id === projectId);
+  const compatibleDevices = devices.filter((item) =>
+    project?.run_mode === "mock" ? item.adapter === "mock" : item.adapter !== "mock"
+  );
+
+  useEffect(() => {
+    if (!project) return;
+    setProxyAdapter(project.run_mode === "mock" ? "mock" : "mitmproxy");
+    const compatible = devices.filter((item) =>
+      project.run_mode === "mock" ? item.adapter === "mock" : item.adapter !== "mock"
+    );
+    if (!compatible.some((item) => item.id === deviceId)) {
+      const next = compatible[0]?.id ?? "";
+      setDeviceId(next);
+      if (next) localStorage.setItem("msw.device", next);
+    }
+  }, [project, devices, deviceId]);
+
   async function start(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -48,12 +69,13 @@ export default function DiagnosticSetupPage() {
     setStarting(true);
     setError("");
     try {
+      if (!project || !device) throw new Error("프로젝트 모드에 맞는 단말을 선택하세요.");
       const run = await post<DiagnosticRun>("/runs", {
         project_id: projectId,
         app_id: appId || null,
         device_id: deviceId,
-        device_adapter: device?.adapter ?? "mock",
-        proxy_adapter: data.get("proxy"),
+        device_adapter: device.adapter,
+        proxy_adapter: proxyAdapter,
         frida_script_ids: selectedScripts,
         pause_for_login: data.get("pause_for_login") === "on",
         options: {
@@ -62,6 +84,10 @@ export default function DiagnosticSetupPage() {
           auto_ai_script_candidate:
             data.get("auto_ai_script_candidate") === "on",
           simulate_nvidia_failure: data.get("simulate_nvidia_failure") === "on",
+          ...(proxyAdapter === "mitmproxy" ? {
+            proxy_listen_host: proxyListenHost,
+            proxy_allowed_client_ip: proxyAllowedClientIp,
+          } : {}),
         },
       });
       navigate(`/runs/${run.id}`);
@@ -123,7 +149,7 @@ export default function DiagnosticSetupPage() {
           <div className="setup-content">
             <h3>단말과 프록시</h3>
             <div className="select-cards">
-              {devices.map((device) => (
+              {compatibleDevices.map((device) => (
                 <label className={`select-card ${deviceId === device.id ? "select-card--active" : ""}`} key={`${device.adapter}-${device.id}`}>
                   <input type="radio" name="device" value={device.id} checked={deviceId === device.id} onChange={() => {
                     setDeviceId(device.id);
@@ -138,13 +164,32 @@ export default function DiagnosticSetupPage() {
             <div className="form-grid">
               <div className="field">
                 <label htmlFor="proxy">프록시 Adapter</label>
-                <select id="proxy" name="proxy" defaultValue="mock">
-                  <option value="mock">Mock Proxy · 자동 데모</option>
-                  <option value="mitmproxy">mitmproxy · 실제 캡처</option>
-                  <option value="burp">Burp Suite · 수동 연동</option>
-                  <option value="fiddler">Fiddler · 수동 연동</option>
+                <select id="proxy" name="proxy" value={proxyAdapter} onChange={(event) => setProxyAdapter(event.target.value)}>
+                  {project?.run_mode === "mock" ? (
+                    <option value="mock">Mock Proxy · 합성 데모 전용</option>
+                  ) : (
+                    <>
+                      <option value="mitmproxy">mitmproxy · 실제 캡처</option>
+                      <option value="burp">Burp Suite · 수동 연동</option>
+                      <option value="fiddler">Fiddler · 수동 연동</option>
+                    </>
+                  )}
                 </select>
               </div>
+              {project?.run_mode === "live" && proxyAdapter === "mitmproxy" && (
+                <>
+                  <div className="field">
+                    <label htmlFor="proxy-listen-host">Windows Listener IP</label>
+                    <input id="proxy-listen-host" value={proxyListenHost} onChange={(event) => setProxyListenHost(event.target.value)} placeholder="예: 192.168.0.10" required />
+                    <small>0.0.0.0 대신 단말이 접근할 Windows LAN IP를 입력합니다.</small>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="proxy-client-ip">허용 진단 단말 IP</label>
+                    <input id="proxy-client-ip" value={proxyAllowedClientIp} onChange={(event) => setProxyAllowedClientIp(event.target.value)} placeholder="예: 192.168.0.25" required />
+                    <small>이 IP가 아닌 연결과 패킷은 거부합니다.</small>
+                  </div>
+                </>
+              )}
               <div className="field">
                 <label htmlFor="frida-mode">Frida 연결 방식</label>
                 <select id="frida-mode" name="frida_mode" defaultValue="spawn">
@@ -174,7 +219,7 @@ export default function DiagnosticSetupPage() {
                   <input
                     type="checkbox"
                     checked={selectedScripts.includes(script.id)}
-                    disabled={script.approval_status !== "approved"}
+                    disabled={script.approval_status !== "approved" || script.syntax_status !== "available"}
                     onChange={(event) => setSelectedScripts((items) =>
                       event.target.checked ? [...items, script.id] : items.filter((id) => id !== script.id)
                     )}
@@ -215,13 +260,14 @@ export default function DiagnosticSetupPage() {
       <aside className="run-summary panel">
         <span className="eyebrow">EXECUTION BOUNDARY</span>
         <h3>진단 시작 전 확인</h3>
+        <div className="inline-alert">{project?.run_mode === "mock" ? "Mock 실행: 모든 결과가 SYNTHETIC으로 표시됩니다." : "Live 실행: Mock Adapter와 Mock AI는 차단됩니다."}</div>
         <ol>
           <li><span>1</span>소유하거나 명시적으로 진단 권한을 받은 앱·단말입니다.</li>
           <li><span>2</span>AI 생성 스크립트는 승인 전 실행되지 않습니다.</li>
           <li><span>3</span>POST·PUT·PATCH·DELETE 요청은 자동 재전송하지 않습니다.</li>
           <li><span>4</span>도구가 없으면 성공으로 위장하지 않고 상태를 남깁니다.</li>
         </ol>
-        <button className="button button--signal button--full" disabled={starting || !appId || !deviceId}>
+        <button className="button button--signal button--full" disabled={starting || !appId || !deviceId || (proxyAdapter === "mitmproxy" && (!proxyListenHost || !proxyAllowedClientIp))}>
           {starting ? "실행 준비 중…" : "진단 실행"}
         </button>
       </aside>
