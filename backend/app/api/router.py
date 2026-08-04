@@ -40,6 +40,10 @@ from backend.app.analyzers import (
 from backend.app.catalog import CATALOG_SOURCE, MASTG_CONTROLS
 from backend.app.core.config import ROOT_DIR, AppSettings, get_settings
 from backend.app.core.events import event_bus
+from backend.app.core.network import (
+    approval_matches_destination,
+    inspect_mobsf_destination,
+)
 from backend.app.core.status import CapabilityStatus, Platform, RunMode, RunStatus
 from backend.app.core.targets import (
     is_valid_app_identifier,
@@ -68,6 +72,7 @@ from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDevi
 from backend.app.evidence.report import EvidenceReportRenderer
 from backend.app.evidence.service import EvidenceService
 from backend.app.frida import FridaManager
+from backend.app.frida.policy import is_safe_automatic_script, script_applies_to_app
 from backend.app.orchestration import DiagnosticOrchestrator
 from backend.app.orchestration.approvals import (
     ApprovalError,
@@ -82,6 +87,7 @@ from backend.app.proxy import (
     MitmProxyAdapter,
     MockProxyAdapter,
 )
+from backend.app.proxy.manual import ManualProxyAdapter
 from backend.app.runtime import DrozerRuntimeAdapter, ObjectionRuntimeAdapter
 from backend.app.schemas import (
     AppArtifactOut,
@@ -132,6 +138,74 @@ def _app_or_404(db: Session, app_id: str) -> AppArtifact:
     return app
 
 
+async def _mobsf_approval_values(settings: AppSettings) -> dict[str, Any]:
+    if not settings.mobsf_url or not settings.mobsf_api_key:
+        raise HTTPException(409, "MobSF URL과 API 키를 설정한 뒤 외부 분석 전송을 승인하세요.")
+    try:
+        snapshot = await inspect_mobsf_destination(settings)
+    except ValueError as exc:
+        raise HTTPException(422, f"MobSF 목적지 승인 실패: {exc}") from exc
+    return {
+        "external_analyzer_allowed": True,
+        "external_analyzer_approved_by": "local_user",
+        "external_analyzer_approved_at": datetime.now(timezone.utc),
+        "external_analyzer_destination": snapshot.base_url,
+        "external_analyzer_addresses": list(snapshot.addresses),
+        "external_analyzer_certificate_sha256": snapshot.certificate_sha256,
+    }
+
+
+def _clear_mobsf_approval(project: Project) -> None:
+    project.external_analyzer_allowed = False
+    project.external_analyzer_approved_by = None
+    project.external_analyzer_approved_at = None
+    project.external_analyzer_destination = None
+    project.external_analyzer_addresses = []
+    project.external_analyzer_certificate_sha256 = None
+
+
+def _analysis_run_directory(
+    settings: AppSettings, source_path: Path
+) -> tuple[str, Path]:
+    analysis_run_id = str(uuid.uuid4())
+    directory = (
+        settings.analysis_dir
+        / source_path.stem
+        / "runs"
+        / analysis_run_id
+    )
+    directory.mkdir(parents=True, exist_ok=False)
+    return analysis_run_id, directory
+
+
+def _activate_analysis_result(
+    settings: AppSettings,
+    source_path: Path,
+    *,
+    analysis_run_id: str,
+    output_dir: Path,
+    sha256: str,
+) -> None:
+    root = settings.analysis_dir / source_path.stem
+    root.mkdir(parents=True, exist_ok=True)
+    latest = root / "latest.json"
+    temporary = root / f".latest-{uuid.uuid4()}.tmp"
+    temporary.write_text(
+        json.dumps(
+            {
+                "analysis_run_id": analysis_run_id,
+                "output_dir": str(output_dir),
+                "artifact_sha256": sha256,
+                "activated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    os.replace(temporary, latest)
+
+
 def _scoped_run(
     db: Session,
     *,
@@ -143,8 +217,11 @@ def _scoped_run(
     run = _run_or_404(db, run_id)
     if run.project_id != project.id:
         raise HTTPException(422, "진단 실행이 선택한 프로젝트에 속하지 않습니다.")
-    if require_paused and run.status != RunStatus.PAUSED.value:
-        raise HTTPException(409, "직접 단말 작업은 진단을 일시정지한 상태에서만 실행할 수 있습니다.")
+    if require_paused and run.status != RunStatus.SAFELY_PAUSED.value:
+        raise HTTPException(
+            409,
+            "직접 작업은 자동 Task가 checkpoint에서 안전하게 멈춘 뒤에만 실행할 수 있습니다.",
+        )
     app = db.get(AppArtifact, run.app_id) if run.app_id else None
     return project, run, app
 
@@ -214,13 +291,14 @@ def list_projects(db: Session = Depends(get_db)):
 
 
 @router.post("/projects", response_model=ProjectOut, status_code=201)
-def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
+async def create_project(
+    request: Request, payload: ProjectCreate, db: Session = Depends(get_db)
+):
     values = payload.model_dump(mode="json")
     values["run_mode"] = payload.run_mode.value
     values["mock_mode"] = payload.run_mode == RunMode.MOCK
     if payload.external_analyzer_allowed:
-        values["external_analyzer_approved_by"] = "local_user"
-        values["external_analyzer_approved_at"] = datetime.now(timezone.utc)
+        values.update(await _mobsf_approval_values(_settings(request)))
     project = Project(**values)
     db.add(project)
     db.commit()
@@ -234,8 +312,11 @@ def get_project(project_id: str, db: Session = Depends(get_db)):
 
 
 @router.patch("/projects/{project_id}", response_model=ProjectOut)
-def update_project(
-    project_id: str, payload: ProjectUpdate, db: Session = Depends(get_db)
+async def update_project(
+    request: Request,
+    project_id: str,
+    payload: ProjectUpdate,
+    db: Session = Depends(get_db),
 ):
     project = _project_or_404(db, project_id)
     changes = payload.model_dump(exclude_unset=True, mode="json")
@@ -246,11 +327,12 @@ def update_project(
         setattr(project, key, value)
     if "external_analyzer_allowed" in changes:
         if changes["external_analyzer_allowed"]:
-            project.external_analyzer_approved_by = "local_user"
-            project.external_analyzer_approved_at = datetime.now(timezone.utc)
+            for key, value in (
+                await _mobsf_approval_values(_settings(request))
+            ).items():
+                setattr(project, key, value)
         else:
-            project.external_analyzer_approved_by = None
-            project.external_analyzer_approved_at = None
+            _clear_mobsf_approval(project)
     if requested_mode:
         project.mock_mode = requested_mode == RunMode.MOCK.value
     db.commit()
@@ -270,6 +352,8 @@ def delete_project(
                 [
                     RunStatus.CREATED.value,
                     RunStatus.RUNNING.value,
+                    RunStatus.PAUSE_REQUESTED.value,
+                    RunStatus.SAFELY_PAUSED.value,
                     RunStatus.PAUSED.value,
                 ]
             ),
@@ -345,15 +429,18 @@ async def _store_and_analyze(
 ) -> AppArtifact:
     analyzer = StaticAnalyzer(
         settings,
-        external_analyzers_allowed=project.external_analyzer_allowed,
-        external_analyzer_approved_by=project.external_analyzer_approved_by,
+        # Upload registration never transmits an app. MobSF requires a second,
+        # artifact-hash-bound confirmation from the reanalysis endpoint.
+        external_analyzers_allowed=False,
     )
-    analysis_dir = settings.data_dir / "analysis" / source_path.stem
+    analysis_run_id, analysis_dir = _analysis_run_directory(settings, source_path)
     try:
         result = await analyzer.analyze(source_path, analysis_dir)
     except (ValueError, OSError, zipfile.BadZipFile) as exc:
         source_path.unlink(missing_ok=True)
         raise HTTPException(422, f"앱 분석 실패: {exc}") from exc
+    result.structure["analysis_run_id"] = analysis_run_id
+    result.structure["analysis_output_dir"] = str(analysis_dir)
     artifact = AppArtifact(
         project_id=project.id,
         original_name=original_name,
@@ -374,14 +461,28 @@ async def _store_and_analyze(
         db, project=project, artifact=artifact, result=result
     )
     db.commit()
+    _activate_analysis_result(
+        settings,
+        source_path,
+        analysis_run_id=analysis_run_id,
+        output_dir=analysis_dir,
+        sha256=result.sha256,
+    )
     db.refresh(artifact)
     return artifact
+
+
+class ReanalyzeRequest(BaseModel):
+    confirm_external_analyzer: bool = False
+    expected_destination: str | None = Field(default=None, max_length=2048)
+    expected_sha256: str | None = Field(default=None, pattern="^[a-f0-9]{64}$")
 
 
 @router.post("/apps/{app_id}/reanalyze", response_model=AppArtifactOut)
 async def reanalyze_app(
     request: Request,
     app_id: str,
+    payload: ReanalyzeRequest | None = None,
     db: Session = Depends(get_db),
 ):
     artifact = _app_or_404(db, app_id)
@@ -390,31 +491,90 @@ async def reanalyze_app(
     if not source_path.is_file():
         raise HTTPException(404, "등록된 앱 원본 파일을 찾을 수 없습니다.")
     settings = _settings(request)
-    analyzer = StaticAnalyzer(
-        settings,
-        external_analyzers_allowed=project.external_analyzer_allowed,
-        external_analyzer_approved_by=project.external_analyzer_approved_by,
-    )
+    previous_status = artifact.analysis_status
+    confirmation = payload or ReanalyzeRequest()
+    allow_external = False
+    if confirmation.confirm_external_analyzer:
+        if not project.external_analyzer_allowed:
+            raise HTTPException(409, "프로젝트에서 MobSF 외부 전송을 먼저 승인하세요.")
+        if (
+            confirmation.expected_destination != project.external_analyzer_destination
+            or confirmation.expected_sha256 != artifact.sha256
+        ):
+            raise HTTPException(409, "확인한 MobSF 목적지 또는 앱 SHA-256이 현재 값과 다릅니다.")
+        try:
+            snapshot = await inspect_mobsf_destination(settings)
+        except ValueError as exc:
+            _clear_mobsf_approval(project)
+            db.commit()
+            raise HTTPException(409, f"MobSF 목적지가 변경되거나 검증에 실패해 승인을 취소했습니다: {exc}") from exc
+        if not approval_matches_destination(
+            snapshot,
+            approved_destination=project.external_analyzer_destination,
+            approved_addresses=project.external_analyzer_addresses,
+            approved_certificate_sha256=project.external_analyzer_certificate_sha256,
+        ):
+            _clear_mobsf_approval(project)
+            db.commit()
+            raise HTTPException(409, "MobSF 목적지·DNS·TLS 정보가 변경되어 프로젝트 승인을 취소했습니다.")
+        allow_external = True
+    if not await request.app.state.analysis_leases.try_acquire(artifact.id):
+        raise HTTPException(409, "analysis_in_progress: 동일 앱의 재분석이 이미 실행 중입니다.")
     try:
-        result = await analyzer.analyze(
-            source_path, settings.analysis_dir / source_path.stem
+        artifact.analysis_status = "running"
+        db.commit()
+        analysis_run_id, analysis_dir = _analysis_run_directory(settings, source_path)
+        analyzer = StaticAnalyzer(
+            settings,
+            external_analyzers_allowed=allow_external,
+            external_analyzer_approved_by=project.external_analyzer_approved_by,
+            external_analyzer_destination=project.external_analyzer_destination,
+            external_analyzer_addresses=project.external_analyzer_addresses,
+            external_analyzer_certificate_sha256=project.external_analyzer_certificate_sha256,
+            expected_artifact_sha256=(
+                confirmation.expected_sha256 if allow_external else None
+            ),
         )
+        result = await analyzer.analyze(
+            source_path, analysis_dir
+        )
+        result.structure["analysis_run_id"] = analysis_run_id
+        result.structure["analysis_output_dir"] = str(analysis_dir)
+        artifact.sha256 = result.sha256
+        artifact.size_bytes = result.file_size
+        artifact.platform = result.platform
+        artifact.app_name = result.app_name
+        artifact.package_name = result.package_name
+        artifact.version = result.version
+        artifact.analysis_status = result.status
+        artifact.analysis_result = result.to_dict()
+        replace_analysis_records(
+            db, project=project, artifact=artifact, result=result
+        )
+        db.commit()
+        _activate_analysis_result(
+            settings,
+            source_path,
+            analysis_run_id=analysis_run_id,
+            output_dir=analysis_dir,
+            sha256=result.sha256,
+        )
+        db.refresh(artifact)
+        return artifact
     except (ValueError, OSError, zipfile.BadZipFile) as exc:
+        artifact.analysis_status = previous_status
+        db.commit()
         raise HTTPException(422, f"앱 재분석 실패: {exc}") from exc
-    artifact.sha256 = result.sha256
-    artifact.size_bytes = result.file_size
-    artifact.platform = result.platform
-    artifact.app_name = result.app_name
-    artifact.package_name = result.package_name
-    artifact.version = result.version
-    artifact.analysis_status = result.status
-    artifact.analysis_result = result.to_dict()
-    replace_analysis_records(
-        db, project=project, artifact=artifact, result=result
-    )
-    db.commit()
-    db.refresh(artifact)
-    return artifact
+    except asyncio.CancelledError:
+        artifact.analysis_status = previous_status
+        db.commit()
+        raise
+    except Exception:
+        artifact.analysis_status = previous_status
+        db.commit()
+        raise
+    finally:
+        await request.app.state.analysis_leases.release(artifact.id)
 
 
 @router.get("/apps/{app_id}/analysis/overview")
@@ -769,6 +929,7 @@ async def device_action(
     target = payload.package_name
     approval = None
     lease_acquired = False
+    manual_claimed = False
     if scoped:
         if not payload.project_id or not payload.run_id:
             raise HTTPException(422, "이 단말 작업에는 project_id와 run_id가 필요합니다.")
@@ -784,8 +945,11 @@ async def device_action(
         target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
         if payload.package_name and payload.package_name != target:
             raise HTTPException(422, "직접 입력한 대상값이 진단 앱 식별자와 일치하지 않습니다.")
-        if payload.action in controlled_actions:
-            try:
+        if not await _orchestrator(request).begin_manual_action(run.id):
+            raise HTTPException(409, "자동 Task가 안전하게 대기 중이거나 다른 수동 작업이 끝난 뒤 실행하세요.")
+        manual_claimed = True
+        try:
+            if payload.action in controlled_actions:
                 approval = consume_approval(
                     db,
                     payload.approval_token,
@@ -796,11 +960,17 @@ async def device_action(
                     device_id=run.device_id,
                     target=target,
                 )
-            except ApprovalError as exc:
-                raise HTTPException(409, str(exc)) from exc
-        lease_acquired = await _orchestrator(request).leases.acquire(
-            run.id, run.device_id, None
-        )
+            lease_acquired = await _orchestrator(request).leases.acquire(
+                run.id, run.device_id, None
+            )
+        except ApprovalError as exc:
+            await _orchestrator(request).end_manual_action(run.id)
+            manual_claimed = False
+            raise HTTPException(409, str(exc)) from exc
+        except Exception:
+            await _orchestrator(request).end_manual_action(run.id)
+            manual_claimed = False
+            raise
 
     actions = {
         "list_packages": lambda: adapter.list_packages(payload.device_id),
@@ -866,6 +1036,8 @@ async def device_action(
     finally:
         if run and lease_acquired:
             await _orchestrator(request).leases.release(run.id)
+        if run and manual_claimed:
+            await _orchestrator(request).end_manual_action(run.id)
 
 
 @router.get("/projects/{project_id}/runs", response_model=list[RunOut])
@@ -940,10 +1112,34 @@ async def create_run(
                 422,
                 f"앱 플랫폼과 맞지 않는 Frida 스크립트입니다: {', '.join(incompatible)}",
             )
+        if not app:
+            raise HTTPException(422, "Frida 자동 실행에는 대상 앱이 필요합니다.")
+        unsafe = [
+            script.name
+            for script in selected_scripts
+            if not is_safe_automatic_script(script)
+        ]
+        if unsafe:
+            raise HTTPException(
+                422,
+                "자동 진단에서는 builtin·low 스크립트만 실행할 수 있습니다. "
+                f"다음 스크립트는 safely_paused Run에서 일회성 승인 후 직접 실행하세요: {', '.join(unsafe)}",
+            )
+        not_applicable = [
+            f"{script.name} ({script_applies_to_app(script, app)[1]})"
+            for script in selected_scripts
+            if not script_applies_to_app(script, app)[0]
+        ]
+        if not_applicable:
+            raise HTTPException(
+                422,
+                f"대상 앱 적용 조건을 충족하지 않는 Frida 스크립트입니다: {', '.join(not_applicable)}",
+            )
     options = dict(payload.options)
     options.update(
         {
             "frida_script_ids": selected_script_ids,
+            "auto_select_frida": payload.auto_select_frida,
             "pause_for_login": payload.pause_for_login,
         }
     )
@@ -951,7 +1147,13 @@ async def create_run(
         select(DiagnosticRun.id).where(
             DiagnosticRun.device_id == payload.device_id,
             DiagnosticRun.status.in_(
-                [RunStatus.CREATED.value, RunStatus.RUNNING.value, RunStatus.PAUSED.value]
+                [
+                    RunStatus.CREATED.value,
+                    RunStatus.RUNNING.value,
+                    RunStatus.PAUSE_REQUESTED.value,
+                    RunStatus.SAFELY_PAUSED.value,
+                    RunStatus.PAUSED.value,
+                ]
             ),
         ).limit(1)
     )
@@ -987,6 +1189,25 @@ async def create_run(
                 "proxy_port": proxy_port,
             }
         )
+    elif payload.proxy_adapter in {"burp", "fiddler"}:
+        listen_host = str(options.get("proxy_listen_host") or "").strip()
+        if not listen_host:
+            raise HTTPException(422, "수동 프록시에는 단말이 접근할 Windows Listener IP가 필요합니다.")
+        try:
+            listener_ip = ipaddress.ip_address(listen_host)
+        except ValueError as exc:
+            raise HTTPException(422, "수동 프록시 Listener IP 형식이 올바르지 않습니다.") from exc
+        if listener_ip.is_unspecified or listener_ip.is_multicast or listener_ip.is_loopback:
+            raise HTTPException(422, "수동 프록시는 특정 Windows LAN IP에 바인딩해야 합니다.")
+        try:
+            proxy_port = int(options.get("proxy_port") or 8080)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, "수동 프록시 포트 형식이 올바르지 않습니다.") from exc
+        if not 1 <= proxy_port <= 65535:
+            raise HTTPException(422, "수동 프록시 포트 범위가 올바르지 않습니다.")
+        options.update(
+            {"proxy_listen_host": listen_host, "proxy_port": proxy_port}
+        )
     run = DiagnosticRun(
         project_id=project.id,
         app_id=payload.app_id,
@@ -1017,15 +1238,113 @@ async def pause_run(request: Request, run_id: str, db: Session = Depends(get_db)
     _run_or_404(db, run_id)
     if not await _orchestrator(request).pause(run_id):
         raise HTTPException(409, "실행 중인 진단이 아닙니다.")
-    return {"status": "paused"}
+    return {"status": RunStatus.PAUSE_REQUESTED.value}
 
 
 @router.post("/runs/{run_id}/resume")
 async def resume_run(request: Request, run_id: str, db: Session = Depends(get_db)):
-    _run_or_404(db, run_id)
+    run = _run_or_404(db, run_id)
+    if (
+        run.proxy_adapter in {"burp", "fiddler"}
+        and run.current_stage == "proxy_manual_setup"
+        and not bool(run.options.get("manual_proxy_imported"))
+    ):
+        raise HTTPException(409, "HAR/JSON Import를 완료한 뒤 진단을 재개하세요.")
     if not await _orchestrator(request).resume(run_id):
-        raise HTTPException(409, "재개할 수 있는 진단이 아닙니다.")
+        raise HTTPException(409, "안전 일시정지 상태이거나 수동 작업이 끝난 뒤에만 재개할 수 있습니다.")
     return {"status": "running"}
+
+
+@router.post("/runs/{run_id}/proxy/import")
+async def import_manual_proxy_capture(
+    request: Request,
+    run_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    run = _run_or_404(db, run_id)
+    if run.proxy_adapter not in {"burp", "fiddler"}:
+        raise HTTPException(422, "HAR Import는 Burp/Fiddler 수동 프록시 Run에서만 사용할 수 있습니다.")
+    _scoped_run(db, project_id=run.project_id, run_id=run.id)
+    if run.current_stage != "proxy_manual_setup":
+        raise HTTPException(409, "수동 프록시 준비 단계에서만 HAR를 가져올 수 있습니다.")
+    adapter = _orchestrator(request).proxy_adapter(run.id)
+    if not isinstance(adapter, ManualProxyAdapter):
+        raise HTTPException(409, "이 Run의 수동 프록시 Adapter가 활성 상태가 아닙니다.")
+    if not await _orchestrator(request).begin_manual_action(run.id):
+        raise HTTPException(409, "자동 Task가 안전하게 대기 중이거나 다른 수동 작업이 끝난 뒤 가져오세요.")
+    filename = Path(file.filename or "capture.har").name
+    if Path(filename).suffix.lower() not in {".har", ".json"}:
+        await _orchestrator(request).end_manual_action(run.id)
+        raise HTTPException(415, "HAR 또는 JSON 파일만 가져올 수 있습니다.")
+    destination = (
+        EvidenceService(_settings(request)).run_dir(run.id)
+        / "manual-proxy"
+        / f"{uuid.uuid4()}{Path(filename).suffix.lower()}"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    limit = min(_settings(request).max_upload_mb, 64) * 1024 * 1024
+    total = 0
+    try:
+        with destination.open("wb") as stream:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    raise HTTPException(413, "프록시 Import 파일은 최대 64MB까지 허용합니다.")
+                stream.write(chunk)
+        try:
+            flows = await asyncio.to_thread(adapter.import_har, run.id, destination)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise HTTPException(422, f"HAR 구조를 해석할 수 없습니다: {exc}") from exc
+        if not flows:
+            raise HTTPException(422, "진단 증적으로 연결할 프록시 흐름이 1개 이상 필요합니다.")
+        evidence = EvidenceService(_settings(request)).add(
+            db,
+            run_id=run.id,
+            evidence_type="manual_proxy_import",
+            title=f"{run.proxy_adapter} HAR Import",
+            description=f"사용자가 가져온 HAR/JSON에서 {len(flows)}개 흐름을 확인했습니다.",
+            file_path=destination,
+            mime_type="application/json",
+            inline_data={
+                "adapter": run.proxy_adapter,
+                "flow_count": len(flows),
+                "original_name": filename,
+            },
+        )
+        options = dict(run.options)
+        options.update(
+            {
+                "manual_proxy_imported": True,
+                "manual_proxy_flow_count": len(flows),
+                "manual_proxy_import_evidence_id": evidence.id,
+            }
+        )
+        run.options = options
+        db.commit()
+        await event_bus.publish(
+            run.id,
+            "evidence",
+            {
+                "id": evidence.id,
+                "type": evidence.evidence_type,
+                "title": evidence.title,
+                "sequence": evidence.sequence,
+                "captured_at": evidence.captured_at.isoformat(),
+            },
+        )
+        return {
+            "status": "available",
+            "adapter": run.proxy_adapter,
+            "flow_count": len(flows),
+            "evidence_id": evidence.id,
+            "message": "Import가 확인되었습니다. 이제 진단을 재개할 수 있습니다.",
+        }
+    finally:
+        await file.close()
+        if not bool(run.options.get("manual_proxy_imported")):
+            destination.unlink(missing_ok=True)
+        await _orchestrator(request).end_manual_action(run.id)
 
 
 @router.post("/runs/{run_id}/stop")
@@ -1058,8 +1377,38 @@ def list_flows(run_id: str, db: Session = Depends(get_db)):
     ).all()
 
 
+class WebSocketTicketRequest(BaseModel):
+    run_id: str
+
+
+@router.post("/ws-ticket", status_code=201)
+async def create_websocket_ticket(
+    request: Request,
+    payload: WebSocketTicketRequest,
+    db: Session = Depends(get_db),
+):
+    _run_or_404(db, payload.run_id)
+    client_host = request.client.host if request.client else ""
+    token, expires_in = await request.app.state.ws_tickets.issue(
+        payload.run_id, client_host
+    )
+    return {
+        "ticket": token,
+        "run_id": payload.run_id,
+        "expires_in": expires_in,
+        "single_use": True,
+    }
+
+
 @router.websocket("/runs/{run_id}/ws")
 async def run_websocket(websocket: WebSocket, run_id: str):
+    origin = websocket.headers.get("origin")
+    host = websocket.headers.get("host")
+    if origin and host:
+        expected_scheme = "https" if websocket.url.scheme == "wss" else "http"
+        if origin.rstrip("/") != f"{expected_scheme}://{host}":
+            await websocket.close(code=4403)
+            return
     await websocket.accept()
     queue = event_bus.subscribe(run_id)
     try:
@@ -1290,6 +1639,9 @@ async def execute_frida_script(
         raise HTTPException(422, "Frida 스크립트 플랫폼이 대상 앱과 일치하지 않습니다.")
     target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
     action_scope = f"execute:{script.id}"
+    if not await _orchestrator(request).begin_manual_action(run.id):
+        raise HTTPException(409, "자동 Task가 안전하게 대기 중이거나 다른 수동 작업이 끝난 뒤 실행하세요.")
+    manual_claimed = True
     try:
         approval = consume_approval(
             db,
@@ -1302,10 +1654,16 @@ async def execute_frida_script(
             target=target,
         )
     except ApprovalError as exc:
+        await _orchestrator(request).end_manual_action(run.id)
+        manual_claimed = False
         raise HTTPException(409, str(exc)) from exc
-    lease_acquired = await _orchestrator(request).leases.acquire(
-        run.id, run.device_id, None
-    )
+    try:
+        lease_acquired = await _orchestrator(request).leases.acquire(
+            run.id, run.device_id, None
+        )
+    except Exception:
+        await _orchestrator(request).end_manual_action(run.id)
+        raise
     try:
         result = await FridaManager(_settings(request)).execute(
             device_id=run.device_id,
@@ -1341,6 +1699,8 @@ async def execute_frida_script(
     finally:
         if lease_acquired:
             await _orchestrator(request).leases.release(run.id)
+        if manual_claimed:
+            await _orchestrator(request).end_manual_action(run.id)
 
 
 class FridaGenerateRequest(BaseModel):
@@ -1534,8 +1894,11 @@ async def execute_runtime_tool(
     risk = action_details[0]
     approval = None
     action_scope = f"{payload.adapter}:{payload.action}"
-    if risk in {"medium", "high"}:
-        try:
+    if not await _orchestrator(request).begin_manual_action(run.id):
+        raise HTTPException(409, "자동 Task가 안전하게 대기 중이거나 다른 수동 작업이 끝난 뒤 실행하세요.")
+    manual_claimed = True
+    try:
+        if risk in {"medium", "high"}:
             approval = consume_approval(
                 db,
                 payload.approval_token,
@@ -1546,11 +1909,17 @@ async def execute_runtime_tool(
                 device_id=run.device_id,
                 target=target,
             )
-        except ApprovalError as exc:
-            raise HTTPException(409, str(exc)) from exc
-    lease_acquired = await _orchestrator(request).leases.acquire(
-        run.id, run.device_id, None
-    )
+        lease_acquired = await _orchestrator(request).leases.acquire(
+            run.id, run.device_id, None
+        )
+    except ApprovalError as exc:
+        await _orchestrator(request).end_manual_action(run.id)
+        manual_claimed = False
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        await _orchestrator(request).end_manual_action(run.id)
+        manual_claimed = False
+        raise
     try:
         result = await adapter.execute(
             device_id=run.device_id,
@@ -1579,6 +1948,8 @@ async def execute_runtime_tool(
     finally:
         if lease_acquired:
             await _orchestrator(request).leases.release(run.id)
+        if manual_claimed:
+            await _orchestrator(request).end_manual_action(run.id)
 
 
 @router.get("/coverage")

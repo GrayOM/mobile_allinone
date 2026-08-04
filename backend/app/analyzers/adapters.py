@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.metadata
+import hashlib
 import json
 import re
+import secrets
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -10,7 +12,10 @@ from typing import Any, Iterable
 import httpx
 
 from backend.app.core.command import run_command
-from backend.app.core.network import validate_mobsf_destination
+from backend.app.core.network import (
+    approval_matches_destination,
+    inspect_mobsf_destination,
+)
 from backend.app.core.status import CapabilityStatus
 
 from .base import AnalyzerAdapter, AnalyzerFinding, AnalyzerResult
@@ -384,10 +389,18 @@ class MobSFAnalyzerAdapter(AnalyzerAdapter):
         *,
         transmission_allowed: bool = False,
         approved_by: str | None = None,
+        approved_destination: str | None = None,
+        approved_addresses: list[str] | None = None,
+        approved_certificate_sha256: str | None = None,
+        expected_artifact_sha256: str | None = None,
     ):
         super().__init__(settings)
         self.transmission_allowed = transmission_allowed
         self.approved_by = approved_by
+        self.approved_destination = approved_destination
+        self.approved_addresses = approved_addresses or []
+        self.approved_certificate_sha256 = approved_certificate_sha256
+        self.expected_artifact_sha256 = expected_artifact_sha256
 
     async def health(self) -> dict[str, Any]:
         if not self.settings.mobsf_url or not self.settings.mobsf_api_key:
@@ -398,19 +411,20 @@ class MobSFAnalyzerAdapter(AnalyzerAdapter):
                 "install_hint": "MOBSF_URL과 MOBSF_API_KEY를 .env에 설정",
                 "integration": "rest",
             }
-        allowed, policy_message = validate_mobsf_destination(self.settings)
-        if not allowed:
+        try:
+            snapshot = await inspect_mobsf_destination(self.settings)
+        except ValueError as exc:
             return {
                 "name": self.name,
                 "status": CapabilityStatus.FAILED.value,
                 "url": self.settings.mobsf_url,
-                "error": policy_message,
+                "error": str(exc),
                 "integration": "rest",
             }
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
+            async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
                 response = await client.get(
-                    f"{self.settings.mobsf_url.rstrip('/')}/api/v1/scans",
+                    f"{snapshot.base_url}/api/v1/scans",
                     headers={"Authorization": self.settings.mobsf_api_key},
                 )
             return {
@@ -445,12 +459,11 @@ class MobSFAnalyzerAdapter(AnalyzerAdapter):
         if not self.settings.mobsf_url or not self.settings.mobsf_api_key:
             result.error = "MobSF URL/API 키가 설정되지 않았습니다."
             return result.finish()
-        destination_allowed, destination_message = validate_mobsf_destination(
-            self.settings
-        )
-        if not destination_allowed:
+        try:
+            snapshot = await inspect_mobsf_destination(self.settings)
+        except ValueError as exc:
             result.status = CapabilityStatus.FAILED
-            result.error = destination_message
+            result.error = str(exc)
             result.metadata = {
                 "destination": self.settings.mobsf_url,
                 "transmission_allowed": False,
@@ -464,10 +477,45 @@ class MobSFAnalyzerAdapter(AnalyzerAdapter):
                 "transmission_allowed": False,
             }
             return result.finish()
-        base = self.settings.mobsf_url.rstrip("/")
+        if not approval_matches_destination(
+            snapshot,
+            approved_destination=self.approved_destination,
+            approved_addresses=self.approved_addresses,
+            approved_certificate_sha256=self.approved_certificate_sha256,
+        ):
+            result.status = CapabilityStatus.MANUAL_REQUIRED
+            result.error = "승인된 MobSF 목적지·DNS·TLS 인증서 정보가 현재 설정과 일치하지 않습니다."
+            result.metadata = {
+                "destination": snapshot.base_url,
+                "resolved_addresses": list(snapshot.addresses),
+                "certificate_sha256": snapshot.certificate_sha256,
+                "transmission_allowed": False,
+            }
+            return result.finish()
+        digest = hashlib.sha256()
+        with artifact_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        artifact_sha256 = digest.hexdigest()
+        if not self.expected_artifact_sha256 or not secrets.compare_digest(
+            artifact_sha256, self.expected_artifact_sha256
+        ):
+            result.status = CapabilityStatus.MANUAL_REQUIRED
+            result.error = "전송 직전 확인한 앱 SHA-256이 승인 요청과 일치하지 않습니다."
+            result.metadata = {
+                "destination": snapshot.base_url,
+                "artifact_sha256": artifact_sha256,
+                "transmission_allowed": False,
+            }
+            return result.finish()
+        base = snapshot.base_url
         headers = {"Authorization": self.settings.mobsf_api_key}
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(360, connect=15)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(360, connect=15),
+                trust_env=False,
+                follow_redirects=False,
+            ) as client:
                 with artifact_path.open("rb") as stream:
                     upload = await client.post(
                         f"{base}/api/v1/upload",
@@ -501,6 +549,9 @@ class MobSFAnalyzerAdapter(AnalyzerAdapter):
                 "destination": base,
                 "transmission_allowed": True,
                 "approved_by": self.approved_by,
+                "resolved_addresses": list(snapshot.addresses),
+                "certificate_sha256": snapshot.certificate_sha256,
+                "artifact_sha256": artifact_sha256,
             }
             result.save_raw(output_dir, payload)
             result.findings.extend(self._normalize(payload, platform))

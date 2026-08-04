@@ -24,6 +24,9 @@ class Platform(StringEnum):
 class RunStatus(StringEnum):
     CREATED = "created"
     RUNNING = "running"
+    PAUSE_REQUESTED = "pause_requested"
+    SAFELY_PAUSED = "safely_paused"
+    # Legacy rows may still contain paused until the next explicit migration.
     PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"

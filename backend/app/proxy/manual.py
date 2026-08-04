@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from backend.app.core.status import CapabilityStatus
 from backend.app.proxy.base import ProxyAdapter, ProxyCapture, ProxyFlowData
@@ -68,31 +69,62 @@ class ManualProxyAdapter(ProxyAdapter):
 
     def import_har(self, run_id: str, path: Path) -> list[ProxyFlowData]:
         data = json.loads(path.read_text(encoding="utf-8"))
-        entries = data.get("log", {}).get("entries", [])
+        if isinstance(data, dict):
+            entries = data.get("log", {}).get("entries")
+            if not isinstance(entries, list):
+                raise ValueError("HAR log.entries 배열이 필요합니다.")
+            source = "har"
+        elif isinstance(data, list):
+            entries = data
+            source = "json"
+        else:
+            raise ValueError("HAR 객체 또는 Proxy Flow JSON 배열이 필요합니다.")
+        if len(entries) > 10_000:
+            raise ValueError("프록시 흐름은 한 번에 최대 10,000개까지 가져올 수 있습니다.")
         flows: list[ProxyFlowData] = []
         for entry in entries:
-            request = entry.get("request", {})
-            response = entry.get("response", {})
-            request_headers = {
-                item.get("name", ""): item.get("value", "")
-                for item in request.get("headers", [])
-            }
-            response_headers = {
-                item.get("name", ""): item.get("value", "")
-                for item in response.get("headers", [])
-            }
-            request_body = request.get("postData", {}).get("text", "")
-            response_body = response.get("content", {}).get("text", "")
+            if not isinstance(entry, dict):
+                raise ValueError("각 프록시 흐름은 JSON 객체여야 합니다.")
+            if source == "har":
+                request = entry.get("request", {})
+                response = entry.get("response", {})
+                request_headers = self._headers(request.get("headers", []))
+                response_headers = self._headers(response.get("headers", []))
+                request_body = str(request.get("postData", {}).get("text", ""))
+                response_body = str(response.get("content", {}).get("text", ""))
+                method = str(request.get("method", "GET"))
+                url = str(request.get("url", ""))
+                status = response.get("status")
+            else:
+                request_headers = self._header_object(entry.get("request_headers", {}))
+                response_headers = self._header_object(entry.get("response_headers", {}))
+                request_body = str(entry.get("request_body", ""))
+                response_body = str(entry.get("response_body", ""))
+                method = str(entry.get("method", "GET"))
+                url = str(entry.get("url", ""))
+                status = entry.get("status_code")
+            method = method.upper()
+            if not method.isalpha() or len(method) > 16:
+                raise ValueError("HTTP Method 형식이 올바르지 않습니다.")
+            parsed = urlsplit(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or len(url) > 8192:
+                raise ValueError("프록시 URL은 길이가 제한된 http/https 주소여야 합니다.")
+            if len(request_body.encode("utf-8")) > 1024 * 1024 or len(response_body.encode("utf-8")) > 1024 * 1024:
+                raise ValueError("프록시 흐름 본문은 요청·응답 각각 최대 1MB입니다.")
+            if status is not None:
+                status = int(status)
+                if not 100 <= status <= 599:
+                    raise ValueError("HTTP 응답 상태 코드가 올바르지 않습니다.")
             candidates = detect_sensitive(
                 request_headers, request_body, side="request"
             ) + detect_sensitive(response_headers, response_body, side="response")
             flows.append(
                 ProxyFlowData(
-                    request.get("method", "GET"),
-                    request.get("url", ""),
+                    method,
+                    url,
                     request_headers,
                     request_body,
-                    response.get("status"),
+                    status,
                     response_headers,
                     response_body,
                     sensitive_candidates=candidates,
@@ -100,6 +132,26 @@ class ManualProxyAdapter(ProxyAdapter):
             )
         self._imports[run_id] = flows
         return flows
+
+    @staticmethod
+    def _headers(value) -> dict[str, str]:
+        if not isinstance(value, list) or len(value) > 200:
+            raise ValueError("HAR Header 배열은 최대 200개여야 합니다.")
+        result: dict[str, str] = {}
+        for item in value:
+            if not isinstance(item, dict):
+                raise ValueError("HAR Header 항목은 객체여야 합니다.")
+            name = str(item.get("name", ""))[:200]
+            header_value = str(item.get("value", ""))[:16_384]
+            if name:
+                result[name] = header_value
+        return result
+
+    @staticmethod
+    def _header_object(value) -> dict[str, str]:
+        if not isinstance(value, dict) or len(value) > 200:
+            raise ValueError("Header 객체는 최대 200개 항목이어야 합니다.")
+        return {str(key)[:200]: str(item)[:16_384] for key, item in value.items()}
 
 
 class FiddlerProxyAdapter(ManualProxyAdapter):
@@ -110,4 +162,3 @@ class FiddlerProxyAdapter(ManualProxyAdapter):
 class BurpProxyAdapter(ManualProxyAdapter):
     name = "burp"
     product_name = "Burp Suite"
-

@@ -121,10 +121,20 @@ class StaticAnalyzer:
         *,
         external_analyzers_allowed: bool = False,
         external_analyzer_approved_by: str | None = None,
+        external_analyzer_destination: str | None = None,
+        external_analyzer_addresses: list[str] | None = None,
+        external_analyzer_certificate_sha256: str | None = None,
+        expected_artifact_sha256: str | None = None,
     ):
         self.settings = settings or get_settings()
         self.external_analyzers_allowed = external_analyzers_allowed
         self.external_analyzer_approved_by = external_analyzer_approved_by
+        self.external_analyzer_destination = external_analyzer_destination
+        self.external_analyzer_addresses = external_analyzer_addresses or []
+        self.external_analyzer_certificate_sha256 = (
+            external_analyzer_certificate_sha256
+        )
+        self.expected_artifact_sha256 = expected_artifact_sha256
 
     @staticmethod
     def detect_platform(path: Path) -> str:
@@ -294,6 +304,10 @@ class StaticAnalyzer:
                 self.settings,
                 transmission_allowed=self.external_analyzers_allowed,
                 approved_by=self.external_analyzer_approved_by,
+                approved_destination=self.external_analyzer_destination,
+                approved_addresses=self.external_analyzer_addresses,
+                approved_certificate_sha256=self.external_analyzer_certificate_sha256,
+                expected_artifact_sha256=self.expected_artifact_sha256,
             ),
         )
         executions = await asyncio.gather(
@@ -320,6 +334,10 @@ class StaticAnalyzer:
             self.settings,
             transmission_allowed=self.external_analyzers_allowed,
             approved_by=self.external_analyzer_approved_by,
+            approved_destination=self.external_analyzer_destination,
+            approved_addresses=self.external_analyzer_addresses,
+            approved_certificate_sha256=self.external_analyzer_certificate_sha256,
+            expected_artifact_sha256=self.expected_artifact_sha256,
         ).analyze(
             path,
             (output_dir or self.settings.analysis_dir / result.sha256[:12]) / "tools",

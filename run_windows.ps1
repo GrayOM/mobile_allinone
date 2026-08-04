@@ -34,20 +34,17 @@ function New-MswToken {
     return [Convert]::ToBase64String($Bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
 }
 
-$Fragment = ""
 if ($LanAccess) {
     $env:MSW_LAN_ACCESS = "true"
     if (-not $env:MSW_API_TOKEN) { $env:MSW_API_TOKEN = New-MswToken }
     if (-not $env:MSW_ADMIN_TOKEN) { $env:MSW_ADMIN_TOKEN = New-MswToken }
     $env:MSW_TRUSTED_HOSTS = $HostAddress
-    $Access = [Uri]::EscapeDataString($env:MSW_API_TOKEN)
-    $Admin = [Uri]::EscapeDataString($env:MSW_ADMIN_TOKEN)
-    $Fragment = "#access_token=${Access}&admin_token=${Admin}"
-    Write-Host "LAN 세션용 임시 API/관리자 토큰을 생성했습니다. 브라우저 종료 시 세션 저장소에서 제거됩니다." -ForegroundColor Yellow
+    Set-Clipboard -Value ($env:MSW_API_TOKEN + "|" + $env:MSW_ADMIN_TOKEN)
+    Write-Host "LAN 세션용 임시 인증 문자열을 클립보드에 복사했습니다. 브라우저 잠금 화면에 붙여넣으세요." -ForegroundColor Yellow
 }
 $env:MSW_HOST = $HostAddress
 $env:MSW_PORT = "$Port"
-$Url = "http://${HostAddress}:${Port}/${Fragment}"
+$Url = "http://${HostAddress}:${Port}/"
 
 Write-Host "Mobile Security Workbench 시작: $Url" -ForegroundColor Green
 Write-Host "종료하려면 이 창에서 Ctrl+C를 누르세요." -ForegroundColor DarkGray

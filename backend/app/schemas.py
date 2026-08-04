@@ -57,6 +57,9 @@ class ProjectOut(ORMModel):
     external_analyzer_allowed: bool
     external_analyzer_approved_by: str | None
     external_analyzer_approved_at: datetime | None
+    external_analyzer_destination: str | None
+    external_analyzer_addresses: list[str]
+    external_analyzer_certificate_sha256: str | None
     mock_mode: bool
     run_mode: str
     created_at: datetime
@@ -86,6 +89,7 @@ class RunCreate(BaseModel):
     device_adapter: str = Field(min_length=1, max_length=50)
     proxy_adapter: str = Field(min_length=1, max_length=50)
     frida_script_ids: list[str] = Field(default_factory=list)
+    auto_select_frida: bool = False
     pause_for_login: bool = False
     options: dict[str, Any] = Field(default_factory=dict)
 

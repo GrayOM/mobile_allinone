@@ -15,8 +15,10 @@ export default function DiagnosticSetupPage() {
   const [proxyAdapter, setProxyAdapter] = useState("mitmproxy");
   const [proxyListenHost, setProxyListenHost] = useState("");
   const [proxyAllowedClientIp, setProxyAllowedClientIp] = useState("");
+  const [proxyPort, setProxyPort] = useState("8080");
   const [scripts, setScripts] = useState<FridaScript[]>([]);
   const [selectedScripts, setSelectedScripts] = useState<string[]>([]);
+  const [autoSelectFrida, setAutoSelectFrida] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
 
@@ -60,8 +62,8 @@ export default function DiagnosticSetupPage() {
     }
     void api<FridaScript[]>(`/frida/scripts?platform=${selectedApp.platform}`).then((items) => {
       setScripts(items);
-      const approved = items.find((item) => item.approval_status === "approved" && item.syntax_status === "available");
-      setSelectedScripts(approved ? [approved.id] : []);
+      setSelectedScripts([]);
+      setAutoSelectFrida(false);
     });
   }, [selectedApp?.id, selectedApp?.platform]);
 
@@ -94,6 +96,7 @@ export default function DiagnosticSetupPage() {
         device_adapter: device.adapter,
         proxy_adapter: proxyAdapter,
         frida_script_ids: selectedScripts,
+        auto_select_frida: autoSelectFrida,
         pause_for_login: data.get("pause_for_login") === "on",
         options: {
           frida_mode: data.get("frida_mode"),
@@ -104,6 +107,9 @@ export default function DiagnosticSetupPage() {
           ...(proxyAdapter === "mitmproxy" ? {
             proxy_listen_host: proxyListenHost,
             proxy_allowed_client_ip: proxyAllowedClientIp,
+          } : ["burp", "fiddler"].includes(proxyAdapter) ? {
+            proxy_listen_host: proxyListenHost,
+            proxy_port: Number(proxyPort),
           } : {}),
         },
       });
@@ -193,18 +199,26 @@ export default function DiagnosticSetupPage() {
                   )}
                 </select>
               </div>
-              {project?.run_mode === "live" && proxyAdapter === "mitmproxy" && (
+              {project?.run_mode === "live" && proxyAdapter !== "mock" && (
                 <>
                   <div className="field">
                     <label htmlFor="proxy-listen-host">Windows Listener IP</label>
                     <input id="proxy-listen-host" value={proxyListenHost} onChange={(event) => setProxyListenHost(event.target.value)} placeholder="예: 192.168.0.10" required />
                     <small>0.0.0.0 대신 단말이 접근할 Windows LAN IP를 입력합니다.</small>
                   </div>
-                  <div className="field">
-                    <label htmlFor="proxy-client-ip">허용 진단 단말 IP</label>
-                    <input id="proxy-client-ip" value={proxyAllowedClientIp} onChange={(event) => setProxyAllowedClientIp(event.target.value)} placeholder="예: 192.168.0.25" required />
-                    <small>이 IP가 아닌 연결과 패킷은 거부합니다.</small>
-                  </div>
+                  {proxyAdapter === "mitmproxy" ? (
+                    <div className="field">
+                      <label htmlFor="proxy-client-ip">허용 진단 단말 IP</label>
+                      <input id="proxy-client-ip" value={proxyAllowedClientIp} onChange={(event) => setProxyAllowedClientIp(event.target.value)} placeholder="예: 192.168.0.25" required />
+                      <small>이 IP가 아닌 연결과 패킷은 거부합니다.</small>
+                    </div>
+                  ) : (
+                    <div className="field">
+                      <label htmlFor="proxy-port">수동 프록시 Listener 포트</label>
+                      <input id="proxy-port" type="number" min="1" max="65535" value={proxyPort} onChange={(event) => setProxyPort(event.target.value)} required />
+                      <small>Burp/Fiddler에서 같은 IP와 포트로 Listener를 설정합니다.</small>
+                    </div>
+                  )}
                 </>
               )}
               <div className="field">
@@ -230,20 +244,42 @@ export default function DiagnosticSetupPage() {
           <div className="setup-number">03</div>
           <div className="setup-content">
             <h3>승인된 Frida 스크립트</h3>
+            <label className="toggle-line">
+              <input
+                type="checkbox"
+                checked={autoSelectFrida}
+                onChange={(event) => {
+                  setAutoSelectFrida(event.target.checked);
+                  if (event.target.checked) setSelectedScripts([]);
+                }}
+              />
+              <span />
+              <div>
+                <strong>안전한 내장 스크립트 자동 선택</strong>
+                <small>대상 앱 조건과 일치하는 builtin·low 스크립트만 자동 실행합니다.</small>
+              </div>
+            </label>
+            <p className="form-note">아무 것도 선택하지 않으면 Frida를 실행하지 않습니다. 사용자·AI 또는 medium/high 스크립트는 안전 일시정지 후 Run별 승인으로 직접 실행합니다.</p>
             <div className="script-choices">
               {scripts.map((script) => (
                 <label className="check-card" key={script.id}>
                   <input
                     type="checkbox"
                     checked={selectedScripts.includes(script.id)}
-                    disabled={script.approval_status !== "approved" || script.syntax_status !== "available"}
+                    disabled={
+                      autoSelectFrida
+                      || script.approval_status !== "approved"
+                      || script.syntax_status !== "available"
+                      || script.source !== "builtin"
+                      || script.risk !== "low"
+                    }
                     onChange={(event) => setSelectedScripts((items) =>
                       event.target.checked ? [...items, script.id] : items.filter((id) => id !== script.id)
                     )}
                   />
                   <span>
                     <strong>{script.name}</strong>
-                    <small>{script.category} · 위험도 {script.risk} · 성공 {script.success_count}</small>
+                    <small>{script.category} · {script.source} · 위험도 {script.risk} · 성공 {script.success_count}</small>
                   </span>
                 </label>
               ))}
@@ -284,7 +320,7 @@ export default function DiagnosticSetupPage() {
           <li><span>3</span>POST·PUT·PATCH·DELETE 요청은 자동 재전송하지 않습니다.</li>
           <li><span>4</span>도구가 없으면 성공으로 위장하지 않고 상태를 남깁니다.</li>
         </ol>
-        <button className="button button--signal button--full" disabled={starting || !appId || !deviceId || (proxyAdapter === "mitmproxy" && (!proxyListenHost || !proxyAllowedClientIp))}>
+        <button className="button button--signal button--full" disabled={starting || !appId || !deviceId || (project?.run_mode === "live" && !proxyListenHost) || (proxyAdapter === "mitmproxy" && !proxyAllowedClientIp) || (["burp", "fiddler"].includes(proxyAdapter) && !proxyPort)}>
           {starting ? "실행 준비 중…" : "진단 실행"}
         </button>
       </aside>

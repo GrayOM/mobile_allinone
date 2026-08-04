@@ -29,6 +29,11 @@ class Project(Base, TimestampMixin):
     external_analyzer_approved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    external_analyzer_destination: Mapped[str | None] = mapped_column(Text)
+    external_analyzer_addresses: Mapped[list[str]] = mapped_column(JSON, default=list)
+    external_analyzer_certificate_sha256: Mapped[str | None] = mapped_column(
+        String(64)
+    )
     # mock_mode is kept for API/database compatibility. run_mode is authoritative.
     mock_mode: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     run_mode: Mapped[str] = mapped_column(String(16), default="live", nullable=False)

@@ -36,6 +36,7 @@ from backend.app.database.session import SessionLocal
 from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDeviceAdapter
 from backend.app.evidence import EvidenceService
 from backend.app.frida import FridaManager
+from backend.app.frida.policy import is_safe_automatic_script, script_applies_to_app
 from backend.app.proxy import (
     BurpProxyAdapter,
     FiddlerProxyAdapter,
@@ -68,10 +69,27 @@ class DiagnosticOrchestrator:
         self._proxy_adapters: dict[str, Any] = {}
         self._leases = ResourceLeaseManager()
         self._proxy_start_lock = asyncio.Lock()
+        self._state_lock = asyncio.Lock()
+        self._safe_pause_waiting: set[str] = set()
+        self._manual_active: set[str] = set()
 
     @property
     def leases(self) -> ResourceLeaseManager:
         return self._leases
+
+    def proxy_adapter(self, run_id: str):
+        return self._proxy_adapters.get(run_id)
+
+    async def begin_manual_action(self, run_id: str) -> bool:
+        async with self._state_lock:
+            if run_id not in self._safe_pause_waiting or run_id in self._manual_active:
+                return False
+            self._manual_active.add(run_id)
+            return True
+
+    async def end_manual_action(self, run_id: str) -> None:
+        async with self._state_lock:
+            self._manual_active.discard(run_id)
 
     def launch(self, run_id: str) -> None:
         current = self._tasks.get(run_id)
@@ -88,15 +106,22 @@ class DiagnosticOrchestrator:
         event = self._pause_events.get(run_id)
         if not event:
             return False
-        event.clear()
+        async with self._state_lock:
+            if run_id in self._safe_pause_waiting:
+                return True
+            event.clear()
         with SessionLocal() as db:
             run = db.get(DiagnosticRun, run_id)
             if run and run.status == RunStatus.RUNNING.value:
-                run.status = RunStatus.PAUSED.value
-                run.current_stage = "manual_interaction"
+                run.status = RunStatus.PAUSE_REQUESTED.value
                 db.commit()
+            elif not run or run.status != RunStatus.PAUSE_REQUESTED.value:
+                event.set()
+                return False
         await self.events.publish(
-            run_id, "run_status", {"status": "paused", "message": reason}
+            run_id,
+            "run_status",
+            {"status": RunStatus.PAUSE_REQUESTED.value, "message": reason},
         )
         return True
 
@@ -104,13 +129,20 @@ class DiagnosticOrchestrator:
         event = self._pause_events.get(run_id)
         if not event:
             return False
+        async with self._state_lock:
+            if run_id not in self._safe_pause_waiting or run_id in self._manual_active:
+                return False
+            self._safe_pause_waiting.discard(run_id)
+            event.set()
         with SessionLocal() as db:
             run = db.get(DiagnosticRun, run_id)
-            if run and run.status == RunStatus.PAUSED.value:
+            if run and run.status in {
+                RunStatus.SAFELY_PAUSED.value,
+                RunStatus.PAUSED.value,
+            }:
                 run.status = RunStatus.RUNNING.value
                 run.current_stage = "resuming"
                 db.commit()
-        event.set()
         await self.events.publish(
             run_id, "run_status", {"status": "running", "message": "진단을 재개했습니다."}
         )
@@ -147,7 +179,22 @@ class DiagnosticOrchestrator:
         if run_id in self._stop_requested:
             raise DiagnosticStopped
         event = self._pause_events.get(run_id)
-        if event:
+        if event and not event.is_set():
+            async with self._state_lock:
+                self._safe_pause_waiting.add(run_id)
+            with SessionLocal() as db:
+                run = db.get(DiagnosticRun, run_id)
+                if run and run.status == RunStatus.PAUSE_REQUESTED.value:
+                    run.status = RunStatus.SAFELY_PAUSED.value
+                    db.commit()
+            await self.events.publish(
+                run_id,
+                "run_status",
+                {
+                    "status": RunStatus.SAFELY_PAUSED.value,
+                    "message": "현재 작업이 끝나 안전한 수동 조작 지점에 도달했습니다.",
+                },
+            )
             await event.wait()
         if run_id in self._stop_requested:
             raise DiagnosticStopped
@@ -190,9 +237,15 @@ class DiagnosticOrchestrator:
                 allowed_client_ip=str(run.options.get("proxy_allowed_client_ip") or "") or None,
             )
         if adapter == "fiddler":
-            return FiddlerProxyAdapter()
+            return FiddlerProxyAdapter(
+                host=str(run.options.get("proxy_listen_host") or "127.0.0.1"),
+                port=int(run.options.get("proxy_port") or 8080),
+            )
         if adapter == "burp":
-            return BurpProxyAdapter()
+            return BurpProxyAdapter(
+                host=str(run.options.get("proxy_listen_host") or "127.0.0.1"),
+                port=int(run.options.get("proxy_port") or 8080),
+            )
         if adapter == "mock":
             return MockProxyAdapter()
         raise ValueError(f"지원하지 않는 프록시 Adapter입니다: {adapter}")
@@ -624,6 +677,37 @@ class DiagnosticOrchestrator:
                     CapabilityStatus.UNSUPPORTED,
                 }:
                     raise RuntimeError(proxy_capture.message)
+                if proxy_capture.status == CapabilityStatus.MANUAL_REQUIRED:
+                    if run.proxy_adapter not in {"burp", "fiddler"}:
+                        raise RuntimeError(proxy_capture.message)
+                    options = dict(run.options)
+                    options.update(
+                        {
+                            "manual_proxy_imported": False,
+                            "manual_proxy_instructions": proxy_capture.instructions,
+                        }
+                    )
+                    run.options = options
+                    run.current_stage = "proxy_manual_setup"
+                    db.commit()
+                    await self.events.publish(
+                        run.id,
+                        "stage",
+                        {
+                            "stage": "proxy_manual_setup",
+                            "progress": run.progress,
+                            "message": proxy_capture.message,
+                            "status": RunStatus.PAUSE_REQUESTED.value,
+                        },
+                    )
+                    await self.pause(
+                        run.id,
+                        "Burp/Fiddler 설정 후 HAR를 가져오면 진단을 재개할 수 있습니다.",
+                    )
+                    await self._checkpoint(run.id)
+                    db.refresh(run)
+                    if not bool(run.options.get("manual_proxy_imported")):
+                        raise RuntimeError("HAR Import 확인 없이 수동 프록시 진단을 재개할 수 없습니다.")
 
                 if app:
                     await self._stage(db, run, "install", 22, "대상 앱을 단말에 설치합니다.")
@@ -685,15 +769,32 @@ class DiagnosticOrchestrator:
                     db, run, "frida", 56, "승인된 Frida 스크립트를 선택하고 실행합니다."
                 )
                 selected_ids = list(run.options.get("frida_script_ids", []))
-                query = select(FridaScript).where(
-                    FridaScript.approval_status == "approved",
-                    FridaScript.platform == app_platform,
-                )
                 if selected_ids:
-                    query = query.where(FridaScript.id.in_(selected_ids))
+                    query = select(FridaScript).where(
+                        FridaScript.id.in_(selected_ids),
+                        FridaScript.approval_status == "approved",
+                        FridaScript.platform == app_platform,
+                    )
+                    scripts = db.scalars(query).all()
+                elif bool(run.options.get("auto_select_frida")):
+                    query = select(FridaScript).where(
+                        FridaScript.approval_status == "approved",
+                        FridaScript.platform == app_platform,
+                        FridaScript.source == "builtin",
+                        FridaScript.risk == "low",
+                    )
+                    scripts = db.scalars(query).all()
                 else:
-                    query = query.limit(1)
-                scripts = db.scalars(query).all()
+                    scripts = []
+                if app:
+                    scripts = [
+                        script
+                        for script in scripts
+                        if is_safe_automatic_script(script)
+                        and script_applies_to_app(script, app)[0]
+                    ]
+                else:
+                    scripts = []
                 db.commit()
                 for script in scripts:
                     content_sha256 = hashlib.sha256(script.content.encode("utf-8")).hexdigest()
@@ -805,6 +906,8 @@ class DiagnosticOrchestrator:
                 )
 
                 if run.options.get("pause_for_login"):
+                    run.current_stage = "manual_interaction"
+                    db.commit()
                     await self.pause(
                         run.id, "로그인을 직접 수행한 뒤 ‘재개’를 누르세요."
                     )
@@ -1078,6 +1181,9 @@ class DiagnosticOrchestrator:
             if lease_acquired:
                 await self._leases.release(run_id)
             self._stop_requested.discard(run_id)
+            async with self._state_lock:
+                self._safe_pause_waiting.discard(run_id)
+                self._manual_active.discard(run_id)
             self._pause_events.pop(run_id, None)
             self._proxy_adapters.pop(run_id, None)
             self._tasks.pop(run_id, None)

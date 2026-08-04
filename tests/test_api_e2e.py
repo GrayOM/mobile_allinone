@@ -42,9 +42,10 @@ def test_mock_demo_runs_end_to_end(client):
     findings = client.get(f"/api/findings?run_id={run['id']}").json()
 
     assert len(evidence) >= 10
-    assert {"screenshot", "frida_script", "network_capture", "device_log"} <= {
+    assert {"screenshot", "network_capture", "device_log"} <= {
         item["evidence_type"] for item in evidence
     }
+    assert not any(item["evidence_type"] == "frida_script" for item in evidence)
     assert len(flows) == 2
     assert all(item["synthetic"] is True for item in evidence)
     assert all(item["synthetic"] is True for item in flows)
@@ -108,10 +109,10 @@ def test_custom_frida_script_requires_approval(client):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         paused = client.get(f"/api/runs/{started['id']}").json()
-        if paused["status"] == "paused":
+        if paused["status"] == "safely_paused":
             break
         time.sleep(0.05)
-    assert paused["status"] == "paused"
+    assert paused["status"] == "safely_paused"
     approval = client.post(
         "/api/approvals",
         json={
@@ -158,10 +159,10 @@ def test_login_pause_and_resume(client):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         run = client.get(f"/api/runs/{run_id}").json()
-        if run["status"] == "paused":
+        if run["status"] == "safely_paused":
             break
         time.sleep(0.05)
-    assert run["status"] == "paused"
+    assert run["status"] == "safely_paused"
     assert run["current_stage"] == "manual_interaction"
 
     resumed = client.post(f"/api/runs/{run_id}/resume")

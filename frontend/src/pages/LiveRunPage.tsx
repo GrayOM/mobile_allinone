@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "../router";
-import { api, post, runWebSocket } from "../api";
+import { api, post, runWebSocket, upload } from "../api";
 import type {
   DiagnosticRun,
   Evidence,
@@ -18,6 +18,7 @@ const stageLabels: Record<string, string> = {
   security_control_validation: "보안통제 우회 내성 검증",
   frida: "Frida 적용",
   manual_interaction: "수동 조작",
+  proxy_manual_setup: "수동 프록시 준비",
   network_dynamic: "동적·네트워크",
   ai_analysis: "AI 판정",
   finalize: "증적 정리",
@@ -34,6 +35,8 @@ export default function LiveRunPage() {
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [actionBusy, setActionBusy] = useState("");
+  const [proxyImporting, setProxyImporting] = useState(0);
+  const [actionError, setActionError] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
 
   async function refresh() {
@@ -50,32 +53,57 @@ export default function LiveRunPage() {
   }
 
   useEffect(() => {
+    let disposed = false;
     void refresh();
-    const socket = runWebSocket(runId);
-    wsRef.current = socket;
-    socket.onopen = () => setConnected(true);
-    socket.onclose = () => setConnected(false);
-    socket.onmessage = (message) => {
-      const event = JSON.parse(message.data) as LiveEvent;
-      setEvents((items) => [...items.slice(-119), event]);
-      if (["stage", "run_status", "evidence", "proxy_flow", "finding"].includes(event.type)) {
-        void refresh();
+    void runWebSocket(runId).then((socket) => {
+      if (disposed) {
+        socket.close();
+        return;
       }
-    };
+      wsRef.current = socket;
+      socket.onopen = () => setConnected(true);
+      socket.onclose = () => setConnected(false);
+      socket.onmessage = (message) => {
+        const event = JSON.parse(message.data) as LiveEvent;
+        setEvents((items) => [...items.slice(-119), event]);
+        if (["stage", "run_status", "evidence", "proxy_flow", "finding"].includes(event.type)) {
+          void refresh();
+        }
+      };
+    }).catch((reason: Error) => {
+      if (!disposed) setActionError(reason.message);
+    });
     const poll = window.setInterval(() => void refresh(), 2500);
     return () => {
+      disposed = true;
       window.clearInterval(poll);
-      socket.close();
+      wsRef.current?.close();
     };
   }, [runId]);
 
   async function control(action: "pause" | "resume" | "stop") {
     setActionBusy(action);
     try {
+      setActionError("");
       await post(`/runs/${runId}/${action}`);
       await refresh();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "진단 상태 변경 실패");
     } finally {
       setActionBusy("");
+    }
+  }
+
+  async function importProxyCapture(file?: File) {
+    if (!file) return;
+    setActionError("");
+    try {
+      await upload<Record<string, unknown>>(`/runs/${runId}/proxy/import`, file, setProxyImporting);
+      await refresh();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "프록시 파일 Import 실패");
+    } finally {
+      setProxyImporting(0);
     }
   }
 
@@ -107,17 +135,50 @@ export default function LiveRunPage() {
           <StatusChip value={run.status} />
         </div>
         <div className="live-controls">
-          {run.status === "paused" ? (
+          {run.status === "safely_paused" ? (
             <button className="button button--signal" onClick={() => void control("resume")} disabled={Boolean(actionBusy)}>재개</button>
+          ) : run.status === "pause_requested" ? (
+            <button className="button button--quiet" disabled>안전 지점 대기 중</button>
           ) : (
             <button className="button button--quiet" onClick={() => void control("pause")} disabled={run.status !== "running" || Boolean(actionBusy)}>일시정지</button>
           )}
-          <button className="button button--quiet" onClick={() => void control("pause")} disabled={run.status !== "running"}>수동 조작 전환</button>
-          <button className="button button--danger" onClick={() => void control("stop")} disabled={!["running", "paused"].includes(run.status)}>중지</button>
+          <button className="button button--danger" onClick={() => void control("stop")} disabled={!["running", "pause_requested", "safely_paused"].includes(run.status)}>중지</button>
         </div>
       </header>
 
       {run.error && <div className="inline-alert">{run.error}</div>}
+      {actionError && <div className="inline-alert">{actionError}</div>}
+      {run.current_stage === "proxy_manual_setup" && (
+        <section className="panel manual-proxy-panel">
+          <div>
+            <span className="eyebrow">MANUAL PROXY CHECKPOINT</span>
+            <h3>{run.proxy_adapter === "burp" ? "Burp Suite" : "Fiddler"} 캡처 준비</h3>
+            <ol>
+              {Array.isArray(run.options.manual_proxy_instructions)
+                ? run.options.manual_proxy_instructions.map((item) => (
+                    <li key={String(item)}>{String(item)}</li>
+                  ))
+                : <li>프록시 설정 후 HAR 또는 JSON을 가져오세요.</li>}
+            </ol>
+          </div>
+          <label className={`drop-zone ${proxyImporting ? "drop-zone--busy" : ""}`}>
+            <input
+              type="file"
+              accept=".har,.json,application/json"
+              disabled={run.status !== "safely_paused" || Boolean(proxyImporting)}
+              onChange={(event) => void importProxyCapture(event.target.files?.[0])}
+            />
+            <strong>
+              {run.options.manual_proxy_imported
+                ? `${String(run.options.manual_proxy_flow_count ?? 0)}개 흐름 Import 완료`
+                : proxyImporting
+                  ? `Import 중 ${proxyImporting}%`
+                  : "HAR/JSON 가져오기"}
+            </strong>
+            <small>Import가 확인된 뒤에만 재개할 수 있습니다.</small>
+          </label>
+        </section>
+      )}
 
       <div className="live-grid">
         <section className="console-panel device-console">

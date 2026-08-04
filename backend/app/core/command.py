@@ -129,3 +129,132 @@ async def run_command(
             await asyncio.gather(*pending, return_exceptions=True)
     result.finished_at = datetime.now(timezone.utc)
     return result
+
+
+async def run_binary_command(
+    args: Sequence[str],
+    *,
+    timeout: int = 30,
+) -> tuple[CommandResult, bytes]:
+    command = [str(part) for part in args]
+    result = CommandResult(status=CapabilityStatus.FAILED, command=command)
+    output = b""
+    communicate: asyncio.Task[tuple[bytes, bytes]] | None = None
+    process: asyncio.subprocess.Process | None = None
+    if not command or not command[0]:
+        result.status = CapabilityStatus.NOT_CONFIGURED
+        result.error = "실행 파일이 설정되지 않았습니다."
+        result.finished_at = datetime.now(timezone.utc)
+        return result, output
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **subprocess_group_options(),
+        )
+        communicate = asyncio.create_task(process.communicate())
+        output, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate), timeout=timeout
+        )
+        result.return_code = process.returncode
+        result.stdout = f"<binary {len(output)} bytes>"
+        result.stderr = stderr.decode("utf-8", errors="replace")
+        result.status = (
+            CapabilityStatus.AVAILABLE
+            if process.returncode == 0
+            else CapabilityStatus.FAILED
+        )
+    except FileNotFoundError:
+        result.status = CapabilityStatus.NOT_CONFIGURED
+        result.error = f"실행 파일을 찾을 수 없습니다: {command[0]}"
+    except asyncio.TimeoutError:
+        result.error = f"{timeout}초 안에 명령이 끝나지 않아 중단했습니다."
+        if process is not None:
+            await terminate_process_tree(process)
+        if communicate is not None:
+            captured = await asyncio.gather(
+                communicate, return_exceptions=False
+            )
+            output, stderr = captured[0]
+            result.stderr = stderr.decode("utf-8", errors="replace")
+    except asyncio.CancelledError:
+        if process is not None:
+            await terminate_process_tree(process)
+        raise
+    except OSError as exc:
+        result.error = str(exc)
+        if process is not None:
+            await terminate_process_tree(process)
+    finally:
+        if communicate is not None and not communicate.done():
+            communicate.cancel()
+            await asyncio.gather(communicate, return_exceptions=True)
+        result.finished_at = datetime.now(timezone.utc)
+    return result, output
+
+
+async def capture_command_for_duration(
+    args: Sequence[str],
+    *,
+    duration_seconds: int,
+    shutdown_timeout: int = 10,
+) -> tuple[CommandResult, bytes]:
+    command = [str(part) for part in args]
+    result = CommandResult(status=CapabilityStatus.FAILED, command=command)
+    output = b""
+    communicate: asyncio.Task[tuple[bytes, bytes]] | None = None
+    process: asyncio.subprocess.Process | None = None
+    stopped_after_duration = False
+    if not command or not command[0]:
+        result.status = CapabilityStatus.NOT_CONFIGURED
+        result.error = "실행 파일이 설정되지 않았습니다."
+        result.finished_at = datetime.now(timezone.utc)
+        return result, output
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **subprocess_group_options(),
+        )
+        communicate = asyncio.create_task(process.communicate())
+        done, _ = await asyncio.wait(
+            {communicate},
+            timeout=max(1, min(duration_seconds, 60)),
+        )
+        if communicate not in done:
+            stopped_after_duration = True
+            await terminate_process_tree(process, timeout=float(shutdown_timeout))
+        output, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate), timeout=shutdown_timeout
+        )
+        result.return_code = 0 if stopped_after_duration else process.returncode
+        result.stdout = output.decode("utf-8", errors="replace")
+        result.stderr = stderr.decode("utf-8", errors="replace")
+        result.status = (
+            CapabilityStatus.AVAILABLE
+            if stopped_after_duration or process.returncode == 0
+            else CapabilityStatus.FAILED
+        )
+    except FileNotFoundError:
+        result.status = CapabilityStatus.NOT_CONFIGURED
+        result.error = f"실행 파일을 찾을 수 없습니다: {command[0]}"
+    except asyncio.TimeoutError:
+        result.error = "수집 프로세스가 종료 제한시간 안에 끝나지 않았습니다."
+        if process is not None:
+            await terminate_process_tree(process)
+    except asyncio.CancelledError:
+        if process is not None:
+            await terminate_process_tree(process)
+        raise
+    except OSError as exc:
+        result.error = str(exc)
+        if process is not None:
+            await terminate_process_tree(process)
+    finally:
+        if communicate is not None and not communicate.done():
+            communicate.cancel()
+            await asyncio.gather(communicate, return_exceptions=True)
+        result.finished_at = datetime.now(timezone.utc)
+    return result, output

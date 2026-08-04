@@ -29,7 +29,7 @@ export default function ScriptsPage() {
       api<DiagnosticRun[]>(`/projects/${projectId}/runs`),
     ]).then(([projectItem, runs]) => {
       setProject(projectItem);
-      setPausedRuns(runs.filter((run) => run.status === "paused"));
+      setPausedRuns(runs.filter((run) => run.status === "safely_paused"));
     });
   }, []);
 

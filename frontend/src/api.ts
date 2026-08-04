@@ -1,22 +1,30 @@
 const API_BASE = "/api";
 
-const ACCESS_TOKEN_KEY = "msw.accessToken";
-const ADMIN_TOKEN_KEY = "msw.adminToken";
+let accessToken = "";
+let adminToken = "";
+let authenticationRequired = false;
 
-export function captureAccessTokensFromLocation(): void {
-  if (!window.location.hash) return;
-  const values = new URLSearchParams(window.location.hash.slice(1));
-  const accessToken = values.get("access_token");
-  const adminToken = values.get("admin_token");
-  if (!accessToken && !adminToken) return;
-  if (accessToken) sessionStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
-  if (adminToken) sessionStorage.setItem(ADMIN_TOKEN_KEY, adminToken);
-  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+export function configureLanSession(value: string): void {
+  const [nextAccess, nextAdmin, ...extra] = value.trim().split("|");
+  if (extra.length || !nextAccess || !nextAdmin || nextAccess.length < 32 || nextAdmin.length < 32) {
+    throw new Error("PowerShell이 복사한 LAN 세션 문자열 형식이 올바르지 않습니다.");
+  }
+  accessToken = nextAccess;
+  adminToken = nextAdmin;
+  authenticationRequired = false;
+  window.dispatchEvent(new Event("msw-auth-updated"));
+}
+
+export function isAuthenticationRequired(): boolean {
+  return authenticationRequired;
+}
+
+function requestAuthentication(): void {
+  authenticationRequired = true;
+  window.setTimeout(() => window.dispatchEvent(new Event("msw-auth-required")), 0);
 }
 
 function applySecurityHeaders(headers: Headers): void {
-  const accessToken = sessionStorage.getItem(ACCESS_TOKEN_KEY);
-  const adminToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
   if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
   if (adminToken) headers.set("X-MSW-Admin-Token", adminToken);
 }
@@ -52,6 +60,7 @@ export async function api<T>(
   }
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (!response.ok) {
+    if (response.status === 401) requestAuthentication();
     throw new ApiError(response.status, await parseError(response));
   }
   return response.json() as Promise<T>;
@@ -91,8 +100,6 @@ export async function upload<T>(
     const data = new FormData();
     data.append("file", file);
     request.open("POST", `${API_BASE}${path}`);
-    const accessToken = sessionStorage.getItem(ACCESS_TOKEN_KEY);
-    const adminToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
     if (accessToken) request.setRequestHeader("Authorization", `Bearer ${accessToken}`);
     if (adminToken) request.setRequestHeader("X-MSW-Admin-Token", adminToken);
     request.upload.onprogress = (event) => {
@@ -103,6 +110,7 @@ export async function upload<T>(
       if (request.status >= 200 && request.status < 300) {
         resolve(JSON.parse(request.responseText) as T);
       } else {
+        if (request.status === 401) requestAuthentication();
         try {
           reject(new ApiError(request.status, JSON.parse(request.responseText).detail));
         } catch {
@@ -114,11 +122,10 @@ export async function upload<T>(
   });
 }
 
-export function runWebSocket(runId: string): WebSocket {
+export async function runWebSocket(runId: string): Promise<WebSocket> {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const accessToken = sessionStorage.getItem(ACCESS_TOKEN_KEY);
-  const query = accessToken ? `?access_token=${encodeURIComponent(accessToken)}` : "";
+  const issued = await post<{ ticket: string }>("/ws-ticket", { run_id: runId });
   return new WebSocket(
-    `${protocol}//${window.location.host}${API_BASE}/runs/${runId}/ws${query}`,
+    `${protocol}//${window.location.host}${API_BASE}/runs/${runId}/ws?ticket=${encodeURIComponent(issued.ticket)}`,
   );
 }

@@ -24,7 +24,7 @@ from backend.app.core.security import ApiSecurityMiddleware
 from backend.app.core.status import CapabilityStatus
 from backend.app.database.models import DiagnosticRun
 from backend.app.database.base import Base
-from backend.app.database.migrations import MIGRATION_ID, apply_migrations
+from backend.app.database.migrations import MIGRATION_ID, MIGRATION_ID_V3, apply_migrations
 from backend.app.devices import IOSDeviceAdapter
 from backend.app.frida.manager import FridaManager
 from backend.app.orchestration import DiagnosticOrchestrator
@@ -113,10 +113,10 @@ def test_active_run_blocks_project_delete_until_stop_finishes(client):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         run = client.get(f"/api/runs/{started['id']}").json()
-        if run["status"] == "paused":
+        if run["status"] == "safely_paused":
             break
         time.sleep(0.05)
-    assert run["status"] == "paused"
+    assert run["status"] == "safely_paused"
     assert client.delete(f"/api/projects/{demo['project']['id']}").status_code == 409
     stopped = client.post(f"/api/runs/{started['id']}/stop")
     assert stopped.status_code == 200
@@ -272,6 +272,11 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
 
     columns = {item["name"] for item in inspect(engine).get_columns("projects")}
     assert "run_mode" in columns
+    assert {
+        "external_analyzer_destination",
+        "external_analyzer_addresses",
+        "external_analyzer_certificate_sha256",
+    } <= columns
     with engine.connect() as connection:
         assert connection.scalar(
             text("SELECT run_mode FROM projects WHERE id = 'legacy-mock'")
@@ -288,16 +293,21 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
                 "WHERE id = 'legacy-script'"
             )
         )
+        destination_migration = connection.scalar(
+            text("SELECT id FROM schema_migrations WHERE id = :id"),
+            {"id": MIGRATION_ID_V3},
+        )
     assert migration.id == MIGRATION_ID
     assert migration.backup_path and Path(migration.backup_path).is_file()
     assert approval_status == "pending_approval"
+    assert destination_migration == MIGRATION_ID_V3
 
 
 def _wait_until_paused(client, run_id: str):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         run = client.get(f"/api/runs/{run_id}").json()
-        if run["status"] == "paused":
+        if run["status"] == "safely_paused":
             return run
         time.sleep(0.05)
     raise AssertionError("진단이 일시정지 상태에 도달하지 못했습니다.")

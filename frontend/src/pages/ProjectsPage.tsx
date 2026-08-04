@@ -128,13 +128,28 @@ export default function ProjectsPage() {
     }
   }
 
-  async function reanalyzeCurrentApp() {
-    if (!selectedApp) return;
+  async function reanalyzeCurrentApp(includeMobSF = false) {
+    if (!selectedApp || !project) return;
+    if (includeMobSF) {
+      if (!project.external_analyzer_allowed || !project.external_analyzer_destination) {
+        setError("프로젝트의 MobSF 목적지 승인이 필요합니다.");
+        return;
+      }
+      const approved = window.confirm(
+        `다음 앱 원본을 MobSF로 전송할까요?\n\n목적지: ${project.external_analyzer_destination}\nAPK/IPA SHA-256: ${selectedApp.sha256}\n\n현재 목적지·DNS·TLS 인증서와 해시가 모두 일치할 때만 전송됩니다.`,
+      );
+      if (!approved) return;
+    }
     setReanalyzing(true);
     setError("");
     try {
       const refreshed = await post<AppArtifact>(
         `/apps/${selectedApp.id}/reanalyze`,
+        includeMobSF ? {
+          confirm_external_analyzer: true,
+          expected_destination: project.external_analyzer_destination,
+          expected_sha256: selectedApp.sha256,
+        } : {},
       );
       const refreshedOverview = await api<AnalysisOverview>(
         `/apps/${selectedApp.id}/analysis/overview`,
@@ -237,6 +252,13 @@ export default function ProjectsPage() {
                   <StatusChip value={project.external_analyzer_allowed ? "available" : "not_configured"} label={project.external_analyzer_allowed ? "MobSF 전송 허용" : "MobSF 전송 차단"} />
                   <button className="button button--danger button--small" onClick={() => void deleteCurrentProject()}>프로젝트 삭제</button>
                 </div>
+                {project.external_analyzer_allowed && project.external_analyzer_destination && (
+                  <div className="summary-block">
+                    <span>승인된 MobSF 목적지</span>
+                    <code>{project.external_analyzer_destination}</code>
+                    <small>{project.external_analyzer_addresses.join(", ")} · TLS {project.external_analyzer_certificate_sha256?.slice(0, 16) ?? "HTTP"}…</small>
+                  </div>
+                )}
               </div>
 
               <label className={`drop-zone ${uploading ? "drop-zone--busy" : ""}`}>
@@ -280,6 +302,11 @@ export default function ProjectsPage() {
                   overview={overview}
                   reanalyzing={reanalyzing}
                   onReanalyze={() => void reanalyzeCurrentApp()}
+                  onReanalyzeMobSF={
+                    project.external_analyzer_allowed
+                      ? () => void reanalyzeCurrentApp(true)
+                      : undefined
+                  }
                 />
               </div>
             </>
@@ -297,11 +324,13 @@ function AnalysisSummary({
   overview,
   reanalyzing,
   onReanalyze,
+  onReanalyzeMobSF,
 }: {
   app: AppArtifact | null;
   overview: AnalysisOverview | null;
   reanalyzing: boolean;
   onReanalyze: () => void;
+  onReanalyzeMobSF?: () => void;
 }) {
   if (!app) {
     return (
@@ -333,6 +362,15 @@ function AnalysisSummary({
           >
             {reanalyzing ? "분석 중…" : "OSS 분석기 재실행"}
           </button>
+          {onReanalyzeMobSF && (
+            <button
+              className="button button--signal button--small"
+              onClick={onReanalyzeMobSF}
+              disabled={reanalyzing}
+            >
+              MobSF 전송 확인 후 재실행
+            </button>
+          )}
         </div>
       </div>
       <div className="analysis-numbers">

@@ -14,6 +14,9 @@ export interface Project {
   external_analyzer_allowed: boolean;
   external_analyzer_approved_by: string | null;
   external_analyzer_approved_at: string | null;
+  external_analyzer_destination: string | null;
+  external_analyzer_addresses: string[];
+  external_analyzer_certificate_sha256: string | null;
   mock_mode: boolean;
   run_mode: "mock" | "live";
   created_at: string;

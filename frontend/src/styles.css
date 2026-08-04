@@ -592,6 +592,8 @@ a:hover {
 
 .status-chip--manual-required,
 .status-chip--paused,
+.status-chip--pause-requested,
+.status-chip--safely-paused,
 .status-chip--needs-review,
 .status-chip--pending-approval {
   color: #76500b;
@@ -601,9 +603,67 @@ a:hover {
 
 .status-chip--manual-required > span,
 .status-chip--paused > span,
+.status-chip--pause-requested > span,
+.status-chip--safely-paused > span,
 .status-chip--needs-review > span,
 .status-chip--pending-approval > span {
   background: #b47c13;
+}
+
+.form-note {
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.manual-proxy-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr);
+  gap: 24px;
+  padding: 24px;
+}
+
+.manual-proxy-panel h3 {
+  margin: 8px 0 12px;
+}
+
+.manual-proxy-panel ol {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.auth-gate {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(5, 27, 32, 0.88);
+}
+
+.auth-gate__panel {
+  width: min(520px, 100%);
+  padding: 30px;
+  border-top: 4px solid var(--signal);
+}
+
+.auth-gate__panel h2 {
+  margin: 8px 0;
+}
+
+.auth-gate__panel p {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+@media (max-width: 720px) {
+  .manual-proxy-panel {
+    grid-template-columns: 1fr;
+  }
 }
 
 .status-chip--not-configured,

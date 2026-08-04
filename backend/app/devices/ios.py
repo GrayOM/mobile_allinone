@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shlex
 from pathlib import Path
 
-from backend.app.core.command import CommandResult, run_command
+from backend.app.core.command import (
+    CommandResult,
+    capture_command_for_duration,
+    run_command,
+)
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus, Platform
 from backend.app.core.targets import (
@@ -369,30 +372,18 @@ class IOSDeviceAdapter(DeviceAdapter):
             return self._manual("idevicesyslog 또는 SSH 로그 수집 도구를 설정하세요.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         command = [self.idevicesyslog, "-u", device_id]
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await asyncio.sleep(max(1, min(duration_seconds, 60)))
-            process.terminate()
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-            text = stdout.decode("utf-8", errors="replace")
+        result, output = await capture_command_for_duration(
+            command,
+            duration_seconds=max(1, min(duration_seconds, 60)),
+            shutdown_timeout=10,
+        )
+        operation = self._operation(result, "iOS syslog 스트림을 수집했습니다.")
+        if result.ok:
+            text = output.decode("utf-8", errors="replace")
             destination.write_text(text, encoding="utf-8")
-            return DeviceOperation(
-                CapabilityStatus.AVAILABLE,
-                "iOS syslog 스트림을 수집했습니다.",
-                command=" ".join(command),
-                output=text[-20000:],
-                file_path=str(destination),
-            )
-        except (OSError, asyncio.TimeoutError) as exc:
-            return DeviceOperation(
-                CapabilityStatus.FAILED,
-                f"iOS syslog 수집 실패: {exc}",
-                command=" ".join(command),
-            )
+            operation.output = text[-20000:]
+            operation.file_path = str(destination)
+        return operation
 
     async def pull_file(
         self, device_id: str, remote_path: str, destination: Path

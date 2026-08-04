@@ -4,7 +4,7 @@ import asyncio
 import re
 from pathlib import Path
 
-from backend.app.core.command import CommandResult, run_command
+from backend.app.core.command import CommandResult, run_binary_command, run_command
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus, Platform
 from backend.app.core.targets import is_valid_app_identifier
@@ -176,31 +176,17 @@ class AndroidDeviceAdapter(DeviceAdapter):
         if not self.adb:
             return self._missing()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        result = await self._adb(device_id, "exec-out", "screencap", "-p")
+        result, png = await run_binary_command(
+            [self.adb, "-s", device_id, "exec-out", "screencap", "-p"],
+            timeout=30,
+        )
         op = self._operation(result, "화면을 캡처했습니다.")
-        if result.ok:
-            # stdout decoding is lossy for binary output; use a direct subprocess for PNG.
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    self.adb,
-                    "-s",
-                    device_id,
-                    "exec-out",
-                    "screencap",
-                    "-p",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                png, error = await asyncio.wait_for(process.communicate(), timeout=30)
-                if process.returncode == 0 and png.startswith(b"\x89PNG"):
-                    destination.write_bytes(png)
-                    op.file_path = str(destination)
-                else:
-                    op.status = CapabilityStatus.FAILED
-                    op.message = error.decode(errors="replace") or "PNG 캡처 결과가 올바르지 않습니다."
-            except (OSError, asyncio.TimeoutError) as exc:
-                op.status = CapabilityStatus.FAILED
-                op.message = str(exc)
+        if result.ok and png.startswith(b"\x89PNG"):
+            destination.write_bytes(png)
+            op.file_path = str(destination)
+        elif result.ok:
+            op.status = CapabilityStatus.FAILED
+            op.message = "PNG 캡처 결과가 올바르지 않습니다."
         return op
 
     async def start_screen_recording(

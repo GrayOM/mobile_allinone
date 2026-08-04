@@ -84,8 +84,10 @@ tests/               단위·API·Mock E2E 테스트
 - 장시간 외부 작업 전 DB transaction을 commit해 SQLite 잠금을 유지하지 않는다.
 - 앱·단말 Adapter·Frida 스크립트 플랫폼이 다르면 API와 Orchestrator 양쪽에서 실행을 차단한다.
 - Live Run은 `app_id`와 검증된 package name/Bundle ID가 필수이며 기본 대상값으로 대체하지 않는다.
-- 직접 단말·Runtime·Frida 작업은 일시정지된 Run Lease에 연결하고, 고위험 작업은 DB에 해시로 저장한 5분 만료 1회 승인 토큰과 증적을 사용한다.
+- 일시정지는 `pause_requested`에서 현재 작업 종료와 checkpoint를 거친 `safely_paused`로 전환하며, 직접 단말·Runtime·Frida 작업은 이 안전 상태와 Run Lease가 모두 일치할 때만 실행한다.
+- 고위험 직접 작업은 DB에 해시로 저장한 5분 만료 1회 승인 토큰과 증적을 사용하며, 수동 작업 중에는 자동 Run 재개를 차단한다.
 - 서버는 기본 loopback 전용이다. 특정 LAN IP 실행은 프로세스별 API·관리자 토큰과 Trusted Host를 강제하며 API 문서는 기본 비활성화한다.
+- WebSocket은 접근 토큰 대신 Bearer 인증으로 발급한 30초 만료·Run/IP 범위·1회용 Ticket을 사용한다. LAN 토큰은 URL이나 브라우저 저장소에 넣지 않는다.
 
 ### Android
 
@@ -122,6 +124,8 @@ tests/               단위·API·Mock E2E 테스트
 
 각 도구 실행은 `tool_runs`에 버전, 상태, 인자 배열, 오류, 원문 경로와 SHA-256을 저장한다. 원시 탐지는 `raw_findings`, 정규화된 발견항목의 출처는 `finding_sources`에 저장한다. 도구 하나가 실패해도 나머지 분석은 계속한다.
 
+동일 앱 재분석은 앱 ID별 Lease로 직렬화한다. 실행마다 `analysis/<uploaded-file-stem>/runs/<analysis-run-id>/`를 사용하고, 완료된 결과만 `latest.json`으로 원자적으로 활성화한다. 이미 분석 중이면 409 `analysis_in_progress`를 반환한다.
+
 ### MASTG 통제 커버리지
 
 - `backend/app/catalog/mastg.py`에 Android/iOS 통제 기준선이 있다.
@@ -134,6 +138,8 @@ tests/               단위·API·Mock E2E 테스트
 ### Frida와 AI
 
 - 내장 스크립트는 동작을 바꾸지 않는 저위험 관찰용이다.
+- 빈 Frida 선택은 “실행 안 함”이며 자동 선택은 별도 `auto_select_frida=true`에서만 동작한다.
+- 자동 진단은 대상 앱의 플랫폼·프레임워크·정적 신호와 맞는 `builtin + low` 스크립트만 실행한다. 사용자·AI·medium/high 스크립트는 `safely_paused` Run의 1회 승인 직접 실행만 허용한다.
 - 사용자 스크립트와 AI 후보는 `pending_approval`로 저장한다.
 - NVIDIA가 1차, Claude가 fallback이다.
 - Mock Provider로 외부 전송 없는 승인 흐름을 시험할 수 있다.
@@ -156,7 +162,8 @@ tests/               단위·API·Mock E2E 테스트
 
 - mitmproxy는 실제 `mitmdump` 프로세스와 addon으로 JSON Lines 흐름을 수집한다.
 - 요청·응답, Header/Body, Status와 민감정보 후보를 저장한다.
-- Burp/Fiddler는 현재 수동 연동 Adapter다.
+- Burp/Fiddler는 현재 프로세스 제어가 아닌 수동 연동 Adapter다. 선택 시 Run이 `proxy_manual_setup` 안전 지점에서 멈추며, 특정 LAN Listener 안내에 따라 캡처한 HAR/JSON을 Import해야 재개할 수 있다.
+- HAR/JSON은 크기·구조·Header·Body·URL·상태 코드를 제한하고 1개 이상의 흐름을 확인한 뒤 원본과 최종 패킷 증적으로 연결한다.
 - POST·PUT·PATCH·DELETE 요청을 자동 재전송하지 않는다.
 - mitmproxy는 특정 Windows LAN IP에만 바인딩하고 진단 단말의 출발지 IP만 addon에서 허용한다.
 - 동적 테스트 종료 후 프록시 Stop·Flush·최종 Drain 순서로 패킷을 저장한다.
@@ -167,7 +174,9 @@ tests/               단위·API·Mock E2E 테스트
 - APK/IPA는 Entry 수, 전체·개별 비압축 크기, 압축률, 중첩 압축, 경로, 중복, 암호화, symlink를 사전 검사한다.
 - 제한 초과는 warning이 아니라 422 rejected로 종료하며 외부 분석기를 실행하지 않는다.
 - 외부 분석 도구는 프로세스 그룹으로 실행하고 wall time·프로세스 트리 메모리·CPU 시간을 제한한다.
-- MobSF는 프로젝트 승인과 loopback·사내 목적지 허용목록을 통과한 경우에만 앱을 전송하며 `tool_runs`에 목적지와 승인자를 남긴다.
+- MobSF는 승인 시 `scheme://host:port`, 모든 A/AAAA 주소와 TLS 인증서 SHA-256을 묶어 저장하며 하나라도 달라지면 승인을 취소한다.
+- 실제 앱 전송은 사용자가 화면에서 현재 목적지와 APK/IPA SHA-256을 다시 확인한 재분석에서만 수행한다. HTTP 환경 프록시는 사용하지 않으며 `tool_runs`에 목적지·주소·인증서·앱 해시와 승인자를 남긴다.
+- ADB 바이너리 캡처와 `idevicesyslog`를 포함한 직접 subprocess는 Timeout·Task 취소 시 전체 프로세스 트리를 종료하고 `wait()`까지 완료한다.
 
 ## 4. 주요 데이터 모델
 
@@ -189,6 +198,8 @@ data/
 ├─ workbench.db
 ├─ uploads/<project-id>/
 ├─ analysis/<uploaded-file-stem>/
+│  ├─ latest.json
+│  └─ runs/<analysis-run-id>/
 ├─ evidence/<run-id>/
 ├─ proxy/
 ├─ ai_raw/
@@ -210,6 +221,7 @@ data/
 
 /api/runs
 /api/runs/{id}/pause|resume|stop
+/api/runs/{id}/proxy/import
 /api/runs/{id}/ws
 /api/runs/{id}/evidence
 /api/runs/{id}/flows
@@ -227,6 +239,7 @@ data/
 /api/findings/{id}/report
 
 /api/proxy/adapters
+/api/ws-ticket
 /api/ai/test
 /api/settings
 ```
@@ -330,7 +343,7 @@ MSW_ENABLE_API_DOCS=false
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          31 passed
+pytest -q                          41 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -346,6 +359,7 @@ npm audit --audit-level=high      0 vulnerabilities
 - Live/Mock 혼용 차단, 실행 중 삭제 차단·중지 대기, ZIP 경로·압축률 거부 확인
 - 구조 기반 AI 마스킹과 Finding별 증적 ID 연결 확인
 - 1440×1000·390×844에서 설정 화면과 Mock/Live 진단 경계를 확인하고 브라우저 콘솔 오류 0건 확인
+- Frida 명시적 미선택·안전 자동 선택, Burp HAR checkpoint, 안전 일시정지 동기화, MobSF 목적지 결합, WebSocket 1회 Ticket, subprocess 정리, 앱별 분석 Lock 회귀 테스트 통과
 
 테스트 명령:
 

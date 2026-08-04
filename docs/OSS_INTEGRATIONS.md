@@ -48,13 +48,20 @@ run clones it and links evidence IDs as checks execute.
 ## Runtime approval boundary
 
 Read-only objection and drozer actions may run from the diagnostic setup.
-Direct device, runtime and Frida operations are scoped to a paused diagnostic
-run and its device lease. Actions that change app behavior, dump sensitive
+Direct device, runtime and Frida operations are scoped to a `safely_paused`
+diagnostic run and its device lease. A pause request first becomes
+`pause_requested`; manual work remains blocked until the active command finishes
+and the orchestrator reaches a checkpoint. Actions that change app behavior, dump sensitive
 stores or invoke exposed components require a server-issued, five-minute,
 single-use approval token. Only its SHA-256 is stored, together with approver,
 scope, issue time and consume time. AI-generated Frida code is always stored as
 `pending_approval`; it is never executed in the generation request or automatic
 repair step.
+
+An empty Frida selection means no Frida execution. Optional automatic selection
+is explicit and is restricted to approved built-in, low-risk scripts whose
+platform, framework and analysis conditions match the selected app. Custom, AI,
+medium and high-risk scripts remain in the per-run manual approval path.
 
 Every runtime command is bound to the selected device. pymobiledevice3 receives
 the selected UDID, iOS Frida uses `-D <device-id>`, and drozer gets a per-run ADB
@@ -74,6 +81,11 @@ failure and server shutdown, then drains the final JSONL capture. Listener bind
 failures trigger a new leased port and retry up to three times inside a shared
 startup critical section.
 
+Burp and Fiddler remain manually operated products. Selecting either pauses the
+run at `proxy_manual_setup`, displays the exact LAN listener instructions and
+requires a non-empty, structurally validated HAR/JSON import before resume. The
+imported original and normalized final flows are both retained as evidence.
+
 APK/IPA input is rejected before external tools run when archive entry, expanded
 size, compression-ratio, nested archive, duplicate-name, traversal, encryption or
 symlink limits are exceeded. Optional analyzer subprocesses and Androguard run
@@ -81,14 +93,23 @@ outside the FastAPI process with wall-time, process-tree memory and CPU-time
 limits.
 
 MobSF upload is disabled per project unless `external_analyzer_allowed` was
-explicitly approved. Its URL must also match the configured loopback or
-corporate destination allowlist; transmission destination and approval metadata
-are retained in the analyzer tool run.
+explicitly approved. Approval is bound to the normalized destination, every
+resolved A/AAAA address and the HTTPS certificate SHA-256. A settings, DNS or
+certificate change invalidates approval. Each upload also requires a second UI
+confirmation of the destination and current APK/IPA SHA-256. HTTP environment
+proxies and redirects are disabled; the destination, addresses, certificate,
+artifact hash and approval metadata are retained in the analyzer tool run.
+
+Static reanalysis uses an app-scoped in-process lease and a unique output
+directory per attempt. A concurrent request returns `409 analysis_in_progress`;
+successful output is activated through an atomically replaced `latest.json`.
 
 The HTTP API is loopback-only by default. LAN mode requires a specific bind
 address, an ephemeral Bearer token, a separate administrator token for state
 changes, and Trusted Host validation. OpenAPI, Swagger UI and ReDoc are disabled
-unless explicitly enabled.
+unless explicitly enabled. WebSockets use a 30-second, single-use, run- and
+client-scoped ticket issued through Bearer-authenticated `/api/ws-ticket`; API
+and administrator tokens are not placed in URLs or browser storage.
 
 ## Windows installation
 
