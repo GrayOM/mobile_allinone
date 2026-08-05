@@ -591,6 +591,7 @@ a:hover {
 }
 
 .status-chip--manual-required,
+.status-chip--completed-with-gaps,
 .status-chip--paused,
 .status-chip--pause-requested,
 .status-chip--safely-paused,
@@ -602,6 +603,7 @@ a:hover {
 }
 
 .status-chip--manual-required > span,
+.status-chip--completed-with-gaps > span,
 .status-chip--paused > span,
 .status-chip--pause-requested > span,
 .status-chip--safely-paused > span,
@@ -3002,6 +3004,7 @@ a:hover {
 }
 
 .download-link {
+  width: 100%;
   display: flex;
   justify-content: space-between;
   gap: 14px;
@@ -3012,11 +3015,27 @@ a:hover {
   border: 1px solid #bddbd7;
   font-size: 9px;
   font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.download-link:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .download-link span {
   color: var(--slate-500);
   font: 8px "Cascadia Mono", monospace;
+}
+
+.authenticated-image-loading {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  color: var(--slate-500);
+  background: #e5ecea;
+  font-size: 9px;
 }
 
 .platform-switch {

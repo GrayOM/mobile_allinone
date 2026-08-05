@@ -4,16 +4,20 @@ import asyncio
 import hashlib
 import json
 import shutil
+import ssl
 import sys
 import time
 import uuid
 from pathlib import Path
 
+import httpx
 import psutil
 import pytest
+from sqlalchemy import select
 from starlette.websockets import WebSocketDisconnect
 
 import backend.app.analyzers.adapters as adapter_module
+import backend.app.api.router as router_module
 import backend.app.devices.android as android_module
 import backend.app.devices.ios as ios_module
 from backend.app.analyzers.adapters import MobSFAnalyzerAdapter
@@ -26,14 +30,24 @@ from backend.app.core.command import (
 from backend.app.core.config import AppSettings, ToolPaths
 from backend.app.core.network import (
     DestinationSnapshot,
+    PinnedNetworkBackend,
     approval_matches_destination,
     inspect_mobsf_destination,
+    pinned_http_transport,
 )
 from backend.app.core.status import CapabilityStatus, RunStatus
-from backend.app.database.models import AppArtifact, DiagnosticRun, Project
+from backend.app.database.models import (
+    AnalysisRun,
+    AppArtifact,
+    DiagnosticRun,
+    Project,
+    ToolRun,
+)
 from backend.app.database.session import SessionLocal
 from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDeviceAdapter
-from backend.app.orchestration import DiagnosticOrchestrator
+from backend.app.devices.base import DeviceOperation
+from backend.app.frida import FridaSessionManager, FridaSessionScript
+from backend.app.orchestration import DiagnosticOrchestrator, ManualActionInProgress
 
 
 def _wait_for_status(client, run_id: str, statuses: set[str], timeout: float = 12):
@@ -106,6 +120,110 @@ def test_frida_empty_selection_is_none_and_auto_select_is_safe(client):
     assert all(item["inline_data"]["risk"] == "low" for item in executed)
 
 
+@pytest.mark.asyncio
+async def test_frida_session_loads_multiple_scripts_once_and_detaches_at_run_end(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+
+    class FakeScript:
+        def __init__(self, name: str):
+            self.name = name
+            self.callback = None
+
+        def on(self, _event, callback):
+            self.callback = callback
+
+        def load(self):
+            events.append(f"load:{self.name}")
+            self.callback({"type": "send", "payload": self.name}, None)
+
+        def unload(self):
+            events.append(f"unload:{self.name}")
+
+    class FakeSession:
+        def __init__(self):
+            self.created: list[FakeScript] = []
+
+        def create_script(self, _content, *, name):
+            script = FakeScript(name)
+            self.created.append(script)
+            return script
+
+        def detach(self):
+            events.append("detach")
+
+    class FakeDevice:
+        def __init__(self):
+            self.session = FakeSession()
+            self.spawn_count = 0
+            self.attach_count = 0
+
+        def spawn(self, targets):
+            self.spawn_count += 1
+            assert targets == ["com.example.app"]
+            return 4242
+
+        def attach(self, pid):
+            self.attach_count += 1
+            assert pid == 4242
+            return self.session
+
+        def resume(self, pid):
+            assert pid == 4242
+            events.append("resume")
+
+    device = FakeDevice()
+
+    class FakeFrida:
+        @staticmethod
+        def get_device(device_id, timeout):
+            assert device_id == "device-1"
+            assert timeout == 5
+            return device
+
+    manager = FridaSessionManager(AppSettings())
+
+    async def syntax_ok(_content):
+        return CapabilityStatus.AVAILABLE, "ok"
+
+    monkeypatch.setattr(manager.syntax, "check_syntax", syntax_ok)
+    monkeypatch.setattr(
+        "backend.app.frida.session.importlib.import_module",
+        lambda name: FakeFrida if name == "frida" else None,
+    )
+    result = await manager.start(
+        run_id="run-1",
+        device_id="device-1",
+        target="com.example.app",
+        mode="spawn",
+        scripts=[
+            FridaSessionScript("script-1", "one", "send('one')"),
+            FridaSessionScript("script-2", "two", "send('two')"),
+        ],
+    )
+    assert result.status == CapabilityStatus.AVAILABLE
+    assert manager.is_active("run-1")
+    assert device.spawn_count == 1
+    assert device.attach_count == 1
+    assert events == ["load:one", "load:two", "resume"]
+    assert len(manager.snapshot("run-1")) == 2
+    assert "detach" not in events
+
+    streamed: list[dict] = []
+    manager.set_message_callback("run-1", streamed.append)
+    device.session.created[0].callback(
+        {"type": "send", "payload": "after-checkpoint"}, None
+    )
+    assert streamed[0]["message"]["payload"] == "after-checkpoint"
+
+    stopped = await manager.stop("run-1")
+    assert stopped is not None
+    assert stopped.status == CapabilityStatus.AVAILABLE
+    assert events[-3:] == ["unload:two", "unload:one", "detach"]
+    assert not manager.is_active("run-1")
+
+
 def _live_artifact_from_demo(client) -> tuple[Project, AppArtifact]:
     demo = client.post("/api/demo/bootstrap").json()
     settings = client.app.state.settings
@@ -149,6 +267,45 @@ def _live_artifact_from_demo(client) -> tuple[Project, AppArtifact]:
         return project, artifact
 
 
+def test_failed_app_launch_cannot_finish_as_completed(
+    client, monkeypatch: pytest.MonkeyPatch
+):
+    demo = client.post("/api/demo/bootstrap").json()
+
+    class LaunchFailingDevice(MockDeviceAdapter):
+        async def start_app(self, device_id: str, package_name: str):
+            return DeviceOperation(
+                CapabilityStatus.FAILED,
+                "simulated launch failure",
+                command=f"mock launch {package_name}",
+                synthetic=True,
+            )
+
+    monkeypatch.setattr(
+        client.app.state.orchestrator,
+        "_device",
+        lambda _adapter: LaunchFailingDevice(),
+    )
+    started = client.post(
+        "/api/runs",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "device_id": "mock-android-01",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+        },
+    )
+    assert started.status_code == 201
+    finished = _wait_for_status(
+        client,
+        started.json()["id"],
+        {"completed", "completed_with_gaps", "manual_required", "failed"},
+    )
+    assert finished["status"] == "failed"
+    assert "앱 실행 실패" in finished["error"]
+
+
 def test_burp_run_waits_for_nonempty_har_and_links_flows(
     client, monkeypatch: pytest.MonkeyPatch
 ):
@@ -178,6 +335,18 @@ def test_burp_run_waits_for_nonempty_har_and_links_flows(
     assert paused["status"] == "safely_paused", paused.get("error")
     assert paused["current_stage"] == "proxy_manual_setup"
     assert client.post(f"/api/runs/{run_id}/resume").status_code == 409
+
+    premature = client.post(
+        f"/api/runs/{run_id}/proxy/import",
+        files={"file": ("early.har", json.dumps({"log": {"entries": [{}]}}), "application/json")},
+    )
+    assert premature.status_code == 409
+    confirmed = client.post(f"/api/runs/{run_id}/proxy/confirm-setup")
+    assert confirmed.status_code == 200
+    assert client.post(f"/api/runs/{run_id}/resume").status_code == 200
+    paused = _wait_for_status(client, run_id, {"safely_paused", "failed"})
+    assert paused["status"] == "safely_paused", paused.get("error")
+    assert paused["current_stage"] == "proxy_capture_import"
 
     empty = client.post(
         f"/api/runs/{run_id}/proxy/import",
@@ -210,8 +379,11 @@ def test_burp_run_waits_for_nonempty_har_and_links_flows(
     assert imported.status_code == 200, imported.text
     assert imported.json()["flow_count"] == 1
     assert client.post(f"/api/runs/{run_id}/resume").status_code == 200
-    finished = _wait_for_status(client, run_id, {"completed", "failed"})
-    assert finished["status"] == "completed", finished.get("error")
+    finished = _wait_for_status(
+        client, run_id, {"completed", "completed_with_gaps", "failed"}
+    )
+    assert finished["status"] == "completed_with_gaps", finished.get("error")
+    assert "app_interaction" in finished["options"]["failed_required_stages"]
     flows = client.get(f"/api/runs/{run_id}/flows").json()
     assert len(flows) == 1
     assert flows[0]["url"] == "https://api.example.test/v1/profile"
@@ -266,6 +438,48 @@ async def test_pause_request_only_allows_manual_action_at_safe_checkpoint(client
     assert await orchestrator.resume(run_id) is True
     await asyncio.wait_for(checkpoint, timeout=1)
 
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        if project:
+            db.delete(project)
+            db.commit()
+
+
+@pytest.mark.asyncio
+async def test_stop_is_rejected_while_manual_action_holds_run_lease(client):
+    orchestrator = DiagnosticOrchestrator(client.app.state.settings)
+    with SessionLocal() as db:
+        project = Project(name=f"Manual stop {uuid.uuid4()}", run_mode="mock", mock_mode=True)
+        db.add(project)
+        db.flush()
+        run = DiagnosticRun(
+            project_id=project.id,
+            device_id="manual-device",
+            device_adapter="mock",
+            proxy_adapter="mock",
+            run_mode="mock",
+            synthetic=True,
+            status=RunStatus.SAFELY_PAUSED.value,
+            current_stage="manual_interaction",
+            options={},
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+        project_id = project.id
+
+    blocker = asyncio.Event()
+    task = asyncio.create_task(blocker.wait())
+    orchestrator._tasks[run_id] = task
+    orchestrator._safe_pause_waiting.add(run_id)
+    assert await orchestrator.begin_manual_action(run_id) is True
+    with pytest.raises(ManualActionInProgress):
+        await orchestrator.stop(run_id)
+    with SessionLocal() as db:
+        assert db.get(DiagnosticRun, run_id).options["manual_action_active"] is True
+    await orchestrator.end_manual_action(run_id)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
     with SessionLocal() as db:
         project = db.get(Project, project_id)
         if project:
@@ -332,6 +546,102 @@ async def test_mobsf_dns_and_artifact_confirmation_are_bound(
     assert result.metadata["artifact_sha256"] == hashlib.sha256(
         artifact.read_bytes()
     ).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_mobsf_transport_connects_to_snapshot_ip_and_rechecks_tls():
+    certificate = b"approved-certificate"
+    snapshot = DestinationSnapshot(
+        base_url="https://mobsf.internal:8443",
+        origin="https://mobsf.internal:8443",
+        addresses=("127.0.0.7",),
+        certificate_sha256=hashlib.sha256(certificate).hexdigest(),
+    )
+    connected_hosts: list[str] = []
+
+    class FakeSSL:
+        def getpeercert(self, *, binary_form):
+            assert binary_form is True
+            return certificate
+
+    class FakeStream:
+        async def read(self, _max_bytes, _timeout=None):
+            return b""
+
+        async def write(self, _buffer, _timeout=None):
+            return None
+
+        async def aclose(self):
+            return None
+
+        async def start_tls(self, _context, *, server_hostname, timeout=None):
+            assert server_hostname == "mobsf.internal"
+            assert timeout is None
+            return self
+
+        def get_extra_info(self, info):
+            if info == "server_addr":
+                return ("127.0.0.7", 8443)
+            if info == "ssl_object":
+                return FakeSSL()
+            return None
+
+    class FakeBackend:
+        async def connect_tcp(self, host, _port, **_kwargs):
+            connected_hosts.append(host)
+            return FakeStream()
+
+        async def sleep(self, _seconds):
+            return None
+
+    backend = PinnedNetworkBackend(snapshot)
+    backend._backend = FakeBackend()
+    stream = await backend.connect_tcp("mobsf.internal", 8443)
+    assert connected_hosts == ["127.0.0.7"]
+    secured = await stream.start_tls(
+        ssl.create_default_context(), server_hostname="mobsf.internal"
+    )
+    assert secured.get_extra_info("ssl_object") is not None
+
+
+@pytest.mark.asyncio
+async def test_mobsf_http_transport_uses_pinned_peer_without_dns():
+    requests: list[bytes] = []
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        requests.append(await reader.readuntil(b"\r\n\r\n"))
+        body = b'{"status":"ok"}'
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n".encode()
+            + b"Connection: close\r\n\r\n"
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    snapshot = DestinationSnapshot(
+        base_url=f"http://mobsf.internal:{port}",
+        origin=f"http://mobsf.internal:{port}",
+        addresses=("127.0.0.1",),
+        certificate_sha256=None,
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=pinned_http_transport(snapshot),
+            trust_env=False,
+            follow_redirects=False,
+        ) as client:
+            response = await client.get(f"{snapshot.base_url}/api/v1/health")
+        assert response.json() == {"status": "ok"}
+        assert f"Host: mobsf.internal:{port}\r\n".encode() in requests[0]
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 def test_websocket_ticket_is_run_scoped_and_single_use(client):
@@ -482,15 +792,71 @@ def test_reanalysis_returns_409_when_locked_and_activates_unique_directory(clien
         )
     activated = json.loads(latest.read_text(encoding="utf-8"))
     assert activated["output_dir"] == after
+    assert activated["analysis_run_id"] == completed.json()["active_analysis_run_id"]
+
+
+def test_reanalysis_activation_failure_keeps_previous_db_and_pointer(
+    client, monkeypatch: pytest.MonkeyPatch
+):
+    demo = client.post("/api/demo/bootstrap").json()
+    app_id = demo["app"]["id"]
+    with SessionLocal() as db:
+        artifact = db.get(AppArtifact, app_id)
+        assert artifact is not None
+        previous_active = artifact.active_analysis_run_id
+        previous_result = artifact.analysis_result
+        previous_tool_ids = list(
+            db.scalars(select(ToolRun.id).where(ToolRun.app_id == app_id))
+        )
+        latest = (
+            client.app.state.settings.analysis_dir
+            / Path(artifact.stored_path).stem
+            / "latest.json"
+        )
+        previous_pointer = latest.read_bytes()
+
+    real_replace = router_module.os.replace
+
+    def fail_latest(source, destination):
+        if Path(destination).name == "latest.json":
+            raise OSError("simulated pointer activation failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(router_module.os, "replace", fail_latest)
+    failed = client.post(f"/api/apps/{app_id}/reanalyze")
+    assert failed.status_code == 422
+    assert "활성" in failed.json()["detail"] or "재분석" in failed.json()["detail"]
+
+    with SessionLocal() as db:
+        artifact = db.get(AppArtifact, app_id)
+        assert artifact is not None
+        assert artifact.active_analysis_run_id == previous_active
+        assert artifact.analysis_result == previous_result
+        assert list(db.scalars(select(ToolRun.id).where(ToolRun.app_id == app_id))) == previous_tool_ids
+        newest = db.scalars(
+            select(AnalysisRun)
+            .where(AnalysisRun.app_id == app_id)
+            .order_by(AnalysisRun.created_at.desc())
+        ).first()
+        assert newest is not None
+        assert newest.status == "failed"
+    assert latest.read_bytes() == previous_pointer
 
 
 def test_launcher_and_frontend_do_not_persist_access_tokens_in_urls():
     root = Path(__file__).resolve().parents[1]
     launcher = (root / "run_windows.ps1").read_text(encoding="utf-8")
     api_source = (root / "frontend" / "src" / "api.ts").read_text(encoding="utf-8")
+    live_source = (root / "frontend" / "src" / "pages" / "LiveRunPage.tsx").read_text(encoding="utf-8")
+    finding_source = (root / "frontend" / "src" / "pages" / "FindingDetailPage.tsx").read_text(encoding="utf-8")
     assert "access_token=" not in launcher
     assert "admin_token=" not in launcher
     assert "Start-Process $Url" in launcher
     assert "sessionStorage" not in api_source
     assert "?access_token=" not in api_source
     assert "/ws-ticket" in api_source
+    assert "apiBlob" in api_source
+    assert "src={\u0060/api/evidence/" not in live_source
+    assert "src={\u0060/api/evidence/" not in finding_source
+    assert "href={\u0060/api/evidence/" not in finding_source
+    assert "openAuthenticatedFile" in finding_source

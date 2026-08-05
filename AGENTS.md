@@ -85,9 +85,11 @@ tests/               단위·API·Mock E2E 테스트
 - 앱·단말 Adapter·Frida 스크립트 플랫폼이 다르면 API와 Orchestrator 양쪽에서 실행을 차단한다.
 - Live Run은 `app_id`와 검증된 package name/Bundle ID가 필수이며 기본 대상값으로 대체하지 않는다.
 - 일시정지는 `pause_requested`에서 현재 작업 종료와 checkpoint를 거친 `safely_paused`로 전환하며, 직접 단말·Runtime·Frida 작업은 이 안전 상태와 Run Lease가 모두 일치할 때만 실행한다.
-- 고위험 직접 작업은 DB에 해시로 저장한 5분 만료 1회 승인 토큰과 증적을 사용하며, 수동 작업 중에는 자동 Run 재개를 차단한다.
+- 고위험 직접 작업은 DB에 해시로 저장한 5분 만료 1회 승인 토큰과 증적을 사용한다. 수동 작업 Task가 살아 있는 동안 자동 Run 재개와 일반 중지를 409로 차단하고, 서버 종료는 해당 Task와 Frida 세션을 먼저 정리한 뒤 단말 Lease를 해제한다.
 - 서버는 기본 loopback 전용이다. 특정 LAN IP 실행은 프로세스별 API·관리자 토큰과 Trusted Host를 강제하며 API 문서는 기본 비활성화한다.
 - WebSocket은 접근 토큰 대신 Bearer 인증으로 발급한 30초 만료·Run/IP 범위·1회용 Ticket을 사용한다. LAN 토큰은 URL이나 브라우저 저장소에 넣지 않는다.
+- 증적 이미지·원본 다운로드·HTML 보고서는 인증된 Fetch로 Blob을 받은 뒤 짧은 수명의 브라우저 Object URL로 표시한다. LAN 모드에서도 인증 없는 일반 `/api` URL을 DOM에 넣지 않는다.
+- Run 종료 상태는 `completed`, `completed_with_gaps`, `manual_required`, `failed`로 나뉜다. 앱 프로세스·화면·로그·선택 Frida·프록시 흐름/사용자 확인을 점검하고 누락된 필수 Stage를 `options.failed_required_stages`에 보존한다.
 
 ### Android
 
@@ -124,7 +126,7 @@ tests/               단위·API·Mock E2E 테스트
 
 각 도구 실행은 `tool_runs`에 버전, 상태, 인자 배열, 오류, 원문 경로와 SHA-256을 저장한다. 원시 탐지는 `raw_findings`, 정규화된 발견항목의 출처는 `finding_sources`에 저장한다. 도구 하나가 실패해도 나머지 분석은 계속한다.
 
-동일 앱 재분석은 앱 ID별 Lease로 직렬화한다. 실행마다 `analysis/<uploaded-file-stem>/runs/<analysis-run-id>/`를 사용하고, 완료된 결과만 `latest.json`으로 원자적으로 활성화한다. 이미 분석 중이면 409 `analysis_in_progress`를 반환한다.
+동일 앱 재분석은 앱 ID별 Lease로 직렬화한다. 실행마다 `analysis/<uploaded-file-stem>/runs/<analysis-run-id>/`와 `analysis_runs` 레코드를 사용한다. 출력 검증과 `latest.json` 교체가 성공한 뒤 하나의 DB transaction에서 `active_analysis_run_id`, 앱 메타데이터, Raw Finding, Tool Run, Control Test를 활성화한다. 실패하면 기존 Active Run과 포인터를 유지하며, 이미 분석 중이면 409 `analysis_in_progress`를 반환한다.
 
 ### MASTG 통제 커버리지
 
@@ -138,6 +140,7 @@ tests/               단위·API·Mock E2E 테스트
 ### Frida와 AI
 
 - 내장 스크립트는 동작을 바꾸지 않는 저위험 관찰용이다.
+- 자동 진단의 Frida는 Python 바인딩으로 앱을 한 번 Spawn/Attach하고 여러 스크립트를 같은 Session에 로드한다. 메시지를 Run 전체에서 수집하며 로그인·동적·프록시 단계가 끝난 뒤 `finally`에서 Script unload와 Session detach를 수행한다.
 - 빈 Frida 선택은 “실행 안 함”이며 자동 선택은 별도 `auto_select_frida=true`에서만 동작한다.
 - 자동 진단은 대상 앱의 플랫폼·프레임워크·정적 신호와 맞는 `builtin + low` 스크립트만 실행한다. 사용자·AI·medium/high 스크립트는 `safely_paused` Run의 1회 승인 직접 실행만 허용한다.
 - 사용자 스크립트와 AI 후보는 `pending_approval`로 저장한다.
@@ -162,7 +165,7 @@ tests/               단위·API·Mock E2E 테스트
 
 - mitmproxy는 실제 `mitmdump` 프로세스와 addon으로 JSON Lines 흐름을 수집한다.
 - 요청·응답, Header/Body, Status와 민감정보 후보를 저장한다.
-- Burp/Fiddler는 현재 프로세스 제어가 아닌 수동 연동 Adapter다. 선택 시 Run이 `proxy_manual_setup` 안전 지점에서 멈추며, 특정 LAN Listener 안내에 따라 캡처한 HAR/JSON을 Import해야 재개할 수 있다.
+- Burp/Fiddler는 현재 프로세스 제어가 아닌 수동 연동 Adapter다. 먼저 `proxy_manual_setup`에서 Listener·단말 프록시 설정을 확인한 뒤 앱 설치·실행·동적 작업을 수행하고, 마지막 `proxy_capture_import` 안전 지점에서 캡처를 종료해 HAR/JSON을 Import해야 재개할 수 있다.
 - HAR/JSON은 크기·구조·Header·Body·URL·상태 코드를 제한하고 1개 이상의 흐름을 확인한 뒤 원본과 최종 패킷 증적으로 연결한다.
 - POST·PUT·PATCH·DELETE 요청을 자동 재전송하지 않는다.
 - mitmproxy는 특정 Windows LAN IP에만 바인딩하고 진단 단말의 출발지 IP만 addon에서 허용한다.
@@ -175,7 +178,7 @@ tests/               단위·API·Mock E2E 테스트
 - 제한 초과는 warning이 아니라 422 rejected로 종료하며 외부 분석기를 실행하지 않는다.
 - 외부 분석 도구는 프로세스 그룹으로 실행하고 wall time·프로세스 트리 메모리·CPU 시간을 제한한다.
 - MobSF는 승인 시 `scheme://host:port`, 모든 A/AAAA 주소와 TLS 인증서 SHA-256을 묶어 저장하며 하나라도 달라지면 승인을 취소한다.
-- 실제 앱 전송은 사용자가 화면에서 현재 목적지와 APK/IPA SHA-256을 다시 확인한 재분석에서만 수행한다. HTTP 환경 프록시는 사용하지 않으며 `tool_runs`에 목적지·주소·인증서·앱 해시와 승인자를 남긴다.
+- 실제 앱 전송은 사용자가 화면에서 현재 목적지와 APK/IPA SHA-256을 다시 확인한 재분석에서만 수행한다. HTTP 클라이언트는 승인 Snapshot의 IP로 직접 연결하면서 원래 Host/SNI를 유지하고 실제 peer IP와 인증서를 재검증한다. 환경 프록시·redirect는 사용하지 않으며 `tool_runs`에 목적지·주소·인증서·앱 해시와 승인자를 남긴다.
 - ADB 바이너리 캡처와 `idevicesyslog`를 포함한 직접 subprocess는 Timeout·Task 취소 시 전체 프로세스 트리를 종료하고 `wait()`까지 완료한다.
 
 ## 4. 주요 데이터 모델
@@ -188,6 +191,9 @@ tests/               단위·API·Mock E2E 테스트
 - `control_tests`: 앱 기준선 및 진단 실행별 MASTG 상태
 - `ai_invocations`: AI Provider·모델·상태·원문 기록
 - `operation_approvals`: 직접 작업의 승인 범위·승인자·만료·소비 상태와 토큰 SHA-256
+- `analysis_runs`: 정적 분석 시도별 상태·출력 경로·결과·SHA-256·활성화 시각
+
+`app_artifacts.active_analysis_run_id`는 현재 활성 분석 결과를 가리킨다. `20260804_analysis_runs_v4` migration이 기존 DB를 백업한 뒤 이 컬럼을 추가하며, 신규 `analysis_runs` 테이블은 `create_all`로 생성한다.
 
 현재 Alembic은 사용하지 않는다. 안전 경계 컬럼은 `schema_migrations`와 시작 전 DB 백업을 사용하는 명시적 SQLite migration으로 추가한다. 이후 스키마 변경도 `create_all`만 믿지 말고 같은 방식 또는 Alembic 도입 후 진행한다.
 
@@ -221,6 +227,7 @@ data/
 
 /api/runs
 /api/runs/{id}/pause|resume|stop
+/api/runs/{id}/proxy/confirm-setup
 /api/runs/{id}/proxy/import
 /api/runs/{id}/ws
 /api/runs/{id}/evidence
@@ -343,7 +350,7 @@ MSW_ENABLE_API_DOCS=false
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          41 passed
+pytest -q                          47 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -360,6 +367,9 @@ npm audit --audit-level=high      0 vulnerabilities
 - 구조 기반 AI 마스킹과 Finding별 증적 ID 연결 확인
 - 1440×1000·390×844에서 설정 화면과 Mock/Live 진단 경계를 확인하고 브라우저 콘솔 오류 0건 확인
 - Frida 명시적 미선택·안전 자동 선택, Burp HAR checkpoint, 안전 일시정지 동기화, MobSF 목적지 결합, WebSocket 1회 Ticket, subprocess 정리, 앱별 분석 Lock 회귀 테스트 통과
+- Run 수명 Frida Session의 다중 스크립트 Load·Detach, 수동 프록시의 설정/최종 Import 순서, 필수 Stage 기반 완료 판정, 수동 작업 중 Stop 차단 회귀 테스트 통과
+- MobSF Snapshot IP 직접 연결·TLS peer 재검증과 AnalysisRun 활성화 실패 시 DB·`latest.json` 보존 회귀 테스트 통과
+- 1440×1000·390×844에서 인증된 Blob 증적 이미지(360px 원본), 다운로드, HTML 보고서를 확인하고 브라우저 콘솔 오류·경고 0건과 모바일 가로 넘침 0을 확인
 
 테스트 명령:
 

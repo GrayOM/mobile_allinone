@@ -9,6 +9,7 @@ import type {
   ProxyFlow,
 } from "../types";
 import { EmptyState, StatusChip, formatDate } from "../components/UI";
+import { AuthenticatedImage } from "../components/AuthenticatedFile";
 
 const stageLabels: Record<string, string> = {
   preflight: "사전 확인",
@@ -19,11 +20,16 @@ const stageLabels: Record<string, string> = {
   frida: "Frida 적용",
   manual_interaction: "수동 조작",
   proxy_manual_setup: "수동 프록시 준비",
+  proxy_capture_import: "최종 프록시 캡처 가져오기",
   network_dynamic: "동적·네트워크",
   ai_analysis: "AI 판정",
   finalize: "증적 정리",
   completed: "완료",
+  completed_with_gaps: "일부 범위 미완료",
+  manual_required: "수동 확인 필요",
   failed: "실패",
+  stopped: "중지됨",
+  interrupted: "중단됨",
 };
 
 export default function LiveRunPage() {
@@ -107,11 +113,28 @@ export default function LiveRunPage() {
     }
   }
 
+  async function confirmProxySetup() {
+    setActionBusy("proxy-setup");
+    setActionError("");
+    try {
+      await post(`/runs/${runId}/proxy/confirm-setup`);
+      await refresh();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "프록시 설정 확인 실패");
+    } finally {
+      setActionBusy("");
+    }
+  }
+
   const screenshot = useMemo(
     () => [...evidence].reverse().find((item) => item.evidence_type === "screenshot"),
     [evidence],
   );
   const fridaEvents = events.filter((event) => event.type === "frida_log");
+  const fridaMessages = fridaEvents.flatMap((event) => {
+    const messages = Array.isArray(event.data.messages) ? event.data.messages : [];
+    return messages.map((message) => ({ message, timestamp: event.timestamp }));
+  });
   const aiEvents = events.filter((event) => event.type === "ai_status");
   const stageEvents = events.filter((event) => event.type === "stage");
 
@@ -136,13 +159,13 @@ export default function LiveRunPage() {
         </div>
         <div className="live-controls">
           {run.status === "safely_paused" ? (
-            <button className="button button--signal" onClick={() => void control("resume")} disabled={Boolean(actionBusy)}>재개</button>
+            <button className="button button--signal" onClick={() => void control("resume")} disabled={Boolean(actionBusy) || Boolean(run.options.manual_action_active)}>재개</button>
           ) : run.status === "pause_requested" ? (
             <button className="button button--quiet" disabled>안전 지점 대기 중</button>
           ) : (
             <button className="button button--quiet" onClick={() => void control("pause")} disabled={run.status !== "running" || Boolean(actionBusy)}>일시정지</button>
           )}
-          <button className="button button--danger" onClick={() => void control("stop")} disabled={!["running", "pause_requested", "safely_paused"].includes(run.status)}>중지</button>
+          <button className="button button--danger" onClick={() => void control("stop")} disabled={!["running", "pause_requested", "safely_paused"].includes(run.status) || Boolean(run.options.manual_action_active)}>중지</button>
         </div>
       </header>
 
@@ -161,6 +184,28 @@ export default function LiveRunPage() {
                 : <li>프록시 설정 후 HAR 또는 JSON을 가져오세요.</li>}
             </ol>
           </div>
+          <div className="drop-zone">
+            <strong>{run.options.manual_proxy_setup_confirmed ? "프록시 설정 확인 완료" : "Listener와 단말 프록시를 준비하세요"}</strong>
+            <small>이 단계에서는 HAR를 가져오지 않습니다. 앱 동적 조작이 끝난 뒤 최종 캡처를 요청합니다.</small>
+            <button
+              type="button"
+              className="button button--signal"
+              disabled={run.status !== "safely_paused" || Boolean(actionBusy) || Boolean(run.options.manual_proxy_setup_confirmed)}
+              onClick={() => void confirmProxySetup()}
+            >
+              설정 확인
+            </button>
+          </div>
+        </section>
+      )}
+
+      {run.current_stage === "proxy_capture_import" && (
+        <section className="panel manual-proxy-panel">
+          <div>
+            <span className="eyebrow">FINAL CAPTURE CHECKPOINT</span>
+            <h3>동적 조작 후 HAR/JSON Import</h3>
+            <p>앱 설치·실행·로그인·기능 조작이 끝났습니다. Burp/Fiddler 캡처를 종료하고 이 Run의 최종 파일을 가져오세요.</p>
+          </div>
           <label className={`drop-zone ${proxyImporting ? "drop-zone--busy" : ""}`}>
             <input
               type="file"
@@ -173,9 +218,9 @@ export default function LiveRunPage() {
                 ? `${String(run.options.manual_proxy_flow_count ?? 0)}개 흐름 Import 완료`
                 : proxyImporting
                   ? `Import 중 ${proxyImporting}%`
-                  : "HAR/JSON 가져오기"}
+                  : "최종 HAR/JSON 가져오기"}
             </strong>
-            <small>Import가 확인된 뒤에만 재개할 수 있습니다.</small>
+            <small>1개 이상의 흐름이 확인된 뒤에만 분석을 재개할 수 있습니다.</small>
           </label>
         </section>
       )}
@@ -187,7 +232,7 @@ export default function LiveRunPage() {
             <div className="phone-frame">
               <div className="phone-frame__speaker" />
               {screenshot ? (
-                <img src={`/api/evidence/${screenshot.id}/download`} alt={screenshot.title} />
+                <AuthenticatedImage path={`/evidence/${screenshot.id}/download`} alt={screenshot.title} />
               ) : (
                 <div className="phone-empty">
                   <span />
@@ -232,17 +277,14 @@ export default function LiveRunPage() {
         </section>
 
         <section className="console-panel log-console">
-          <div className="console-head"><span>FRIDA STREAM</span><small>{fridaEvents.length} sessions</small></div>
+          <div className="console-head"><span>FRIDA STREAM</span><small>{fridaMessages.length} messages</small></div>
           <div className="terminal-stream">
-            {fridaEvents.length ? fridaEvents.flatMap((event) => {
-              const messages = Array.isArray(event.data.messages) ? event.data.messages : [];
-              return messages.map((message, index) => (
-                <div className="terminal-line" key={`${event.timestamp}-${index}`}>
-                  <span>{formatDate(event.timestamp)}</span>
-                  <code>{JSON.stringify(message)}</code>
-                </div>
-              ));
-            }) : (
+            {fridaMessages.length ? fridaMessages.map((item, index) => (
+              <div className="terminal-line" key={`${item.timestamp}-${index}`}>
+                <span>{formatDate(item.timestamp)}</span>
+                <code>{JSON.stringify(item.message)}</code>
+              </div>
+            )) : (
               <div className="terminal-empty">$ Frida 메시지를 기다리는 중<span className="terminal-cursor" /></div>
             )}
           </div>

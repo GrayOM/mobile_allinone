@@ -42,6 +42,7 @@ export interface AppArtifact {
     signals?: Record<string, Array<Record<string, string>>>;
     warnings?: string[];
   };
+  active_analysis_run_id: string | null;
   synthetic: boolean;
   created_at: string;
 }

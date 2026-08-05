@@ -58,10 +58,21 @@ scope, issue time and consume time. AI-generated Frida code is always stored as
 `pending_approval`; it is never executed in the generation request or automatic
 repair step.
 
+Manual-operation tasks are tracked per run. Normal stop and resume requests are
+rejected while one is active, so the device lease cannot be released to another
+run while a pull, runtime command or Frida load still owns it. Server shutdown
+cancels and awaits those tasks and detaches the persistent Frida session before
+releasing the lease.
+
 An empty Frida selection means no Frida execution. Optional automatic selection
 is explicit and is restricted to approved built-in, low-risk scripts whose
 platform, framework and analysis conditions match the selected app. Custom, AI,
 medium and high-risk scripts remain in the per-run manual approval path.
+
+Automatic Frida execution uses the Python binding to spawn or attach once per
+run. All selected scripts are loaded into that session, their messages remain
+available through login and dynamic/network stages, and scripts are unloaded and
+the session detached from the orchestrator's final cleanup.
 
 Every runtime command is bound to the selected device. pymobiledevice3 receives
 the selected UDID, iOS Frida uses `-D <device-id>`, and drozer gets a per-run ADB
@@ -82,9 +93,17 @@ failures trigger a new leased port and retry up to three times inside a shared
 startup critical section.
 
 Burp and Fiddler remain manually operated products. Selecting either pauses the
-run at `proxy_manual_setup`, displays the exact LAN listener instructions and
-requires a non-empty, structurally validated HAR/JSON import before resume. The
-imported original and normalized final flows are both retained as evidence.
+run first at `proxy_manual_setup` to confirm the LAN listener and device proxy.
+After app installation, launch and dynamic interaction, it pauses again at
+`proxy_capture_import`; only then is a non-empty, structurally validated HAR/JSON
+accepted. The imported original and normalized final flows are both retained as
+evidence.
+
+A pipeline reaching its last stage is not automatically a successful
+diagnostic. App launch/process state, screenshot, logs, selected Frida session
+health, proxy flow or explicit user confirmation are evaluated into `completed`,
+`completed_with_gaps`, `manual_required` or `failed`, with missing required
+stages retained on the run.
 
 APK/IPA input is rejected before external tools run when archive entry, expanded
 size, compression-ratio, nested archive, duplicate-name, traversal, encryption or
@@ -97,12 +116,18 @@ explicitly approved. Approval is bound to the normalized destination, every
 resolved A/AAAA address and the HTTPS certificate SHA-256. A settings, DNS or
 certificate change invalidates approval. Each upload also requires a second UI
 confirmation of the destination and current APK/IPA SHA-256. HTTP environment
-proxies and redirects are disabled; the destination, addresses, certificate,
-artifact hash and approval metadata are retained in the analyzer tool run.
+proxies and redirects are disabled. The transfer connects directly to an
+approved snapshot IP while preserving the original HTTP Host and TLS SNI, then
+rechecks the actual peer IP and certificate before sending data. The destination,
+addresses, certificate, artifact hash and approval metadata are retained in the
+analyzer tool run.
 
 Static reanalysis uses an app-scoped in-process lease and a unique output
 directory per attempt. A concurrent request returns `409 analysis_in_progress`;
-successful output is activated through an atomically replaced `latest.json`.
+each attempt has an `AnalysisRun` row. Successful output is validated and
+activated through an atomically replaced `latest.json` before a single database
+transaction switches `active_analysis_run_id` and all normalized results. A
+pointer failure leaves the prior active run and normalized database state intact.
 
 The HTTP API is loopback-only by default. LAN mode requires a specific bind
 address, an ephemeral Bearer token, a separate administrator token for state
@@ -110,6 +135,10 @@ changes, and Trusted Host validation. OpenAPI, Swagger UI and ReDoc are disabled
 unless explicitly enabled. WebSockets use a 30-second, single-use, run- and
 client-scoped ticket issued through Bearer-authenticated `/api/ws-ticket`; API
 and administrator tokens are not placed in URLs or browser storage.
+
+Evidence images, source downloads and HTML reports are fetched with the Bearer
+header and exposed to the browser through short-lived Blob object URLs. The UI
+does not embed unauthenticated `/api` URLs, so the same flows work in LAN mode.
 
 ## Windows installation
 

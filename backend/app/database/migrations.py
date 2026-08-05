@@ -10,6 +10,7 @@ from sqlalchemy import Engine, inspect, text
 MIGRATION_ID = "20260804_safety_boundaries_v1"
 MIGRATION_ID_V2 = "20260804_live_controls_v2"
 MIGRATION_ID_V3 = "20260804_external_destination_v3"
+MIGRATION_ID_V4 = "20260804_analysis_runs_v4"
 
 
 ADDITIONS: dict[str, dict[str, str]] = {
@@ -50,6 +51,10 @@ V3_ADDITIONS: dict[str, dict[str, str]] = {
         "external_analyzer_addresses": "JSON NOT NULL DEFAULT '[]'",
         "external_analyzer_certificate_sha256": "VARCHAR(64)",
     }
+}
+
+V4_ADDITIONS: dict[str, dict[str, str]] = {
+    "app_artifacts": {"active_analysis_run_id": "VARCHAR(36)"},
 }
 
 
@@ -222,6 +227,7 @@ def apply_migrations(engine: Engine) -> None:
     _apply_v1(engine)
     _apply_v2(engine)
     _apply_v3(engine)
+    _apply_v4(engine)
 
 
 def _apply_v3(engine: Engine) -> None:
@@ -264,6 +270,45 @@ def _apply_v3(engine: Engine) -> None:
             ),
             {
                 "id": MIGRATION_ID_V3,
+                "applied_at": datetime.now(timezone.utc).isoformat(),
+                "backup": str(backup) if backup else None,
+            },
+        )
+
+
+def _apply_v4(engine: Engine) -> None:
+    with engine.begin() as connection:
+        applied = connection.scalar(
+            text("SELECT id FROM schema_migrations WHERE id = :id"),
+            {"id": MIGRATION_ID_V4},
+        )
+    if applied:
+        return
+    inspector = inspect(engine)
+    pending = {
+        table: {
+            column: definition
+            for column, definition in columns.items()
+            if column not in {item["name"] for item in inspector.get_columns(table)}
+        }
+        for table, columns in V4_ADDITIONS.items()
+        if inspector.has_table(table)
+    }
+    pending = {table: columns for table, columns in pending.items() if columns}
+    backup = _backup_sqlite_database(engine, MIGRATION_ID_V4) if pending else None
+    with engine.begin() as connection:
+        for table, columns in pending.items():
+            for column, definition in columns.items():
+                connection.execute(
+                    text(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}')
+                )
+        connection.execute(
+            text(
+                "INSERT INTO schema_migrations(id, applied_at, backup_path) "
+                "VALUES (:id, :applied_at, :backup)"
+            ),
+            {
+                "id": MIGRATION_ID_V4,
                 "applied_at": datetime.now(timezone.utc).isoformat(),
                 "backup": str(backup) if backup else None,
             },

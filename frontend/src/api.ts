@@ -66,6 +66,51 @@ export async function api<T>(
   return response.json() as Promise<T>;
 }
 
+export async function apiBlob(path: string): Promise<Blob> {
+  const headers = new Headers();
+  applySecurityHeaders(headers);
+  const response = await fetch(`${API_BASE}${path}`, { headers });
+  if (!response.ok) {
+    if (response.status === 401) requestAuthentication();
+    throw new ApiError(response.status, await parseError(response));
+  }
+  return response.blob();
+}
+
+export async function downloadAuthenticatedFile(path: string, filename: string): Promise<void> {
+  const blob = await apiBlob(path);
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  }
+}
+
+export async function openAuthenticatedFile(path: string): Promise<void> {
+  const pending = window.open("about:blank", "_blank");
+  if (pending) pending.opener = null;
+  try {
+    const blob = await apiBlob(path);
+    const objectUrl = URL.createObjectURL(blob);
+    if (pending) {
+      pending.location.replace(objectUrl);
+    } else {
+      window.open(objectUrl, "_blank", "noopener,noreferrer");
+    }
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  } catch (error) {
+    pending?.close();
+    throw error;
+  }
+}
+
 export function post<T>(path: string, body?: unknown): Promise<T> {
   return api<T>(path, {
     method: "POST",

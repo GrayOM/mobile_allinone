@@ -1,4 +1,3 @@
-from .diagnostic import DiagnosticOrchestrator
+from .diagnostic import DiagnosticOrchestrator, ManualActionInProgress
 
-__all__ = ["DiagnosticOrchestrator"]
-
+__all__ = ["DiagnosticOrchestrator", "ManualActionInProgress"]

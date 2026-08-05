@@ -67,6 +67,7 @@ class AppArtifact(Base, TimestampMixin):
     version: Mapped[str | None] = mapped_column(String(100))
     analysis_status: Mapped[str] = mapped_column(String(32), default="pending")
     analysis_result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    active_analysis_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
     synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     project: Mapped["Project"] = relationship(back_populates="apps")
@@ -80,6 +81,24 @@ class AppArtifact(Base, TimestampMixin):
     control_tests: Mapped[list["ControlTest"]] = relationship(
         back_populates="app", cascade="all, delete-orphan"
     )
+    analysis_runs: Mapped[list["AnalysisRun"]] = relationship(
+        back_populates="app", cascade="all, delete-orphan"
+    )
+
+
+class AnalysisRun(Base, TimestampMixin):
+    __tablename__ = "analysis_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    app_id: Mapped[str] = mapped_column(ForeignKey("app_artifacts.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="running", index=True)
+    output_dir: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64))
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    app: Mapped["AppArtifact"] = relationship(back_populates="analysis_runs")
 
 
 class DiagnosticRun(Base, TimestampMixin):

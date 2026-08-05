@@ -15,6 +15,7 @@ from backend.app.core.command import run_command
 from backend.app.core.network import (
     approval_matches_destination,
     inspect_mobsf_destination,
+    pinned_http_transport,
 )
 from backend.app.core.status import CapabilityStatus
 
@@ -422,7 +423,12 @@ class MobSFAnalyzerAdapter(AnalyzerAdapter):
                 "integration": "rest",
             }
         try:
-            async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
+            async with httpx.AsyncClient(
+                timeout=5,
+                trust_env=False,
+                follow_redirects=False,
+                transport=pinned_http_transport(snapshot),
+            ) as client:
                 response = await client.get(
                     f"{snapshot.base_url}/api/v1/scans",
                     headers={"Authorization": self.settings.mobsf_api_key},
@@ -515,6 +521,7 @@ class MobSFAnalyzerAdapter(AnalyzerAdapter):
                 timeout=httpx.Timeout(360, connect=15),
                 trust_env=False,
                 follow_redirects=False,
+                transport=pinned_http_transport(snapshot),
             ) as client:
                 with artifact_path.open("rb") as stream:
                     upload = await client.post(

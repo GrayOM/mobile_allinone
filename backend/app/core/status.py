@@ -29,6 +29,8 @@ class RunStatus(StringEnum):
     # Legacy rows may still contain paused until the next explicit migration.
     PAUSED = "paused"
     COMPLETED = "completed"
+    COMPLETED_WITH_GAPS = "completed_with_gaps"
+    MANUAL_REQUIRED = "manual_required"
     FAILED = "failed"
     STOPPED = "stopped"
     INTERRUPTED = "interrupted"

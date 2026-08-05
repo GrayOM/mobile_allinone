@@ -6,7 +6,12 @@ import ipaddress
 import socket
 import ssl
 from dataclasses import dataclass
+from typing import Any, Iterable
 from urllib.parse import SplitResult, urlsplit, urlunsplit
+
+import httpcore
+import httpx
+from httpcore._backends.auto import AutoBackend
 
 from backend.app.core.config import AppSettings
 
@@ -17,6 +22,125 @@ class DestinationSnapshot:
     origin: str
     addresses: tuple[str, ...]
     certificate_sha256: str | None
+
+
+class _PinnedNetworkStream(httpcore.AsyncNetworkStream):
+    def __init__(
+        self,
+        stream: httpcore.AsyncNetworkStream,
+        *,
+        hostname: str,
+        certificate_sha256: str | None,
+    ):
+        self._stream = stream
+        self._hostname = hostname
+        self._certificate_sha256 = certificate_sha256
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return await self._stream.read(max_bytes, timeout)
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        await self._stream.write(buffer, timeout)
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+    async def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        if (server_hostname or "").rstrip(".").lower() != self._hostname:
+            await self.aclose()
+            raise httpcore.ConnectError("MobSF TLS SNI가 승인된 hostname과 다릅니다.")
+        secured = await self._stream.start_tls(
+            ssl_context,
+            server_hostname=server_hostname,
+            timeout=timeout,
+        )
+        ssl_object = secured.get_extra_info("ssl_object")
+        certificate = ssl_object.getpeercert(binary_form=True) if ssl_object else None
+        actual_fingerprint = hashlib.sha256(certificate).hexdigest() if certificate else None
+        if actual_fingerprint != self._certificate_sha256:
+            await secured.aclose()
+            raise httpcore.ConnectError("MobSF TLS 인증서가 승인 Snapshot과 다릅니다.")
+        return _PinnedNetworkStream(
+            secured,
+            hostname=self._hostname,
+            certificate_sha256=self._certificate_sha256,
+        )
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._stream.get_extra_info(info)
+
+
+class PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Resolve no DNS during HTTP transfer; connect only to approved addresses."""
+
+    def __init__(self, snapshot: DestinationSnapshot):
+        parsed = urlsplit(snapshot.base_url)
+        self.hostname = str(parsed.hostname or "").rstrip(".").lower()
+        self.addresses = snapshot.addresses
+        self.certificate_sha256 = snapshot.certificate_sha256
+        self._backend = AutoBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[tuple[int, int, int | bytes]] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        if host.rstrip(".").lower() != self.hostname:
+            raise httpcore.ConnectError("MobSF 요청 hostname이 승인 Snapshot과 다릅니다.")
+        failures: list[str] = []
+        for address in self.addresses:
+            try:
+                stream = await self._backend.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+                peer = stream.get_extra_info("server_addr")
+                peer_address = str(ipaddress.ip_address(peer[0])) if peer else ""
+                if peer_address != str(ipaddress.ip_address(address)):
+                    await stream.aclose()
+                    raise httpcore.ConnectError(
+                        "MobSF 실제 peer IP가 승인된 연결 IP와 다릅니다."
+                    )
+                return _PinnedNetworkStream(
+                    stream,
+                    hostname=self.hostname,
+                    certificate_sha256=self.certificate_sha256,
+                )
+            except Exception as exc:
+                failures.append(f"{address}: {type(exc).__name__}: {exc}")
+        raise httpcore.ConnectError(
+            "승인된 MobSF IP로 연결하지 못했습니다: " + "; ".join(failures)
+        )
+
+    async def connect_unix_socket(self, *args: Any, **kwargs: Any):
+        raise httpcore.ConnectError("MobSF는 Unix socket 연결을 사용하지 않습니다.")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._backend.sleep(seconds)
+
+
+class PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
+    def __init__(self, snapshot: DestinationSnapshot):
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            retries=0,
+            network_backend=PinnedNetworkBackend(snapshot),
+        )
+
+
+def pinned_http_transport(snapshot: DestinationSnapshot) -> httpx.AsyncHTTPTransport:
+    return PinnedAsyncHTTPTransport(snapshot)
 
 
 def _parsed_destination(settings: AppSettings) -> tuple[SplitResult | None, str | None]:
@@ -112,32 +236,40 @@ async def inspect_mobsf_destination(settings: AppSettings) -> DestinationSnapsho
     certificate_sha256 = None
     if parsed.scheme == "https":
         context = ssl.create_default_context()
-        writer: asyncio.StreamWriter | None = None
-        try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(
-                    host,
-                    port,
-                    ssl=context,
-                    server_hostname=host,
-                ),
-                timeout=8,
-            )
-            del reader
-            ssl_object = writer.get_extra_info("ssl_object")
-            certificate = ssl_object.getpeercert(binary_form=True) if ssl_object else None
-            if not certificate:
-                raise ValueError("MobSF TLS 인증서를 읽을 수 없습니다.")
-            certificate_sha256 = hashlib.sha256(certificate).hexdigest()
-        except (OSError, ssl.SSLError, asyncio.TimeoutError) as exc:
-            raise ValueError(f"MobSF TLS 인증서 검증 실패: {exc}") from exc
-        finally:
-            if writer is not None:
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except (OSError, ssl.SSLError):
-                    pass
+        failures: list[str] = []
+        for address in addresses:
+            writer: asyncio.StreamWriter | None = None
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(
+                        address,
+                        port,
+                        ssl=context,
+                        server_hostname=host,
+                    ),
+                    timeout=8,
+                )
+                del reader
+                peer = writer.get_extra_info("peername")
+                if not peer or str(ipaddress.ip_address(peer[0])) != address:
+                    raise ValueError("MobSF 실제 peer IP가 검증 대상 IP와 다릅니다.")
+                ssl_object = writer.get_extra_info("ssl_object")
+                certificate = ssl_object.getpeercert(binary_form=True) if ssl_object else None
+                if not certificate:
+                    raise ValueError("MobSF TLS 인증서를 읽을 수 없습니다.")
+                certificate_sha256 = hashlib.sha256(certificate).hexdigest()
+                break
+            except (OSError, ssl.SSLError, asyncio.TimeoutError, ValueError) as exc:
+                failures.append(f"{address}: {type(exc).__name__}: {exc}")
+            finally:
+                if writer is not None:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except (OSError, ssl.SSLError):
+                        pass
+        if not certificate_sha256:
+            raise ValueError("MobSF TLS 인증서 검증 실패: " + "; ".join(failures))
 
     default_port = 443 if parsed.scheme == "https" else 80
     host_display = f"[{host}]" if ":" in host else host

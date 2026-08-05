@@ -24,7 +24,12 @@ from backend.app.core.security import ApiSecurityMiddleware
 from backend.app.core.status import CapabilityStatus
 from backend.app.database.models import DiagnosticRun
 from backend.app.database.base import Base
-from backend.app.database.migrations import MIGRATION_ID, MIGRATION_ID_V3, apply_migrations
+from backend.app.database.migrations import (
+    MIGRATION_ID,
+    MIGRATION_ID_V3,
+    MIGRATION_ID_V4,
+    apply_migrations,
+)
 from backend.app.devices import IOSDeviceAdapter
 from backend.app.frida.manager import FridaManager
 from backend.app.orchestration import DiagnosticOrchestrator
@@ -272,6 +277,11 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
 
     columns = {item["name"] for item in inspect(engine).get_columns("projects")}
     assert "run_mode" in columns
+    artifact_columns = {
+        item["name"] for item in inspect(engine).get_columns("app_artifacts")
+    }
+    assert "active_analysis_run_id" in artifact_columns
+    assert inspect(engine).has_table("analysis_runs")
     assert {
         "external_analyzer_destination",
         "external_analyzer_addresses",
@@ -297,10 +307,15 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
             text("SELECT id FROM schema_migrations WHERE id = :id"),
             {"id": MIGRATION_ID_V3},
         )
+        analysis_migration = connection.scalar(
+            text("SELECT id FROM schema_migrations WHERE id = :id"),
+            {"id": MIGRATION_ID_V4},
+        )
     assert migration.id == MIGRATION_ID
     assert migration.backup_path and Path(migration.backup_path).is_file()
     assert approval_status == "pending_approval"
     assert destination_migration == MIGRATION_ID_V3
+    assert analysis_migration == MIGRATION_ID_V4
 
 
 def _wait_until_paused(client, run_id: str):

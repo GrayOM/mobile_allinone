@@ -53,6 +53,7 @@ from backend.app.core.targets import (
 )
 from backend.app.database.models import (
     AIInvocation,
+    AnalysisRun,
     AppArtifact,
     DiagnosticRun,
     Evidence,
@@ -71,9 +72,9 @@ from backend.app.demo import create_demo_apk
 from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDeviceAdapter
 from backend.app.evidence.report import EvidenceReportRenderer
 from backend.app.evidence.service import EvidenceService
-from backend.app.frida import FridaManager
+from backend.app.frida import FridaManager, FridaSessionScript
 from backend.app.frida.policy import is_safe_automatic_script, script_applies_to_app
-from backend.app.orchestration import DiagnosticOrchestrator
+from backend.app.orchestration import DiagnosticOrchestrator, ManualActionInProgress
 from backend.app.orchestration.approvals import (
     ApprovalError,
     consume_approval,
@@ -185,25 +186,95 @@ def _activate_analysis_result(
     analysis_run_id: str,
     output_dir: Path,
     sha256: str,
-) -> None:
+) -> tuple[Path, bytes | None]:
     root = settings.analysis_dir / source_path.stem
     root.mkdir(parents=True, exist_ok=True)
+    resolved_output = output_dir.resolve()
+    resolved_root = root.resolve()
+    if not resolved_output.is_dir() or resolved_root not in resolved_output.parents:
+        raise OSError("검증된 분석 Run 출력 디렉터리가 아닙니다.")
     latest = root / "latest.json"
+    previous = latest.read_bytes() if latest.is_file() else None
     temporary = root / f".latest-{uuid.uuid4()}.tmp"
-    temporary.write_text(
-        json.dumps(
-            {
-                "analysis_run_id": analysis_run_id,
-                "output_dir": str(output_dir),
-                "artifact_sha256": sha256,
-                "activated_at": datetime.now(timezone.utc).isoformat(),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+    try:
+        temporary.write_text(
+            json.dumps(
+                {
+                    "analysis_run_id": analysis_run_id,
+                    "output_dir": str(output_dir),
+                    "artifact_sha256": sha256,
+                    "activated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary, latest)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return latest, previous
+
+
+def _restore_analysis_pointer(latest: Path, previous: bytes | None) -> None:
+    if previous is None:
+        latest.unlink(missing_ok=True)
+        return
+    temporary = latest.parent / f".latest-restore-{uuid.uuid4()}.tmp"
+    try:
+        temporary.write_bytes(previous)
+        os.replace(temporary, latest)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _activate_analysis_run(
+    *,
+    db: Session,
+    settings: AppSettings,
+    source_path: Path,
+    project: Project,
+    artifact: AppArtifact,
+    analysis_run: AnalysisRun,
+    result: Any,
+) -> None:
+    latest, previous_pointer = _activate_analysis_result(
+        settings,
+        source_path,
+        analysis_run_id=analysis_run.id,
+        output_dir=Path(analysis_run.output_dir),
+        sha256=result.sha256,
     )
-    os.replace(temporary, latest)
+    previous_active_id = artifact.active_analysis_run_id
+    try:
+        artifact.sha256 = result.sha256
+        artifact.size_bytes = result.file_size
+        artifact.platform = result.platform
+        artifact.app_name = result.app_name
+        artifact.package_name = result.package_name
+        artifact.version = result.version
+        artifact.analysis_status = result.status
+        artifact.analysis_result = result.to_dict()
+        artifact.active_analysis_run_id = analysis_run.id
+        analysis_run.status = "active"
+        analysis_run.activated_at = datetime.now(timezone.utc)
+        if previous_active_id and previous_active_id != analysis_run.id:
+            previous_active = db.get(AnalysisRun, previous_active_id)
+            if previous_active:
+                previous_active.status = "superseded"
+        replace_analysis_records(
+            db, project=project, artifact=artifact, result=result
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        _restore_analysis_pointer(latest, previous_pointer)
+        failed = db.get(AnalysisRun, analysis_run.id)
+        if failed:
+            failed.status = "failed"
+            failed.error = "활성 분석 결과를 DB에 원자적으로 전환하지 못했습니다."
+            db.commit()
+        raise
 
 
 def _scoped_run(
@@ -457,17 +528,30 @@ async def _store_and_analyze(
     )
     db.add(artifact)
     db.flush()
-    replace_analysis_records(
-        db, project=project, artifact=artifact, result=result
+    analysis_run = AnalysisRun(
+        id=analysis_run_id,
+        app_id=artifact.id,
+        status="ready",
+        output_dir=str(analysis_dir),
+        artifact_sha256=result.sha256,
+        result=result.to_dict(),
     )
-    db.commit()
-    _activate_analysis_result(
-        settings,
-        source_path,
-        analysis_run_id=analysis_run_id,
-        output_dir=analysis_dir,
-        sha256=result.sha256,
-    )
+    db.add(analysis_run)
+    db.flush()
+    try:
+        _activate_analysis_run(
+            db=db,
+            settings=settings,
+            source_path=source_path,
+            project=project,
+            artifact=artifact,
+            analysis_run=analysis_run,
+            result=result,
+        )
+    except (OSError, ValueError) as exc:
+        db.rollback()
+        source_path.unlink(missing_ok=True)
+        raise HTTPException(422, f"분석 결과 활성화 실패: {exc}") from exc
     db.refresh(artifact)
     return artifact
 
@@ -491,7 +575,6 @@ async def reanalyze_app(
     if not source_path.is_file():
         raise HTTPException(404, "등록된 앱 원본 파일을 찾을 수 없습니다.")
     settings = _settings(request)
-    previous_status = artifact.analysis_status
     confirmation = payload or ReanalyzeRequest()
     allow_external = False
     if confirmation.confirm_external_analyzer:
@@ -520,10 +603,17 @@ async def reanalyze_app(
         allow_external = True
     if not await request.app.state.analysis_leases.try_acquire(artifact.id):
         raise HTTPException(409, "analysis_in_progress: 동일 앱의 재분석이 이미 실행 중입니다.")
+    analysis_run: AnalysisRun | None = None
     try:
-        artifact.analysis_status = "running"
-        db.commit()
         analysis_run_id, analysis_dir = _analysis_run_directory(settings, source_path)
+        analysis_run = AnalysisRun(
+            id=analysis_run_id,
+            app_id=artifact.id,
+            status="running",
+            output_dir=str(analysis_dir),
+        )
+        db.add(analysis_run)
+        db.commit()
         analyzer = StaticAnalyzer(
             settings,
             external_analyzers_allowed=allow_external,
@@ -540,38 +630,47 @@ async def reanalyze_app(
         )
         result.structure["analysis_run_id"] = analysis_run_id
         result.structure["analysis_output_dir"] = str(analysis_dir)
-        artifact.sha256 = result.sha256
-        artifact.size_bytes = result.file_size
-        artifact.platform = result.platform
-        artifact.app_name = result.app_name
-        artifact.package_name = result.package_name
-        artifact.version = result.version
-        artifact.analysis_status = result.status
-        artifact.analysis_result = result.to_dict()
-        replace_analysis_records(
-            db, project=project, artifact=artifact, result=result
-        )
+        analysis_run.status = "ready"
+        analysis_run.artifact_sha256 = result.sha256
+        analysis_run.result = result.to_dict()
         db.commit()
-        _activate_analysis_result(
-            settings,
-            source_path,
-            analysis_run_id=analysis_run_id,
-            output_dir=analysis_dir,
-            sha256=result.sha256,
+        _activate_analysis_run(
+            db=db,
+            settings=settings,
+            source_path=source_path,
+            project=project,
+            artifact=artifact,
+            analysis_run=analysis_run,
+            result=result,
         )
         db.refresh(artifact)
         return artifact
     except (ValueError, OSError, zipfile.BadZipFile) as exc:
-        artifact.analysis_status = previous_status
-        db.commit()
+        db.rollback()
+        if analysis_run:
+            failed = db.get(AnalysisRun, analysis_run.id)
+            if failed:
+                failed.status = "failed"
+                failed.error = f"{type(exc).__name__}: {exc}"
+                db.commit()
         raise HTTPException(422, f"앱 재분석 실패: {exc}") from exc
     except asyncio.CancelledError:
-        artifact.analysis_status = previous_status
-        db.commit()
+        db.rollback()
+        if analysis_run:
+            interrupted = db.get(AnalysisRun, analysis_run.id)
+            if interrupted:
+                interrupted.status = "interrupted"
+                interrupted.error = "재분석 요청이 취소되었습니다."
+                db.commit()
         raise
-    except Exception:
-        artifact.analysis_status = previous_status
-        db.commit()
+    except Exception as exc:
+        db.rollback()
+        if analysis_run:
+            failed = db.get(AnalysisRun, analysis_run.id)
+            if failed:
+                failed.status = "failed"
+                failed.error = f"{type(exc).__name__}: {exc}"
+                db.commit()
         raise
     finally:
         await request.app.state.analysis_leases.release(artifact.id)
@@ -580,6 +679,11 @@ async def reanalyze_app(
 @router.get("/apps/{app_id}/analysis/overview")
 def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
     artifact = _app_or_404(db, app_id)
+    analysis_runs = db.scalars(
+        select(AnalysisRun)
+        .where(AnalysisRun.app_id == app_id)
+        .order_by(AnalysisRun.created_at.desc())
+    ).all()
     tool_runs = db.scalars(
         select(ToolRun)
         .where(ToolRun.app_id == app_id)
@@ -601,6 +705,19 @@ def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
     return {
         "app_id": app_id,
         "analysis_status": artifact.analysis_status,
+        "active_analysis_run_id": artifact.active_analysis_run_id,
+        "analysis_runs": [
+            {
+                "id": item.id,
+                "status": item.status,
+                "output_dir": item.output_dir,
+                "artifact_sha256": item.artifact_sha256,
+                "error": item.error,
+                "activated_at": item.activated_at,
+                "created_at": item.created_at,
+            }
+            for item in analysis_runs
+        ],
         "catalog_source": CATALOG_SOURCE,
         "tool_runs": [
             {
@@ -1247,12 +1364,43 @@ async def resume_run(request: Request, run_id: str, db: Session = Depends(get_db
     if (
         run.proxy_adapter in {"burp", "fiddler"}
         and run.current_stage == "proxy_manual_setup"
+        and not bool(run.options.get("manual_proxy_setup_confirmed"))
+    ):
+        raise HTTPException(409, "Listener와 단말 프록시 설정을 확인한 뒤 진단을 재개하세요.")
+    if (
+        run.proxy_adapter in {"burp", "fiddler"}
+        and run.current_stage == "proxy_capture_import"
         and not bool(run.options.get("manual_proxy_imported"))
     ):
-        raise HTTPException(409, "HAR/JSON Import를 완료한 뒤 진단을 재개하세요.")
+        raise HTTPException(409, "동적 조작 후 최종 HAR/JSON Import를 완료한 뒤 재개하세요.")
     if not await _orchestrator(request).resume(run_id):
         raise HTTPException(409, "안전 일시정지 상태이거나 수동 작업이 끝난 뒤에만 재개할 수 있습니다.")
     return {"status": "running"}
+
+
+@router.post("/runs/{run_id}/proxy/confirm-setup")
+async def confirm_manual_proxy_setup(
+    request: Request, run_id: str, db: Session = Depends(get_db)
+):
+    run = _run_or_404(db, run_id)
+    if run.proxy_adapter not in {"burp", "fiddler"}:
+        raise HTTPException(422, "설정 확인은 Burp/Fiddler 수동 프록시 Run에만 적용됩니다.")
+    _scoped_run(db, project_id=run.project_id, run_id=run.id)
+    if run.current_stage != "proxy_manual_setup":
+        raise HTTPException(409, "수동 프록시 설정 단계에서만 확인할 수 있습니다.")
+    if not await _orchestrator(request).begin_manual_action(run.id):
+        raise HTTPException(409, "다른 수동 작업이 끝난 뒤 프록시 설정을 확인하세요.")
+    try:
+        options = dict(run.options)
+        options["manual_proxy_setup_confirmed"] = True
+        run.options = options
+        db.commit()
+        return {
+            "status": CapabilityStatus.AVAILABLE.value,
+            "message": "프록시 설정 확인을 기록했습니다. 앱 진단을 재개할 수 있습니다.",
+        }
+    finally:
+        await _orchestrator(request).end_manual_action(run.id)
 
 
 @router.post("/runs/{run_id}/proxy/import")
@@ -1266,8 +1414,8 @@ async def import_manual_proxy_capture(
     if run.proxy_adapter not in {"burp", "fiddler"}:
         raise HTTPException(422, "HAR Import는 Burp/Fiddler 수동 프록시 Run에서만 사용할 수 있습니다.")
     _scoped_run(db, project_id=run.project_id, run_id=run.id)
-    if run.current_stage != "proxy_manual_setup":
-        raise HTTPException(409, "수동 프록시 준비 단계에서만 HAR를 가져올 수 있습니다.")
+    if run.current_stage != "proxy_capture_import":
+        raise HTTPException(409, "앱 동적 조작이 끝난 최종 캡처 단계에서만 HAR를 가져올 수 있습니다.")
     adapter = _orchestrator(request).proxy_adapter(run.id)
     if not isinstance(adapter, ManualProxyAdapter):
         raise HTTPException(409, "이 Run의 수동 프록시 Adapter가 활성 상태가 아닙니다.")
@@ -1338,7 +1486,7 @@ async def import_manual_proxy_capture(
             "adapter": run.proxy_adapter,
             "flow_count": len(flows),
             "evidence_id": evidence.id,
-            "message": "Import가 확인되었습니다. 이제 진단을 재개할 수 있습니다.",
+            "message": "최종 Import가 확인되었습니다. 이제 분석과 마무리를 재개할 수 있습니다.",
         }
     finally:
         await file.close()
@@ -1350,7 +1498,11 @@ async def import_manual_proxy_capture(
 @router.post("/runs/{run_id}/stop")
 async def stop_run(request: Request, run_id: str, db: Session = Depends(get_db)):
     _run_or_404(db, run_id)
-    if not await _orchestrator(request).stop(run_id):
+    try:
+        stopped = await _orchestrator(request).stop(run_id)
+    except ManualActionInProgress as exc:
+        raise HTTPException(409, f"manual_action_in_progress: {exc}") from exc
+    if not stopped:
         raise HTTPException(409, "실행 중인 진단이 아닙니다.")
     db.expire_all()
     run = _run_or_404(db, run_id)
@@ -1665,14 +1817,40 @@ async def execute_frida_script(
         await _orchestrator(request).end_manual_action(run.id)
         raise
     try:
-        result = await FridaManager(_settings(request)).execute(
-            device_id=run.device_id,
-            target=target,
-            script_name=script.name,
-            script_content=script.content,
-            mode=payload.mode,
-            mock=run.run_mode == RunMode.MOCK.value,
+        session_manager = _orchestrator(request).frida_sessions
+        session_script = FridaSessionScript(
+            script_id=script.id,
+            name=script.name,
+            content=script.content,
         )
+        if session_manager.is_active(run.id):
+            result = await session_manager.load_script(run.id, session_script)
+        else:
+            loop = asyncio.get_running_loop()
+
+            def publish_message(item: dict[str, Any]) -> None:
+                loop.call_soon_threadsafe(
+                    asyncio.create_task,
+                    event_bus.publish(
+                        run.id,
+                        "frida_log",
+                        {
+                            "status": CapabilityStatus.AVAILABLE.value,
+                            "persistent": True,
+                            "messages": [item],
+                        },
+                    ),
+                )
+
+            result = await session_manager.start(
+                run_id=run.id,
+                device_id=run.device_id,
+                target=target,
+                scripts=[session_script],
+                mode=payload.mode,
+                mock=run.run_mode == RunMode.MOCK.value,
+                on_message=publish_message,
+            )
         if run.run_mode == RunMode.LIVE.value and result.status == CapabilityStatus.AVAILABLE:
             script.success_count += 1
         elif run.run_mode == RunMode.LIVE.value:

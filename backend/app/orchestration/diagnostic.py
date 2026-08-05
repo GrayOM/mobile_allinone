@@ -35,7 +35,12 @@ from backend.app.database.models import (
 from backend.app.database.session import SessionLocal
 from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDeviceAdapter
 from backend.app.evidence import EvidenceService
-from backend.app.frida import FridaManager
+from backend.app.frida import (
+    FridaManager,
+    FridaSessionManager,
+    FridaSessionResult,
+    FridaSessionScript,
+)
 from backend.app.frida.policy import is_safe_automatic_script, script_applies_to_app
 from backend.app.proxy import (
     BurpProxyAdapter,
@@ -51,6 +56,14 @@ class DiagnosticStopped(Exception):
     pass
 
 
+class ManualActionInProgress(Exception):
+    pass
+
+
+class DiagnosticManualRequired(Exception):
+    pass
+
+
 class DiagnosticOrchestrator:
     def __init__(
         self,
@@ -61,6 +74,7 @@ class DiagnosticOrchestrator:
         self.events = events or event_bus
         self.evidence = EvidenceService(self.settings)
         self.frida = FridaManager(self.settings)
+        self.frida_sessions = FridaSessionManager(self.settings)
         self.ai_chain = AIProviderChain(settings=self.settings)
         self.mock_ai = MockAIProvider()
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -72,6 +86,7 @@ class DiagnosticOrchestrator:
         self._state_lock = asyncio.Lock()
         self._safe_pause_waiting: set[str] = set()
         self._manual_active: set[str] = set()
+        self._manual_tasks: dict[str, asyncio.Task[Any]] = {}
 
     @property
     def leases(self) -> ResourceLeaseManager:
@@ -85,11 +100,27 @@ class DiagnosticOrchestrator:
             if run_id not in self._safe_pause_waiting or run_id in self._manual_active:
                 return False
             self._manual_active.add(run_id)
-            return True
+            current = asyncio.current_task()
+            if current is not None:
+                self._manual_tasks[run_id] = current
+        self._set_manual_option(run_id, True)
+        return True
 
     async def end_manual_action(self, run_id: str) -> None:
         async with self._state_lock:
             self._manual_active.discard(run_id)
+            self._manual_tasks.pop(run_id, None)
+        self._set_manual_option(run_id, False)
+
+    def _set_manual_option(self, run_id: str, active: bool) -> None:
+        with SessionLocal() as db:
+            run = db.get(DiagnosticRun, run_id)
+            if not run:
+                return
+            options = dict(run.options)
+            options["manual_action_active"] = active
+            run.options = options
+            db.commit()
 
     def launch(self, run_id: str) -> None:
         current = self._tasks.get(run_id)
@@ -149,10 +180,15 @@ class DiagnosticOrchestrator:
         return True
 
     async def stop(self, run_id: str, *, wait: bool = True) -> bool:
-        task = self._tasks.get(run_id)
-        if not task or task.done():
-            return False
-        self._stop_requested.add(run_id)
+        async with self._state_lock:
+            task = self._tasks.get(run_id)
+            if not task or task.done():
+                return False
+            if run_id in self._manual_active:
+                raise ManualActionInProgress(
+                    "수동 단말·Frida·Runtime 작업이 끝난 뒤 진단을 중지하세요."
+                )
+            self._stop_requested.add(run_id)
         event = self._pause_events.get(run_id)
         if event:
             event.set()
@@ -168,12 +204,22 @@ class DiagnosticOrchestrator:
         return True
 
     async def shutdown(self) -> None:
+        manual_tasks = [
+            task
+            for task in self._manual_tasks.values()
+            if not task.done() and task is not asyncio.current_task()
+        ]
+        for task in manual_tasks:
+            task.cancel()
+        if manual_tasks:
+            await asyncio.gather(*manual_tasks, return_exceptions=True)
         run_ids = [run_id for run_id, task in self._tasks.items() if not task.done()]
         if run_ids:
             await asyncio.gather(
                 *(self.stop(run_id, wait=True) for run_id in run_ids),
                 return_exceptions=True,
             )
+        await self.frida_sessions.shutdown()
 
     async def _checkpoint(self, run_id: str) -> None:
         if run_id in self._stop_requested:
@@ -579,6 +625,33 @@ class DiagnosticOrchestrator:
     async def _execute(self, run_id: str) -> None:
         proxy = None
         lease_acquired = False
+        frida_session_started = False
+        frida_script_rows: list[FridaScript] = []
+        quality_checks: dict[str, dict[str, Any]] = {}
+        quality_gaps: list[dict[str, str]] = []
+
+        def record_check(
+            name: str,
+            passed: bool,
+            message: str,
+            *,
+            required: bool = True,
+        ) -> None:
+            quality_checks[name] = {
+                "passed": passed,
+                "required": required,
+                "message": message,
+            }
+            if passed:
+                quality_gaps[:] = [
+                    item for item in quality_gaps if item["stage"] != name
+                ]
+            if required and not passed:
+                quality_gaps[:] = [
+                    item for item in quality_gaps if item["stage"] != name
+                ]
+                quality_gaps.append({"stage": name, "message": message})
+
         try:
             with SessionLocal() as db:
                 run = db.get(DiagnosticRun, run_id)
@@ -613,6 +686,15 @@ class DiagnosticOrchestrator:
                     app_platform = device_platform
                     package_name = "mock.synthetic.application"
                 run.started_at = datetime.now(timezone.utc)
+                options = dict(run.options)
+                options.update(
+                    {
+                        "completion_checks": {},
+                        "quality_gaps": [],
+                        "manual_action_active": False,
+                    }
+                )
+                run.options = options
                 db.commit()
                 proxy_port = (
                     int(run.options.get("proxy_port"))
@@ -683,6 +765,7 @@ class DiagnosticOrchestrator:
                     options = dict(run.options)
                     options.update(
                         {
+                            "manual_proxy_setup_confirmed": False,
                             "manual_proxy_imported": False,
                             "manual_proxy_instructions": proxy_capture.instructions,
                         }
@@ -702,33 +785,65 @@ class DiagnosticOrchestrator:
                     )
                     await self.pause(
                         run.id,
-                        "Burp/Fiddler 설정 후 HAR를 가져오면 진단을 재개할 수 있습니다.",
+                        "Burp/Fiddler Listener와 단말 프록시 설정을 확인한 뒤 재개하세요.",
                     )
                     await self._checkpoint(run.id)
                     db.refresh(run)
-                    if not bool(run.options.get("manual_proxy_imported")):
-                        raise RuntimeError("HAR Import 확인 없이 수동 프록시 진단을 재개할 수 없습니다.")
+                    if not bool(run.options.get("manual_proxy_setup_confirmed")):
+                        raise DiagnosticManualRequired(
+                            "수동 프록시 설정 확인 없이 진단을 재개할 수 없습니다."
+                        )
 
                 if app:
                     await self._stage(db, run, "install", 22, "대상 앱을 단말에 설치합니다.")
                     install = await device.install_app(run.device_id, Path(app.stored_path))
                     await self._record_operation(db, run.id, "앱 설치", install)
-                    if install.status not in {
-                        CapabilityStatus.AVAILABLE,
-                        CapabilityStatus.MANUAL_REQUIRED,
-                    }:
+                    if install.status == CapabilityStatus.MANUAL_REQUIRED:
+                        raise DiagnosticManualRequired(install.message)
+                    if install.status != CapabilityStatus.AVAILABLE:
                         raise RuntimeError(install.message)
 
                 await self._stage(db, run, "launch_baseline", 32, "원본 상태에서 앱을 실행합니다.")
                 launch = await device.start_app(run.device_id, package_name)
                 await self._record_operation(db, run.id, "원본 상태 앱 실행", launch)
-                await self._capture(
+                if launch.status == CapabilityStatus.MANUAL_REQUIRED:
+                    record_check("app_launch", False, launch.message)
+                    raise DiagnosticManualRequired(launch.message)
+                if launch.status != CapabilityStatus.AVAILABLE:
+                    record_check("app_launch", False, launch.message)
+                    raise RuntimeError(f"앱 실행 실패: {launch.message}")
+                record_check("app_launch", True, launch.message)
+                process = await device.process_info(run.device_id, package_name)
+                await self._record_operation(db, run.id, "앱 프로세스 실행 확인", process)
+                process_running = (
+                    process.status == CapabilityStatus.AVAILABLE
+                    and bool(
+                        process.data.get("running")
+                        or process.data.get("pids")
+                        or package_name in process.output
+                    )
+                )
+                record_check(
+                    "app_process",
+                    process_running,
+                    process.message if process_running else "앱 프로세스 실행을 확인하지 못했습니다.",
+                )
+                if process.status == CapabilityStatus.MANUAL_REQUIRED:
+                    raise DiagnosticManualRequired(process.message)
+                baseline_screen = await self._capture(
                     db,
                     run,
                     device,
                     "01-app-launched.png",
                     "앱 실행 직후",
                     "보안통제 적용 전 원본 실행 상태입니다.",
+                )
+                record_check(
+                    "screenshot",
+                    baseline_screen is not None,
+                    "필수 화면 증적을 수집했습니다."
+                    if baseline_screen
+                    else "필수 화면 증적을 수집하지 못했습니다.",
                 )
 
                 await self._stage(
@@ -742,6 +857,11 @@ class DiagnosticOrchestrator:
                 logs = await device.collect_logs(run.device_id, log_path)
                 baseline_evidence = await self._record_operation(
                     db, run.id, "원본 상태 단말 로그", logs, "device_log"
+                )
+                record_check(
+                    "device_log",
+                    logs.status == CapabilityStatus.AVAILABLE,
+                    logs.message,
                 )
                 self._complete_controls(
                     db,
@@ -795,7 +915,7 @@ class DiagnosticOrchestrator:
                     ]
                 else:
                     scripts = []
-                db.commit()
+                eligible_scripts: list[FridaScript] = []
                 for script in scripts:
                     content_sha256 = hashlib.sha256(script.content.encode("utf-8")).hexdigest()
                     if (
@@ -809,62 +929,150 @@ class DiagnosticOrchestrator:
                         script.approved_sha256 = None
                         db.commit()
                         continue
-                    execution = await self.frida.execute(
-                        device_id=run.device_id,
-                        target=package_name,
-                        script_name=script.name,
-                        script_content=script.content,
-                        mode=str(run.options.get("frida_mode", "spawn")),
-                        mock=run.device_adapter == "mock",
-                    )
-                    if not run.synthetic and execution.status == CapabilityStatus.AVAILABLE:
-                        script.success_count += 1
-                    elif not run.synthetic:
-                        script.failure_count += 1
-                    db.commit()
-                    script_evidence = self.evidence.add(
-                        db,
-                        run_id=run.id,
-                        evidence_type="frida_script",
-                        title=f"Frida 스크립트 · {script.name}",
-                        description=execution.message,
-                        command=execution.command,
-                        inline_data={
-                            "script_id": script.id,
-                            "risk": script.risk,
-                            "content": script.content,
-                            "result": execution.to_dict(),
-                        },
-                    )
-                    await self._emit_evidence(run.id, script_evidence)
-                    await self.events.publish(
-                        run.id, "frida_log", execution.to_dict()
-                    )
-                    self._complete_controls(
-                        db,
-                        run.id,
-                        {"MASTG-TEST-0048", "MASTG-TEST-0091"},
-                        result=(
-                            "needs_review"
-                            if execution.status == CapabilityStatus.AVAILABLE
-                            else "unknown"
-                        ),
-                        summary=f"승인된 Frida 스크립트 실행 상태: {execution.status.value}",
-                        evidence_ids=[script_evidence.id],
-                    )
-                    if (
-                        execution.status == CapabilityStatus.FAILED
-                        and project.ai_enabled
-                        and bool(run.options.get("auto_ai_script_candidate"))
-                    ):
-                        await self._create_ai_script_candidate(
-                            db,
-                            run,
-                            project,
-                            script,
-                            execution,
-                            app_platform,
+                    eligible_scripts.append(script)
+                scripts = eligible_scripts
+                frida_script_rows = list(scripts)
+                if scripts:
+                    event_loop = asyncio.get_running_loop()
+
+                    def publish_frida_message(item: dict[str, Any]) -> None:
+                        def schedule() -> None:
+                            asyncio.create_task(
+                                self.events.publish(
+                                    run.id,
+                                    "frida_log",
+                                    {
+                                        "status": CapabilityStatus.AVAILABLE.value,
+                                        "persistent": True,
+                                        "messages": [item],
+                                    },
+                                )
+                            )
+
+                        event_loop.call_soon_threadsafe(schedule)
+
+                    session_scripts = [
+                        FridaSessionScript(
+                            script_id=script.id,
+                            name=script.name,
+                            content=script.content,
                         )
+                        for script in scripts
+                    ]
+                    if self.frida_sessions.is_active(run.id):
+                        self.frida_sessions.set_message_callback(
+                            run.id, publish_frida_message
+                        )
+                        load_results = [
+                            await self.frida_sessions.load_script(run.id, script)
+                            for script in session_scripts
+                        ]
+                        loaded_ids = [
+                            script_id
+                            for item in load_results
+                            for script_id in item.loaded_script_ids
+                        ]
+                        failed_scripts = {
+                            script_id: message
+                            for item in load_results
+                            for script_id, message in item.failed_scripts.items()
+                        }
+                        execution = FridaSessionResult(
+                            (
+                                CapabilityStatus.AVAILABLE
+                                if len(set(loaded_ids)) == len(session_scripts)
+                                else CapabilityStatus.FAILED
+                            ),
+                            "기존 Run 수명 Frida 세션에 자동 스크립트를 추가했습니다.",
+                            str(run.options.get("frida_mode", "attach")),
+                            package_name,
+                            command="python-frida --persistent-load",
+                            loaded_script_ids=list(dict.fromkeys(loaded_ids)),
+                            failed_scripts=failed_scripts,
+                            messages=self.frida_sessions.snapshot(run.id),
+                        )
+                    else:
+                        execution = await self.frida_sessions.start(
+                            run_id=run.id,
+                            device_id=run.device_id,
+                            target=package_name,
+                            scripts=session_scripts,
+                            mode=str(run.options.get("frida_mode", "attach")),
+                            mock=run.device_adapter == "mock",
+                            on_message=publish_frida_message,
+                        )
+                    frida_session_started = self.frida_sessions.is_active(run.id)
+                    loaded = set(execution.loaded_script_ids)
+                    frida_ok = (
+                        execution.status == CapabilityStatus.AVAILABLE
+                        and all(script.id in loaded for script in scripts)
+                    )
+                    record_check(
+                        "frida_session",
+                        frida_ok,
+                        execution.message,
+                    )
+                    for script in scripts:
+                        script_loaded = script.id in loaded
+                        if not run.synthetic and script_loaded:
+                            script.success_count += 1
+                        elif not run.synthetic:
+                            script.failure_count += 1
+                        script_evidence = self.evidence.add(
+                            db,
+                            run_id=run.id,
+                            evidence_type="frida_script",
+                            title=f"Frida 세션 스크립트 · {script.name}",
+                            description=execution.message,
+                            command=execution.command,
+                            inline_data={
+                                "script_id": script.id,
+                                "risk": script.risk,
+                                "content": script.content,
+                                "persistent_until_run_end": True,
+                                "loaded": script_loaded,
+                                "result": execution.to_dict(),
+                            },
+                        )
+                        await self._emit_evidence(run.id, script_evidence)
+                        self._complete_controls(
+                            db,
+                            run.id,
+                            {"MASTG-TEST-0048", "MASTG-TEST-0091"},
+                            result="needs_review" if script_loaded else "unknown",
+                            summary=(
+                                "승인된 Frida 스크립트를 Run 수명 세션에 로드했습니다."
+                                if script_loaded
+                                else "Frida 스크립트를 세션에 로드하지 못했습니다."
+                            ),
+                            evidence_ids=[script_evidence.id],
+                        )
+                        if (
+                            not script_loaded
+                            and project.ai_enabled
+                            and bool(run.options.get("auto_ai_script_candidate"))
+                        ):
+                            await self._create_ai_script_candidate(
+                                db,
+                                run,
+                                project,
+                                script,
+                                execution,
+                                app_platform,
+                            )
+                    db.commit()
+                    execution_event = execution.to_dict()
+                    # Individual messages are already emitted by the persistent
+                    # session callback; do not replay the full snapshot here.
+                    execution_event["messages"] = []
+                    await self.events.publish(run.id, "frida_log", execution_event)
+                else:
+                    record_check(
+                        "frida_session",
+                        True,
+                        "선택된 Frida 스크립트가 없어 실행하지 않았습니다.",
+                        required=False,
+                    )
 
                 runtime_tool = str(run.options.get("runtime_tool") or "none")
                 if runtime_tool in {"objection", "drozer"}:
@@ -920,6 +1128,23 @@ class DiagnosticOrchestrator:
                         "로그인 완료 후",
                         "사용자 수동 로그인 완료 후의 화면입니다.",
                     )
+                    record_check(
+                        "app_interaction",
+                        True,
+                        "사용자가 로그인·기능 조작 완료를 확인했습니다.",
+                    )
+                elif run.run_mode == RunMode.LIVE.value:
+                    record_check(
+                        "app_interaction",
+                        False,
+                        "자동 화면 탐색이나 사용자 기능 조작 확인이 없어 동적 진단 범위가 제한됩니다.",
+                    )
+                else:
+                    record_check(
+                        "app_interaction",
+                        True,
+                        "Mock 합성 동작을 수행했습니다.",
+                    )
 
                 await self._stage(
                     db, run, "network_dynamic", 70, "프록시 패킷과 동적 증적을 수집합니다."
@@ -927,7 +1152,7 @@ class DiagnosticOrchestrator:
                 await asyncio.sleep(0.1)
                 flows = []
 
-                await self._capture(
+                dynamic_screen = await self._capture(
                     db,
                     run,
                     device,
@@ -935,10 +1160,49 @@ class DiagnosticOrchestrator:
                     "테스트 동작 후",
                     "동적·네트워크 테스트 종료 시점의 화면입니다.",
                 )
+                record_check(
+                    "screenshot",
+                    baseline_screen is not None or dynamic_screen is not None,
+                    (
+                        "필수 화면 증적을 1개 이상 수집했습니다."
+                        if baseline_screen is not None or dynamic_screen is not None
+                        else "필수 화면 증적을 수집하지 못했습니다."
+                    ),
+                )
                 dynamic_log_path = self.evidence.run_dir(run.id) / "dynamic-logcat.txt"
                 dynamic_logs = await device.collect_logs(run.device_id, dynamic_log_path)
                 dynamic_evidence = await self._record_operation(
                     db, run.id, "동적 분석 단말 로그", dynamic_logs, "device_log"
+                )
+                record_check(
+                    "device_log",
+                    logs.status == CapabilityStatus.AVAILABLE
+                    or dynamic_logs.status == CapabilityStatus.AVAILABLE,
+                    (
+                        "원본 또는 동적 단계에서 단말 로그를 수집했습니다."
+                        if logs.status == CapabilityStatus.AVAILABLE
+                        or dynamic_logs.status == CapabilityStatus.AVAILABLE
+                        else "원본과 동적 단계 모두 단말 로그 수집에 실패했습니다."
+                    ),
+                )
+                final_process = await device.process_info(run.device_id, package_name)
+                await self._record_operation(
+                    db, run.id, "동적 진단 종료 시 앱 프로세스 확인", final_process
+                )
+                final_process_running = (
+                    final_process.status == CapabilityStatus.AVAILABLE
+                    and bool(
+                        final_process.data.get("running")
+                        or final_process.data.get("pids")
+                        or package_name in final_process.output
+                    )
+                )
+                record_check(
+                    "app_process",
+                    final_process_running,
+                    final_process.message
+                    if final_process_running
+                    else "동적 진단 종료 시 앱 프로세스 실행을 확인하지 못했습니다.",
                 )
                 self._complete_controls(
                     db,
@@ -949,11 +1213,72 @@ class DiagnosticOrchestrator:
                     evidence_ids=[dynamic_evidence.id],
                 )
 
+                if run.proxy_adapter in {"burp", "fiddler"}:
+                    run.current_stage = "proxy_capture_import"
+                    run.progress = 78
+                    db.commit()
+                    await self.events.publish(
+                        run.id,
+                        "stage",
+                        {
+                            "stage": "proxy_capture_import",
+                            "progress": 78,
+                            "message": "앱 조작이 끝났습니다. Burp/Fiddler 캡처를 종료하고 최종 HAR/JSON을 가져오세요.",
+                            "status": RunStatus.PAUSE_REQUESTED.value,
+                        },
+                    )
+                    await self.pause(
+                        run.id,
+                        "Burp/Fiddler 캡처 종료 후 최종 HAR/JSON을 가져오세요.",
+                    )
+                    await self._checkpoint(run.id)
+                    db.refresh(run)
+                    if not bool(run.options.get("manual_proxy_imported")):
+                        raise DiagnosticManualRequired(
+                            "최종 HAR Import 확인 없이 수동 프록시 진단을 완료할 수 없습니다."
+                        )
+
                 stop_proxy = await asyncio.shield(proxy.stop(run.id))
                 await self.events.publish(run.id, "proxy_status", stop_proxy.to_dict())
                 await asyncio.sleep(0.1)
                 flows = await proxy.read_flows(run.id)
                 await self._store_proxy_flows(db, run, proxy, flows)
+                record_check(
+                    "proxy_capture",
+                    bool(flows),
+                    f"최종 프록시 흐름 {len(flows)}개를 저장했습니다."
+                    if flows
+                    else "프록시 흐름이 0개여서 네트워크 진단 범위를 확인할 수 없습니다.",
+                )
+                if self.frida_sessions.is_active(run.id) and not frida_session_started:
+                    frida_session_started = True
+                    record_check(
+                        "frida_session",
+                        self.frida_sessions.is_healthy(run.id),
+                        "수동 승인 Frida 스크립트를 Run 종료까지 유지했습니다.",
+                    )
+                if frida_session_started:
+                    if not self.frida_sessions.is_healthy(run.id):
+                        record_check(
+                            "frida_session",
+                            False,
+                            "동적·네트워크 진단이 끝나기 전에 Frida 세션이 분리되었습니다.",
+                        )
+                    frida_messages = self.frida_sessions.snapshot(run.id)
+                    transcript = self.evidence.add_json(
+                        db,
+                        run_id=run.id,
+                        filename="frida-session-messages.json",
+                        title="Run 수명 Frida 세션 메시지",
+                        evidence_type="frida_session",
+                        data=frida_messages,
+                        description="앱 조작과 프록시 캡처가 끝날 때까지 유지한 단일 Frida 세션의 메시지입니다.",
+                        command=(
+                            f"python-frida -D {run.device_id} --{str(run.options.get('frida_mode', 'attach'))} "
+                            f"{package_name} --persistent"
+                        ),
+                    )
+                    await self._emit_evidence(run.id, transcript)
 
                 await self._stage(db, run, "ai_analysis", 84, "증적 후보를 분류합니다.")
                 evidence_rows = db.scalars(
@@ -1122,8 +1447,26 @@ class DiagnosticOrchestrator:
                 await self._stage(
                     db, run, "finalize", 96, "증적 인덱스를 검증하고 캡처를 종료합니다."
                 )
-                run.status = RunStatus.COMPLETED.value
-                run.current_stage = "completed"
+                unique_gaps = list(
+                    {
+                        (item["stage"], item["message"]): item
+                        for item in quality_gaps
+                    }.values()
+                )
+                options = dict(run.options)
+                options["completion_checks"] = quality_checks
+                options["quality_gaps"] = unique_gaps
+                options["failed_required_stages"] = [
+                    item["stage"] for item in unique_gaps
+                ]
+                run.options = options
+                final_status = (
+                    RunStatus.COMPLETED_WITH_GAPS
+                    if unique_gaps
+                    else RunStatus.COMPLETED
+                )
+                run.status = final_status.value
+                run.current_stage = final_status.value
                 run.progress = 100
                 run.finished_at = datetime.now(timezone.utc)
                 db.commit()
@@ -1131,10 +1474,15 @@ class DiagnosticOrchestrator:
                     run.id,
                     "run_status",
                     {
-                        "status": "completed",
+                        "status": final_status.value,
                         "progress": 100,
-                        "message": "진단과 증적 연결을 완료했습니다.",
+                        "message": (
+                            f"파이프라인은 종료됐지만 필수 범위 {len(unique_gaps)}개가 부족합니다."
+                            if unique_gaps
+                            else "필수 실행·증적 조건을 충족해 진단을 완료했습니다."
+                        ),
                         "finding_ids": [item.id for item in created_findings],
+                        "quality_gaps": unique_gaps,
                     },
                 )
         except DiagnosticStopped:
@@ -1158,10 +1506,38 @@ class DiagnosticOrchestrator:
                     run.finished_at = datetime.now(timezone.utc)
                     db.commit()
             raise
+        except DiagnosticManualRequired as exc:
+            with SessionLocal() as db:
+                run = db.get(DiagnosticRun, run_id)
+                if run:
+                    options = dict(run.options)
+                    options["completion_checks"] = quality_checks
+                    options["quality_gaps"] = quality_gaps
+                    options["failed_required_stages"] = [
+                        item["stage"] for item in quality_gaps
+                    ]
+                    run.options = options
+                    run.status = RunStatus.MANUAL_REQUIRED.value
+                    run.current_stage = RunStatus.MANUAL_REQUIRED.value
+                    run.error = str(exc)
+                    run.finished_at = datetime.now(timezone.utc)
+                    db.commit()
+            await self.events.publish(
+                run_id,
+                "run_status",
+                {"status": RunStatus.MANUAL_REQUIRED.value, "message": str(exc)},
+            )
         except Exception as exc:
             with SessionLocal() as db:
                 run = db.get(DiagnosticRun, run_id)
                 if run:
+                    options = dict(run.options)
+                    options["completion_checks"] = quality_checks
+                    options["quality_gaps"] = quality_gaps
+                    options["failed_required_stages"] = [
+                        item["stage"] for item in quality_gaps
+                    ]
+                    run.options = options
                     run.status = RunStatus.FAILED.value
                     run.current_stage = "failed"
                     run.error = f"{type(exc).__name__}: {exc}"
@@ -1173,6 +1549,11 @@ class DiagnosticOrchestrator:
                 {"status": "failed", "message": f"{type(exc).__name__}: {exc}"},
             )
         finally:
+            if frida_session_started or self.frida_sessions.is_active(run_id):
+                try:
+                    await asyncio.shield(self.frida_sessions.stop(run_id))
+                except Exception:
+                    pass
             if proxy is not None:
                 try:
                     await asyncio.shield(proxy.stop(run_id))
@@ -1183,7 +1564,8 @@ class DiagnosticOrchestrator:
             self._stop_requested.discard(run_id)
             async with self._state_lock:
                 self._safe_pause_waiting.discard(run_id)
-                self._manual_active.discard(run_id)
+                if run_id not in self._manual_tasks:
+                    self._manual_active.discard(run_id)
             self._pause_events.pop(run_id, None)
             self._proxy_adapters.pop(run_id, None)
             self._tasks.pop(run_id, None)

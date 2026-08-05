@@ -78,6 +78,7 @@ class AppArtifactOut(ORMModel):
     version: str | None
     analysis_status: str
     analysis_result: dict[str, Any]
+    active_analysis_run_id: str | None
     synthetic: bool
     created_at: datetime
 

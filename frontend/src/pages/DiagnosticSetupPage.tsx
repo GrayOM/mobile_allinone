@@ -223,7 +223,7 @@ export default function DiagnosticSetupPage() {
               )}
               <div className="field">
                 <label htmlFor="frida-mode">Frida 연결 방식</label>
-                <select id="frida-mode" name="frida_mode" defaultValue="spawn">
+                <select id="frida-mode" name="frida_mode" defaultValue="attach">
                   <option value="spawn">Spawn · 실행 시점부터</option>
                   <option value="attach">Attach · 실행 중 프로세스</option>
                 </select>

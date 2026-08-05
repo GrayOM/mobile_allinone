@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "../router";
-import { api, post } from "../api";
+import { api, openAuthenticatedFile, post } from "../api";
 import type { Evidence, Finding, FindingSource } from "../types";
 import { EmptyState, StatusChip, formatDate } from "../components/UI";
+import { AuthenticatedDownload, AuthenticatedImage } from "../components/AuthenticatedFile";
 
 export default function FindingDetailPage() {
   const { findingId = "" } = useParams();
@@ -10,6 +11,7 @@ export default function FindingDetailPage() {
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [sources, setSources] = useState<FindingSource[]>([]);
   const [reporting, setReporting] = useState(false);
+  const [reportError, setReportError] = useState("");
 
   useEffect(() => {
     void api<Finding>(`/findings/${findingId}`).then(async (item) => {
@@ -21,9 +23,12 @@ export default function FindingDetailPage() {
 
   async function openReport() {
     setReporting(true);
+    setReportError("");
     try {
       await post(`/findings/${findingId}/report`);
-      window.open(`/api/findings/${findingId}/report`, "_blank", "noopener,noreferrer");
+      await openAuthenticatedFile(`/findings/${findingId}/report`);
+    } catch (reason) {
+      setReportError(reason instanceof Error ? reason.message : "HTML 증적 설명서를 열지 못했습니다.");
     } finally {
       setReporting(false);
     }
@@ -57,6 +62,7 @@ export default function FindingDetailPage() {
           {reporting ? "생성 중…" : "HTML 증적 설명서"}
         </button>
       </header>
+      {reportError && <div className="inline-alert">{reportError}</div>}
 
       <div className="finding-facts">
         <section>
@@ -127,7 +133,7 @@ export default function FindingDetailPage() {
                   <h3>{item.title}</h3>
                   {item.description && <p>{item.description}</p>}
                   {item.mime_type?.startsWith("image/") && (
-                    <img src={`/api/evidence/${item.id}/download`} alt={item.title} />
+                    <AuthenticatedImage path={`/evidence/${item.id}/download`} alt={item.title} />
                   )}
                   {item.command && <pre className="code-view">{item.command}</pre>}
                   {item.inline_data && (
@@ -137,9 +143,15 @@ export default function FindingDetailPage() {
                     </details>
                   )}
                   {item.file_path && (
-                    <a className="download-link" href={`/api/evidence/${item.id}/download`}>
-                      원본 내려받기 <span>SHA {item.sha256?.slice(0, 12)}…</span>
-                    </a>
+                    <AuthenticatedDownload
+                      path={`/evidence/${item.id}/download`}
+                      filename={
+                        item.file_path?.split(/[\\/]/).pop()
+                        || item.title.replaceAll(/[^A-Za-z0-9가-힣._-]/g, "-")
+                        || "evidence"
+                      }
+                      sha256={item.sha256}
+                    />
                   )}
                 </div>
               </article>
