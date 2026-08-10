@@ -24,11 +24,20 @@ class EvidencePolicyEngine:
             (("network_capture",), ("network_test",)),
         ),
         (
-            ("storage", "local_data", "sensitive_data_exposure"),
-            (
-                ("storage_snapshot", "storage_diff", "network_capture"),
-                ("storage_diff", "network_test", "device_log"),
-            ),
+            ("local_storage", "local_data", "shared_preferences", "sqlite", "storage"),
+            (("storage_snapshot", "storage_diff"),),
+        ),
+        (
+            ("network_sensitive_exposure", "api_sensitive_exposure"),
+            (("network_capture", "network_test"),),
+        ),
+        (
+            ("runtime_log_exposure", "log_sensitive_exposure"),
+            (("device_log", "frida_session"),),
+        ),
+        (
+            ("sensitive_data_exposure",),
+            (("storage_snapshot", "storage_diff", "network_capture", "device_log"),),
         ),
         (
             ("frida", "hook", "root_detection", "certificate_pinning", "anti_tamper"),
@@ -62,6 +71,14 @@ class EvidencePolicyEngine:
                 return requirements
         return ((tuple(sorted(cls.GENERIC_RELEVANT))),)
 
+    @staticmethod
+    def _ambiguous_exposure_category(category: str) -> bool:
+        normalized = category.casefold().replace("-", "_").replace(" ", "_")
+        return "sensitive_data_exposure" in normalized and not any(
+            qualifier in normalized
+            for qualifier in ("local_storage", "network_", "api_", "runtime_", "log_")
+        )
+
     def decide_finding(
         self,
         *,
@@ -93,12 +110,19 @@ class EvidencePolicyEngine:
             for group in requirements
             if not available_types.intersection(group)
         ]
+        ambiguous_exposure = self._ambiguous_exposure_category(category)
         if not selected:
             verdict = "candidate"
             explanation = "현재 Run의 관련 증적이 없어 후보 상태로 제한했습니다."
         elif confidence < minimum_quality:
             verdict = "needs_review"
             explanation = "AI 품질 점수가 기준 미만이어서 검토가 필요합니다."
+        elif requested_verdict == "confirmed" and ambiguous_exposure:
+            verdict = "needs_review"
+            explanation = (
+                "민감정보 노출 출처가 모호합니다. local_storage, "
+                "network_sensitive_exposure 또는 runtime_log_exposure로 분류해야 합니다."
+            )
         elif requested_verdict == "confirmed" and missing:
             verdict = "needs_review"
             explanation = "Finding 유형별 confirmed 증적 기준을 충족하지 못했습니다."

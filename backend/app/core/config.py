@@ -108,6 +108,10 @@ class AppSettings(BaseModel):
         le=2 * 1_024 * 1_024 * 1_024,
     )
     frida_stream_events_per_second: int = Field(default=10, ge=1, le=1_000)
+    frida_transcript_queue_size: int = Field(default=1_000, ge=100, le=20_000)
+    frida_transcript_flush_timeout_seconds: float = Field(
+        default=10.0, ge=1.0, le=60.0
+    )
     storage_archive_max_bytes: int = Field(
         default=64 * 1_024 * 1_024,
         ge=1_024 * 1_024,
@@ -119,6 +123,7 @@ class AppSettings(BaseModel):
         le=256 * 1_024 * 1_024,
     )
     storage_max_files: int = Field(default=20_000, ge=1, le=100_000)
+    storage_sqlite_timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
     network_analysis_max_flows: int = Field(default=500, ge=1, le=5_000)
     network_candidate_max_count: int = Field(default=1_000, ge=1, le=10_000)
     mobsf_url: str | None = None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import sqlite3
@@ -50,6 +51,9 @@ class MockAndroidStorageCollector:
         connection.close()
 
     async def capture(self, phase: str, destination: Path) -> StorageCapture:
+        return await asyncio.to_thread(self._capture, phase, destination)
+
+    def _capture(self, phase: str, destination: Path) -> StorageCapture:
         self._capture_count += 1
         after = self._capture_count > 1 or phase == "after_interaction"
         destination.parent.mkdir(parents=True, exist_ok=True)

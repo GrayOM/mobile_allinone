@@ -142,8 +142,8 @@ tests/               단위·API·Mock E2E 테스트
 - 내장 스크립트는 동작을 바꾸지 않는 저위험 관찰용이다.
 - 자동 진단의 Frida는 Python 바인딩으로 앱을 한 번 Spawn/Attach하고 여러 스크립트를 같은 Session에 로드한다. 메시지를 로그인·동적·프록시 단계까지 수집하고 정상 경로에서는 JSONL을 확정한 뒤 unload/detach하며, 중지·실패·취소 경로는 `finally`에서 정리한다.
 - Attach는 baseline 프로세스 실행을 재확인한 뒤 연결한다. Spawn은 baseline 증적 후 앱 종료·종료 확인·spawn·script load·resume·재실행 확인 순서로 진행하며 각 단계 증적 ID를 연결한다.
-- Frida 메시지는 최근 500~2000건 Ring Buffer와 Run별 append-only JSONL로 분리한다. Binary는 base64로 직렬화하고 개별/전체 크기 제한의 `dropped_count`, `truncated_count`를 Run health와 UI에 보존한다. WebSocket은 설정된 초당 빈도로 sampling한다.
-- iOS USB는 UDID transport를 사용하고, SSH 프로필은 검증된 `frida_endpoint`를 Python Frida `add_remote_device`에 실제 전달한다. 설정 route와 실제 연결 Device를 단말/Run UI에 표시한다.
+- Frida 메시지는 최근 500~2000건 Ring Buffer와 Run별 append-only JSONL로 분리한다. Callback은 bounded Queue에만 넣고 단일 writer가 파일을 한 번 열어 기록한다. Binary는 base64로 직렬화하고 개별/전체/Queue 크기 제한의 `dropped_count`, `truncated_count`를 Run health와 UI에 보존한다. WebSocket은 설정된 초당 빈도로 sampling한다.
+- iOS USB는 UDID transport를 사용하고, SSH 프로필은 검증된 `frida_endpoint`를 Python Frida `add_remote_device`에 실제 전달한다. 설정 route와 실제 연결 Device를 단말/Run UI에 표시하며 종료 시 `remove_remote_device`로 등록을 정리한다.
 - 빈 Frida 선택은 “실행 안 함”이며 자동 선택은 별도 `auto_select_frida=true`에서만 동작한다.
 - 자동 진단은 대상 앱의 플랫폼·프레임워크·정적 신호와 맞는 `builtin + low` 스크립트만 실행한다. 사용자·AI·medium/high 스크립트는 `safely_paused` Run의 1회 승인 직접 실행만 허용한다.
 - 사용자 스크립트와 AI 후보는 `pending_approval`로 저장한다.
@@ -177,11 +177,12 @@ tests/               단위·API·Mock E2E 테스트
 
 ### Android 자동 탐색·동적 저장소·API Candidate
 
-- `backend/app/navigation/`은 ADB UIAutomator XML 기반 `UIDriver`, 정규화 상태 fingerprint, 제한형 DFS, 위험 정책과 결정론적 Mock 화면 그래프를 제공한다. AI나 Planner가 좌표·Shell을 직접 실행하지 않으며 결제·송금·삭제·발송·계정/자격증명·시스템 설정 동작은 `pending_approval`로만 남긴다.
+- `backend/app/navigation/`은 ADB UIAutomator XML 기반 `UIDriver`, 제한형 DFS, default-deny 위험 정책과 결정론적 Mock 화면 그래프를 제공한다. TextView/ViewGroup/탭 계열과 명확한 목록·상세·정보 의미가 모두 있는 요소만 low이며 Button·Switch·CheckBox·확인/저장 계열·무라벨·unknown clickable·외부 Intent 가능 요소는 `pending_approval`로만 남긴다.
+- 방문 판단은 activity/resource-id/class/tree shape의 `structural_fingerprint`를 사용한다. Text/content-desc/bounds/checked 변화는 `content_fingerprint`와 증적 신호로 분리해 동적 문구가 `max_states`를 소모하지 않게 한다.
 - 허용 UI 동작은 Before Screenshot/UI Tree → Action → After Screenshot/UI Tree 순서와 Edge 증적 ID를 보존한다. 상태·깊이·동작·화면별 동작·반복·동작 시간·전체 시간 제한에는 서버 hard cap이 있다.
-- `backend/app/storage/`은 Root Android의 검증된 `/data/data/<package>`만 제한형 tar로 수집한다. Before/After 파일 diff와 SQLite table/column/row count 및 기본 마스킹 Preview를 제공한다. 일반 ADB Clipboard는 대상 앱 귀속이 불가능해 `unsupported`이며 Mock만 합성 변화 신호를 낸다.
+- `backend/app/storage/`은 Root Android의 검증된 `/data/data/<package>`만 제한형 tar로 수집한다. ADB stdout은 RAM bytes가 아니라 제한형 임시 파일로 streaming하고 성공 시 원자 교체한다. Archive hash와 SQLite 검사는 worker thread에서 실행하며 SQLite progress handler 시간 제한을 둔다. Before/After 파일 diff와 table/column/row count 및 기본 마스킹 Preview를 제공한다.
 - `backend/app/network_testing/`은 ProxyFlow를 로컬 구조화한 뒤 실행 전 Candidate를 만든다. Live 재전송은 현재 승인 대기로 남고, Mock의 읽기 전용 합성 재현만 자동 실행한다. POST/PUT/PATCH/DELETE·업로드·Object 경계 후보는 자동 실행하지 않는다.
-- Finding 증적 정책은 범주별 required evidence group을 검사한다. 관련 증적이 없으면 `candidate`, confirmed 기준이 부족하면 `needs_review`이며 모든 Run Screenshot을 Finding에 연결하지 않는다.
+- Finding 증적 정책은 범주별 required evidence group을 검사한다. `local_storage` confirmed에는 반드시 `storage_snapshot` 또는 `storage_diff`가 필요하며 network/runtime 노출과 분리한다. 출처가 모호한 `sensitive_data_exposure`는 `needs_review`로 제한한다.
 - 기본 `/api/runs/{id}/flows`와 Frida WebSocket은 마스킹한다. 인증된 `/api/runs/{id}/flows/raw`와 원본 Frida JSONL은 명시적 Raw 접근이다.
 
 ### 입력·외부 도구 방어
@@ -364,7 +365,7 @@ MSW_ENABLE_API_DOCS=false
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          69 passed
+pytest -q                          74 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```

@@ -65,9 +65,12 @@ class UIElement:
     selected: bool
     checked: bool
     index: int
+    tree_path: str
 
     @classmethod
-    def from_attributes(cls, attributes: dict[str, str], index: int) -> "UIElement":
+    def from_attributes(
+        cls, attributes: dict[str, str], index: int, tree_path: str
+    ) -> "UIElement":
         bounds = Bounds.parse(attributes.get("bounds"))
         password = _bool(attributes.get("password"))
         raw_text = _clean(attributes.get("text"))
@@ -78,6 +81,7 @@ class UIElement:
                 _clean(attributes.get("class")),
                 _clean(attributes.get("content-desc")),
                 str(bounds.to_list()),
+                tree_path,
             ]
         )
         element_id = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:20]
@@ -96,6 +100,7 @@ class UIElement:
             selected=_bool(attributes.get("selected")),
             checked=_bool(attributes.get("checked")),
             index=index,
+            tree_path=tree_path,
         )
 
     @property
@@ -119,6 +124,8 @@ class UIState:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     fingerprint: str = ""
+    structural_fingerprint: str = ""
+    content_fingerprint: str = ""
     text_hash: str = ""
 
     def __post_init__(self) -> None:
@@ -126,31 +133,47 @@ class UIState:
             item.text or item.content_desc for item in self.elements if item.text or item.content_desc
         )
         self.text_hash = hashlib.sha256(text_material.encode("utf-8")).hexdigest()
-        normalized = {
+        structural = {
             "package": self.package,
             "activity": self.activity,
-            "window": self.window,
             "elements": sorted(
                 [{
+                    "tree_path": item.tree_path,
                     "resource_id": item.resource_id,
                     "class": item.class_name,
+                    "clickable": item.clickable,
+                    "scrollable": item.scrollable,
+                    "password": item.password,
+                } for item in self.elements],
+                key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False),
+            ),
+        }
+        content = {
+            "structure": structural,
+            "elements": sorted(
+                [{
+                    "tree_path": item.tree_path,
+                    "resource_id": item.resource_id,
                     "text": item.text,
                     "content_desc": item.content_desc,
                     "bounds": item.bounds.to_list(),
-                    "clickable": item.clickable,
                     "enabled": item.enabled,
-                    "scrollable": item.scrollable,
-                    "password": item.password,
                     "selected": item.selected,
                     "checked": item.checked,
                 } for item in self.elements],
                 key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False),
             ),
         }
-        encoded = json.dumps(
-            normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        structural_encoded = json.dumps(
+            structural, sort_keys=True, separators=(",", ":"), ensure_ascii=False
         ).encode("utf-8")
-        self.fingerprint = hashlib.sha256(encoded).hexdigest()
+        content_encoded = json.dumps(
+            content, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        self.structural_fingerprint = hashlib.sha256(structural_encoded).hexdigest()
+        self.content_fingerprint = hashlib.sha256(content_encoded).hexdigest()
+        # Compatibility alias: traversal uses the stable structural identity.
+        self.fingerprint = self.structural_fingerprint
 
     @classmethod
     def from_xml(
@@ -170,10 +193,24 @@ class UIState:
             root = ElementTree.fromstring(raw_xml)
         except ElementTree.ParseError as exc:
             raise ValueError(f"UI hierarchy XML is invalid: {exc}") from exc
-        elements = [
-            UIElement.from_attributes(dict(node.attrib), index)
-            for index, node in enumerate(root.iter("node"))
-        ]
+        elements: list[UIElement] = []
+
+        def walk(parent: ElementTree.Element, parent_path: str) -> None:
+            for node in parent:
+                if node.tag != "node":
+                    walk(node, parent_path)
+                    continue
+                attributes = dict(node.attrib)
+                resource = _clean(attributes.get("resource-id"))
+                class_name = _clean(attributes.get("class"))
+                segment = resource or class_name or "node"
+                tree_path = f"{parent_path}/{segment}"[:2048]
+                elements.append(
+                    UIElement.from_attributes(attributes, len(elements), tree_path)
+                )
+                walk(node, tree_path)
+
+        walk(root, "hierarchy")
         inferred_package = package or next(
             (item.package for item in elements if item.package), ""
         )
@@ -201,6 +238,8 @@ class UIState:
     def to_dict(self, *, include_elements: bool = True) -> dict[str, Any]:
         data: dict[str, Any] = {
             "fingerprint": self.fingerprint,
+            "structural_fingerprint": self.structural_fingerprint,
+            "content_fingerprint": self.content_fingerprint,
             "package": self.package,
             "activity": self.activity,
             "window": self.window,

@@ -6,6 +6,7 @@ import json
 import shutil
 import ssl
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -312,6 +313,9 @@ async def test_frida_messages_use_bounded_ring_binary_serialization_and_transcri
     assert health["buffer_count"] == 500
     assert health["truncated_count"] >= 510
     assert health["dropped_count"] > 0
+    assert await manager.flush_transcript("run-bounded") is True
+    health = manager.health("run-bounded")
+    assert health["transcript_queue_count"] == 0
     transcript = Path(str(health["transcript_path"]))
     assert transcript.is_file()
     assert transcript.stat().st_size <= settings.frida_transcript_max_bytes
@@ -322,6 +326,58 @@ async def test_frida_messages_use_bounded_ring_binary_serialization_and_transcri
     stopped = await manager.stop("run-bounded")
     assert stopped is not None
     assert stopped.stats["dropped_count"] == health["dropped_count"]
+
+
+@pytest.mark.asyncio
+async def test_frida_transcript_queue_saturation_drops_without_blocking_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    gate = threading.Event()
+    settings = AppSettings(
+        data_dir=tmp_path,
+        database_url=f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
+        frida_transcript_queue_size=100,
+        frida_transcript_max_bytes=2 * 1024 * 1024,
+    )
+    manager = FridaSessionManager(settings)
+    original_writer = manager._transcript_writer
+
+    def delayed_writer(active):
+        gate.wait(timeout=3)
+        original_writer(active)
+
+    async def syntax_ok(_content):
+        return CapabilityStatus.AVAILABLE, "ok"
+
+    monkeypatch.setattr(manager, "_transcript_writer", delayed_writer)
+    monkeypatch.setattr(manager.syntax, "check_syntax", syntax_ok)
+    result = await manager.start(
+        run_id="run-queue",
+        device_id="mock-device",
+        target="com.example.app",
+        mode="attach",
+        mock=True,
+        scripts=[FridaSessionScript("script-1", "queue", "send('ok')")],
+    )
+    assert result.status == CapabilityStatus.AVAILABLE
+    active = manager._sessions["run-queue"]
+    for index in range(150):
+        manager._record(
+            active,
+            "script-1",
+            "queue",
+            {"type": "send", "payload": {"index": index}},
+            None,
+        )
+    health = manager.health("run-queue")
+    assert health["transcript_queue_count"] == 100
+    assert health["dropped_count"] >= 51
+
+    gate.set()
+    assert await manager.flush_transcript("run-queue") is True
+    stopped = await manager.stop("run-queue")
+    assert stopped and stopped.status == CapabilityStatus.AVAILABLE
 
 
 @pytest.mark.asyncio
@@ -358,6 +414,9 @@ async def test_frida_remote_target_uses_official_device_manager(
             calls.append(("remote", endpoint))
             return FakeRemoteDevice()
 
+        def remove_remote_device(self, endpoint):
+            calls.append(("remove_remote", endpoint))
+
     class FakeFrida:
         @staticmethod
         def get_device_manager():
@@ -389,6 +448,7 @@ async def test_frida_remote_target_uses_official_device_manager(
     assert result.transport == "remote"
     assert result.endpoint == "192.0.2.25:27042"
     await manager.stop("run-remote")
+    assert calls[-1] == ("remove_remote", "192.0.2.25:27042")
 
 
 def test_frida_attach_and_spawn_lifecycles_preserve_ordered_evidence(client):

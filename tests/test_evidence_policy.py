@@ -16,7 +16,7 @@ def _evidence(identifier: str, evidence_type: str) -> Evidence:
     )
 
 
-def test_confirmed_finding_requires_category_specific_evidence_groups():
+def test_local_storage_confirmation_requires_actual_storage_evidence():
     policy = EvidencePolicyEngine()
     evidence = {
         "network": _evidence("network", "network_capture"),
@@ -24,28 +24,66 @@ def test_confirmed_finding_requires_category_specific_evidence_groups():
         "screen": _evidence("screen", "screenshot"),
     }
     incomplete = policy.decide_finding(
-        category="sensitive_data_exposure",
-        requested_verdict="confirmed",
-        confidence=0.95,
-        proposed_ids=["network", "screen"],
-        evidence_by_id=evidence,
-        minimum_quality=0.55,
-    )
-    assert incomplete.effective_verdict == "needs_review"
-    assert incomplete.selected_ids == ["network"]
-    assert incomplete.missing_requirements
-
-    complete = policy.decide_finding(
-        category="sensitive_data_exposure",
+        category="local_storage",
         requested_verdict="confirmed",
         confidence=0.95,
         proposed_ids=["network", "log", "screen"],
         evidence_by_id=evidence,
         minimum_quality=0.55,
     )
+    assert incomplete.effective_verdict == "candidate"
+    assert incomplete.selected_ids == []
+    assert incomplete.missing_requirements
+
+    evidence["storage"] = _evidence("storage", "storage_snapshot")
+    complete = policy.decide_finding(
+        category="local_storage",
+        requested_verdict="confirmed",
+        confidence=0.95,
+        proposed_ids=["network", "log", "storage"],
+        evidence_by_id=evidence,
+        minimum_quality=0.55,
+    )
     assert complete.effective_verdict == "confirmed"
-    assert complete.selected_ids == ["network", "log"]
+    assert complete.selected_ids == ["storage"]
     assert complete.missing_requirements == []
+
+
+def test_sensitive_exposure_requires_source_specific_category_for_confirmation():
+    policy = EvidencePolicyEngine()
+    evidence = {
+        "network": _evidence("network", "network_capture"),
+        "log": _evidence("log", "device_log"),
+    }
+    ambiguous = policy.decide_finding(
+        category="sensitive_data_exposure",
+        requested_verdict="confirmed",
+        confidence=0.95,
+        proposed_ids=evidence,
+        evidence_by_id=evidence,
+        minimum_quality=0.55,
+    )
+    assert ambiguous.effective_verdict == "needs_review"
+    assert "출처가 모호" in ambiguous.explanation
+
+    network = policy.decide_finding(
+        category="network_sensitive_exposure",
+        requested_verdict="confirmed",
+        confidence=0.95,
+        proposed_ids=["network"],
+        evidence_by_id=evidence,
+        minimum_quality=0.55,
+    )
+    runtime = policy.decide_finding(
+        category="runtime_log_exposure",
+        requested_verdict="confirmed",
+        confidence=0.95,
+        proposed_ids=["log"],
+        evidence_by_id=evidence,
+        minimum_quality=0.55,
+    )
+    assert network.effective_verdict == "confirmed"
+    assert runtime.effective_verdict == "confirmed"
 
 
 def test_finding_without_relevant_evidence_remains_candidate():

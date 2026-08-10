@@ -4,6 +4,7 @@ import asyncio
 import base64
 import importlib
 import json
+import queue
 import threading
 import time
 from collections import deque
@@ -59,6 +60,7 @@ class _ActiveSession:
     frida_target: FridaTarget
     transcript_path: Path
     messages: deque[dict[str, Any]]
+    transcript_queue: queue.Queue[bytes]
     device: Any = None
     session: Any = None
     scripts: dict[str, Any] = field(default_factory=dict)
@@ -75,6 +77,11 @@ class _ActiveSession:
     stream_sampled_count: int = 0
     last_streamed_at: float = 0.0
     connected_device: dict[str, str | None] = field(default_factory=dict)
+    transcript_pending_bytes: int = 0
+    writer_stop: threading.Event = field(default_factory=threading.Event)
+    writer_task: asyncio.Task[None] | None = None
+    writer_error: str | None = None
+    device_manager: Any = None
 
 
 class FridaSessionManager:
@@ -142,11 +149,95 @@ class FridaSessionManager:
                 "stream_sampled_count": active.stream_sampled_count,
                 "transcript_path": str(active.transcript_path),
                 "transcript_bytes": active.transcript_bytes,
+                "transcript_pending_bytes": active.transcript_pending_bytes,
+                "transcript_queue_count": active.transcript_queue.qsize(),
+                "transcript_queue_capacity": self.settings.frida_transcript_queue_size,
                 "transcript_max_bytes": self.settings.frida_transcript_max_bytes,
                 "message_max_bytes": self.settings.frida_message_max_bytes,
                 "detached_reason": active.detached_reason,
+                "writer_error": active.writer_error,
                 "synthetic": active.synthetic,
             }
+
+    @staticmethod
+    def _transcript_writer(active: _ActiveSession) -> None:
+        try:
+            with active.transcript_path.open("ab") as stream:
+                while (
+                    not active.writer_stop.is_set()
+                    or not active.transcript_queue.empty()
+                ):
+                    try:
+                        line = active.transcript_queue.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                    try:
+                        stream.write(line)
+                        if active.transcript_queue.empty():
+                            stream.flush()
+                        with active.lock:
+                            active.transcript_bytes += len(line)
+                            active.transcript_pending_bytes = max(
+                                0, active.transcript_pending_bytes - len(line)
+                            )
+                    except Exception as exc:
+                        with active.lock:
+                            active.writer_error = f"{type(exc).__name__}: {exc}"
+                            active.dropped_count += 1
+                            active.transcript_pending_bytes = max(
+                                0, active.transcript_pending_bytes - len(line)
+                            )
+                    finally:
+                        active.transcript_queue.task_done()
+        except Exception as exc:
+            with active.lock:
+                active.writer_error = f"{type(exc).__name__}: {exc}"
+            while True:
+                try:
+                    line = active.transcript_queue.get_nowait()
+                except queue.Empty:
+                    break
+                with active.lock:
+                    active.dropped_count += 1
+                    active.transcript_pending_bytes = max(
+                        0, active.transcript_pending_bytes - len(line)
+                    )
+                active.transcript_queue.task_done()
+
+    async def flush_transcript(self, run_id: str) -> bool:
+        active = self._sessions.get(run_id)
+        if not active:
+            return False
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(active.transcript_queue.join),
+                timeout=self.settings.frida_transcript_flush_timeout_seconds,
+            )
+            return not bool(active.writer_error)
+        except asyncio.TimeoutError:
+            return False
+
+    async def _stop_writer(self, active: _ActiveSession) -> bool:
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(active.transcript_queue.join),
+                timeout=self.settings.frida_transcript_flush_timeout_seconds,
+            )
+            flushed = not bool(active.writer_error)
+        except asyncio.TimeoutError:
+            flushed = False
+        active.writer_stop.set()
+        if active.writer_task:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(active.writer_task),
+                    timeout=self.settings.frida_transcript_flush_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                with active.lock:
+                    active.writer_error = "transcript writer shutdown timeout"
+                return False
+        return flushed and not bool(active.writer_error)
 
     def _record(
         self,
@@ -180,15 +271,16 @@ class FridaSessionManager:
             if len(active.messages) == active.messages.maxlen:
                 active.buffer_overwrite_count += 1
             active.messages.append(item)
-            if (
-                active.transcript_bytes + len(line)
+            if active.writer_error:
+                active.dropped_count += 1
+            elif (
+                active.transcript_bytes + active.transcript_pending_bytes + len(line)
                 <= self.settings.frida_transcript_max_bytes
             ):
                 try:
-                    with active.transcript_path.open("ab") as stream:
-                        stream.write(line)
-                    active.transcript_bytes += len(line)
-                except OSError:
+                    active.transcript_queue.put_nowait(line)
+                    active.transcript_pending_bytes += len(line)
+                except queue.Full:
                     active.dropped_count += 1
             else:
                 active.dropped_count += 1
@@ -278,8 +370,15 @@ class FridaSessionManager:
                 transcript_path=transcript_path,
                 transcript_bytes=transcript_path.stat().st_size,
                 messages=deque(maxlen=self.settings.frida_message_buffer_size),
+                transcript_queue=queue.Queue(
+                    maxsize=self.settings.frida_transcript_queue_size
+                ),
                 synthetic=mock,
                 on_message=on_message,
+            )
+            active.writer_task = asyncio.create_task(
+                asyncio.to_thread(self._transcript_writer, active),
+                name=f"frida-transcript-{run_id}",
             )
             self._sessions[run_id] = active
 
@@ -334,7 +433,8 @@ class FridaSessionManager:
 
         def connect() -> None:
             if resolved_target.transport == "remote":
-                active.device = frida_module.get_device_manager().add_remote_device(
+                active.device_manager = frida_module.get_device_manager()
+                active.device = active.device_manager.add_remote_device(
                     str(resolved_target.endpoint)
                 )
             else:
@@ -467,9 +567,22 @@ class FridaSessionManager:
                     active.session.detach()
                 except Exception as exc:
                     failures["session"] = f"{type(exc).__name__}: {exc}"
+            if (
+                active.frida_target.transport == "remote"
+                and active.device_manager is not None
+            ):
+                try:
+                    active.device_manager.remove_remote_device(
+                        str(active.frida_target.endpoint)
+                    )
+                except Exception as exc:
+                    failures["remote_device"] = f"{type(exc).__name__}: {exc}"
             return failures
 
         failures = {} if active.synthetic else await asyncio.to_thread(detach)
+        writer_ok = await self._stop_writer(active)
+        if not writer_ok:
+            failures["transcript_writer"] = active.writer_error or "flush timeout"
         return self._result(
             active,
             CapabilityStatus.AVAILABLE if not failures else CapabilityStatus.FAILED,

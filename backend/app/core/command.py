@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -237,6 +238,111 @@ async def run_binary_command(
             await asyncio.gather(communicate, return_exceptions=True)
         result.finished_at = datetime.now(timezone.utc)
     return result, output
+
+
+async def run_streaming_command_to_file(
+    args: Sequence[str],
+    destination: Path,
+    *,
+    timeout: int = 30,
+    max_output_bytes: int,
+) -> CommandResult:
+    """Stream stdout to an atomic file without retaining the payload in RAM."""
+    command = [str(part) for part in args]
+    result = CommandResult(status=CapabilityStatus.FAILED, command=command)
+    process: asyncio.subprocess.Process | None = None
+    tasks: list[asyncio.Task[Any]] = []
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.partial")
+    total = 0
+    if not command or not command[0]:
+        result.status = CapabilityStatus.NOT_CONFIGURED
+        result.error = "실행 파일이 설정되지 않았습니다."
+        result.finished_at = datetime.now(timezone.utc)
+        return result
+    if max_output_bytes < 1:
+        raise ValueError("max_output_bytes must be positive")
+
+    async def stream_stdout(reader: asyncio.StreamReader | None) -> int:
+        if reader is None:
+            return 0
+        written = 0
+        with partial.open("wb") as stream:
+            while True:
+                chunk = await reader.read(1024 * 1024)
+                if not chunk:
+                    await asyncio.to_thread(stream.flush)
+                    return written
+                written += len(chunk)
+                if written > max_output_bytes:
+                    raise OverflowError(
+                        f"binary command output exceeded {max_output_bytes} bytes"
+                    )
+                await asyncio.to_thread(stream.write, chunk)
+
+    async def drain_stderr(reader: asyncio.StreamReader | None) -> bytes:
+        if reader is None:
+            return b""
+        retained = bytearray()
+        while True:
+            chunk = await reader.read(64 * 1024)
+            if not chunk:
+                return bytes(retained)
+            remaining = 1024 * 1024 - len(retained)
+            if remaining > 0:
+                retained.extend(chunk[:remaining])
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **subprocess_group_options(),
+        )
+        stdout_task = asyncio.create_task(stream_stdout(process.stdout))
+        stderr_task = asyncio.create_task(drain_stderr(process.stderr))
+        wait_task = asyncio.create_task(process.wait())
+        tasks = [stdout_task, stderr_task, wait_task]
+        total, stderr, return_code = await asyncio.wait_for(
+            asyncio.gather(stdout_task, stderr_task, wait_task), timeout=timeout
+        )
+        result.return_code = return_code
+        result.stdout = f"<streamed {total} bytes>"
+        result.stderr = stderr.decode("utf-8", errors="replace")
+        if return_code == 0:
+            partial.replace(destination)
+            result.status = CapabilityStatus.AVAILABLE
+        else:
+            result.error = result.stderr.strip() or f"command exited with {return_code}"
+    except FileNotFoundError:
+        result.status = CapabilityStatus.NOT_CONFIGURED
+        result.error = f"실행 파일을 찾을 수 없습니다: {command[0]}"
+    except OverflowError as exc:
+        result.error = str(exc)
+        if process is not None:
+            await terminate_process_tree(process)
+    except asyncio.TimeoutError:
+        result.error = f"{timeout}초 안에 명령이 끝나지 않아 중단했습니다."
+        if process is not None:
+            await terminate_process_tree(process)
+    except asyncio.CancelledError:
+        if process is not None:
+            await terminate_process_tree(process)
+        raise
+    except OSError as exc:
+        result.error = str(exc)
+        if process is not None:
+            await terminate_process_tree(process)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if result.status != CapabilityStatus.AVAILABLE:
+            partial.unlink(missing_ok=True)
+        result.finished_at = datetime.now(timezone.utc)
+    return result
 
 
 async def capture_command_for_duration(

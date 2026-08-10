@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.core.command import run_binary_command
+from backend.app.core.command import run_binary_command, run_streaming_command_to_file
 from backend.app.core.status import CapabilityStatus
 from backend.app.storage import (
     FileMetadata,
@@ -70,6 +70,18 @@ def test_sqlite_viewer_masks_sensitive_preview_by_default(tmp_path: Path):
     assert preview["theme"] == "dark"
 
 
+def test_sqlite_viewer_enforces_processing_deadline(tmp_path: Path):
+    database = tmp_path / "deadline.db"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE sample (id INTEGER)")
+    connection.commit()
+    connection.close()
+
+    artifact = inspect_sqlite_database(database, max_seconds=1e-12)
+    assert artifact.status == CapabilityStatus.FAILED.value
+    assert "시간 제한" in artifact.message
+
+
 @pytest.mark.asyncio
 async def test_mock_storage_snapshot_produces_masked_database_and_diff(tmp_path: Path):
     collector = MockAndroidStorageCollector("com.example.demo")
@@ -95,3 +107,28 @@ async def test_binary_command_output_limit_terminates_capture():
     assert result.status == CapabilityStatus.FAILED
     assert "exceeded 1024 bytes" in str(result.error)
     assert output == b""
+
+
+@pytest.mark.asyncio
+async def test_streaming_command_writes_atomically_without_returning_payload(tmp_path: Path):
+    destination = tmp_path / "capture.bin"
+    result = await run_streaming_command_to_file(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 4096)"],
+        destination,
+        timeout=5,
+        max_output_bytes=8192,
+    )
+    assert result.status == CapabilityStatus.AVAILABLE
+    assert destination.read_bytes() == b"x" * 4096
+    assert result.stdout == "<streamed 4096 bytes>"
+
+    rejected = tmp_path / "rejected.bin"
+    overflow = await run_streaming_command_to_file(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 4096)"],
+        rejected,
+        timeout=5,
+        max_output_bytes=1024,
+    )
+    assert overflow.status == CapabilityStatus.FAILED
+    assert not rejected.exists()
+    assert not list(tmp_path.glob("*.partial"))

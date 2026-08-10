@@ -33,17 +33,17 @@ class MockAndroidUIDriver(UIDriver):
             "home": (
                 ".MainActivity",
                 [
-                    self._node("계정", "account", 30, 180, 330, 250),
-                    self._node("설정", "settings", 30, 270, 330, 340),
-                    self._node("송금", "transfer", 30, 590, 330, 660),
+                    self._node("계정 상세", "account_details", 30, 180, 330, 250),
+                    self._node("도움말 목록", "help_list", 30, 270, 330, 340),
+                    self._node("송금", "transfer", 30, 590, 330, 660, "android.widget.Button"),
                 ],
             ),
             "account": (
                 ".AccountActivity",
                 [
-                    self._node("프로필 정보", "profile_details", 30, 180, 330, 250),
+                    self._node("프로필 상세", "profile_details", 30, 180, 330, 250),
                     self._node("보안 정보", "security", 30, 270, 330, 340),
-                    self._node("로그아웃", "logout", 30, 590, 330, 660),
+                    self._node("로그아웃", "logout", 30, 590, 330, 660, "android.widget.Button"),
                 ],
             ),
             "profile": (
@@ -56,7 +56,7 @@ class MockAndroidUIDriver(UIDriver):
             ),
             "settings": (
                 ".SettingsActivity",
-                [self._node("도움말", "help", 30, 180, 330, 250)],
+                [self._node("도움말 상세", "help", 30, 180, 330, 250)],
             ),
             "about": (".AboutActivity", []),
             "certificate": (".CertificateActivity", []),
@@ -64,12 +64,19 @@ class MockAndroidUIDriver(UIDriver):
         }
 
     def _node(
-        self, text: str, resource: str, left: int, top: int, right: int, bottom: int
+        self,
+        text: str,
+        resource: str,
+        left: int,
+        top: int,
+        right: int,
+        bottom: int,
+        class_name: str = "android.widget.TextView",
     ) -> dict[str, str]:
         return {
             "text": text,
             "resource-id": f"{self.package_name}:id/{resource}",
-            "class": "android.widget.Button",
+            "class": class_name,
             "package": self.package_name,
             "content-desc": "",
             "bounds": f"[{left},{top}][{right},{bottom}]",
@@ -130,8 +137,8 @@ class MockAndroidUIDriver(UIDriver):
             )
         resource = selected.resource_id.rsplit("/", 1)[-1]
         destination = {
-            "account": "account",
-            "settings": "settings",
+            "account_details": "account",
+            "help_list": "settings",
             "profile_details": "profile",
             "security": "security",
             "about": "about",

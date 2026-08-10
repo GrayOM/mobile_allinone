@@ -19,16 +19,21 @@ def _xml(nodes: list[str]) -> str:
     return '<?xml version="1.0"?><hierarchy>' + "".join(nodes) + "</hierarchy>"
 
 
-def _node(text: str, resource: str, bounds: str = "[0,0][100,100]") -> str:
+def _node(
+    text: str,
+    resource: str,
+    bounds: str = "[0,0][100,100]",
+    class_name: str = "android.widget.TextView",
+) -> str:
     return (
         f'<node text="{text}" content-desc="" resource-id="demo:id/{resource}" '
-        f'class="android.widget.Button" package="demo" bounds="{bounds}" '
+        f'class="{class_name}" package="demo" bounds="{bounds}" '
         'clickable="true" enabled="true" scrollable="false" password="false" '
         'selected="false" checked="false" />'
     )
 
 
-def test_navigation_state_fingerprint_is_normalized_and_content_sensitive():
+def test_navigation_state_uses_structure_for_visits_and_content_for_evidence():
     first = UIState.from_xml(
         _xml([_node("Account", "account"), _node("Help", "help", "[0,100][100,200]")]),
         package="demo",
@@ -45,7 +50,39 @@ def test_navigation_state_fingerprint_is_normalized_and_content_sensitive():
         activity=".Main",
     )
     assert first.fingerprint == reordered.fingerprint
-    assert first.fingerprint != changed.fingerprint
+    assert first.fingerprint == changed.fingerprint
+    assert first.structural_fingerprint == changed.structural_fingerprint
+    assert first.content_fingerprint != changed.content_fingerprint
+    assert first.text_hash != changed.text_hash
+
+
+def test_navigation_policy_is_default_deny_for_controls_and_external_intents():
+    from backend.app.navigation import NavigationRiskPolicy
+
+    state = UIState.from_xml(
+        _xml(
+            [
+                _node("프로필 상세", "profile_details"),
+                _node("저장", "save", "[0,100][100,200]", "android.widget.Button"),
+                _node("알림", "notifications", "[0,200][100,300]", "android.widget.Switch"),
+                _node("브라우저로 보기", "open_browser", "[0,300][100,400]"),
+                _node("", "", "[0,400][100,500]", "android.widget.ImageButton"),
+                _node("알 수 없는 이동", "unknown", "[0,500][100,600]"),
+            ]
+        ),
+        package="demo",
+        activity=".Main",
+    )
+    candidates = {
+        item.label: item for item in NavigationRiskPolicy().candidates(state, "demo")
+    }
+    assert candidates["프로필 상세"].risk == "low"
+    assert candidates["프로필 상세"].requires_approval is False
+    for label in ("저장", "알림", "unlabelled control", "알 수 없는 이동"):
+        assert candidates[label].risk == "medium"
+        assert candidates[label].requires_approval is True
+    assert candidates["브라우저로 보기"].risk == "high"
+    assert candidates["브라우저로 보기"].requires_approval is True
 
 
 @pytest.mark.asyncio

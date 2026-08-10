@@ -93,10 +93,12 @@ an SSH process probe as a usable transport.
 Android automatic navigation uses only ADB, UIAutomator XML and the fixed
 `UIDriver` operation set. The local planner ranks clickable elements that exist
 in the current tree; the executor rejects stale element IDs and never accepts AI
-coordinates or shell commands. State fingerprints, depth/action/time limits and
-repeat counters bound traversal. Payment, transfer, purchase, deletion,
-communication, account/credential and system-setting labels are retained in an
-approval queue and are not clicked automatically. Mock Android exposes the same
+coordinates or shell commands. The policy is default-deny: only labelled
+TextView/ViewGroup/tab containers with explicit list, detail or information
+semantics are eligible for automatic taps. Buttons, toggles, confirmation/save,
+unknown or unlabelled controls and browser/phone/map/system intent hints remain
+in the approval queue. Structural fingerprints bound visits while content hashes
+record dynamic text and state changes separately. Mock Android exposes the same
 graph and policy path with a deterministic synthetic UI.
 
 Every executed transition records Before screenshot/tree, the fixed action, and
@@ -105,10 +107,12 @@ IDs. Password fields are masked in normalized state; raw local trees remain
 authenticated evidence rather than default UI content.
 
 Optional Android storage capture is root-only and strictly scoped to
-`/data/data/<validated-package>`. A bounded tar stream is rejected on byte,
-entry, path or link violations. Before/After metadata identifies created,
-modified and deleted files. SQLite files below the configured limit are opened
-read-only and show table/column/count data with masked previews. ADB Clipboard
+`/data/data/<validated-package>`. ADB stdout streams directly to a bounded
+temporary file and is atomically promoted only after success. Entry, path and
+link violations are rejected. Archive hashing and SQLite inspection run outside
+the event loop, and SQLite queries have a progress-handler deadline. Before/After
+metadata identifies created, modified and deleted files. SQLite files below the
+configured limit are opened read-only and show table/column/count data with masked previews. ADB Clipboard
 collection is explicitly `unsupported` because it cannot reliably attribute a
 global clipboard value to the target app; Mock provides only a synthetic,
 masked change signal.
@@ -128,6 +132,11 @@ responses instead of treating HTTP status as the only signal.
 Default flow and Frida stream views are structurally masked. Full proxy and
 Frida transcripts remain authenticated raw evidence; the explicit raw-flow API
 uses `Cache-Control: no-store`.
+
+Frida callbacks enqueue serialized messages into a bounded queue. One writer
+opens the JSONL transcript once and drains it without blocking the callback;
+queue saturation increments the drop counter. Remote devices registered through
+Frida's device manager are explicitly removed during session teardown.
 
 Every runtime command is bound to the selected device. pymobiledevice3 receives
 the selected UDID, iOS Frida uses `-D <device-id>`, and drozer gets a per-run ADB

@@ -6,7 +6,7 @@ from .models import NavigationCandidate, UIElement, UIState
 
 
 class NavigationRiskPolicy:
-    """Local allowlist-first policy for deterministic UI exploration."""
+    """Default-deny policy for deterministic, in-app UI exploration."""
 
     BLOCKED_TERMS = (
         "결제",
@@ -56,25 +56,117 @@ class NavigationRiskPolicy:
         "log out",
         "otp",
     )
+    EXTERNAL_INTENT_TERMS = (
+        "고객센터",
+        "문의하기",
+        "전화 걸기",
+        "전화하기",
+        "지도",
+        "길찾기",
+        "위치 보기",
+        "브라우저",
+        "웹사이트",
+        "웹으로 보기",
+        "외부 링크",
+        "링크 열기",
+        "설정 열기",
+        "설정으로 이동",
+        "앱 설정",
+        "권한 설정",
+        "support center",
+        "contact support",
+        "website",
+        "open external",
+        "open browser",
+        "open in browser",
+        "open map",
+        "directions",
+        "external link",
+        "open settings",
+        "app settings",
+        "permission settings",
+    )
+    CONFIRMATION_TERMS = (
+        "확인",
+        "저장",
+        "등록",
+        "신청",
+        "예약",
+        "완료",
+        "동의",
+        "허용",
+        "제출",
+        "적용",
+        "구독",
+        "confirm",
+        "save",
+        "register",
+        "apply",
+        "reserve",
+        "book",
+        "complete",
+        "agree",
+        "allow",
+        "submit",
+        "subscribe",
+    )
     SAFE_HINTS = (
         "정보",
         "소개",
         "도움말",
         "공지",
-        "설정",
         "보안",
         "프로필",
-        "계정",
         "상세",
         "목록",
+        "약관",
+        "정책",
+        "faq",
         "about",
         "help",
-        "settings",
         "security",
         "profile",
-        "account",
         "details",
         "list",
+        "terms",
+        "policy",
+    )
+    SAFE_NAVIGATION_CLASSES = {
+        "textview",
+        "viewgroup",
+        "linearlayout",
+        "relativelayout",
+        "framelayout",
+        "constraintlayout",
+        "tabview",
+        "tab",
+        "bottomnavigationitemview",
+        "navigationmenuitemview",
+    }
+    APPROVAL_CONTROL_CLASSES = {
+        "button",
+        "imagebutton",
+        "switch",
+        "switchcompat",
+        "checkbox",
+        "radiobutton",
+        "togglebutton",
+        "seekbar",
+        "spinner",
+    }
+    SAFE_RESOURCE_TERMS = (
+        "detail",
+        "details",
+        "list",
+        "item",
+        "tab",
+        "menu",
+        "about",
+        "help",
+        "notice",
+        "profile",
+        "security_info",
+        "certificate_info",
     )
 
     @staticmethod
@@ -85,6 +177,8 @@ class NavigationRiskPolicy:
 
     def classify(self, element: UIElement, target_package: str) -> NavigationCandidate:
         material = self._material(element)
+        label = element.label.strip()
+        class_name = element.class_name.rsplit(".", 1)[-1].casefold()
         if element.package and target_package and element.package != target_package:
             return NavigationCandidate(
                 "tap",
@@ -121,13 +215,58 @@ class NavigationRiskPolicy:
                 "로그인·가입·인증 동작은 사용자 확인이 필요합니다.",
                 True,
             )
+        if any(term in material for term in self.EXTERNAL_INTENT_TERMS):
+            return NavigationCandidate(
+                "tap",
+                element.element_id,
+                label,
+                "high",
+                "외부 앱·브라우저·전화·지도·시스템 화면을 열 가능성이 있어 승인이 필요합니다.",
+                True,
+            )
+        if not label:
+            return NavigationCandidate(
+                "tap",
+                element.element_id,
+                "unlabelled control",
+                "medium",
+                "의도와 외부 Intent 여부를 확인할 수 없는 무라벨 요소는 자동 실행하지 않습니다.",
+                True,
+            )
+        if (
+            class_name in self.APPROVAL_CONTROL_CLASSES
+            or any(term in material for term in self.CONFIRMATION_TERMS)
+        ):
+            return NavigationCandidate(
+                "tap",
+                element.element_id,
+                label,
+                "medium",
+                "Button·토글 또는 확인/저장 계열 제어는 상태 변경 가능성이 있어 승인이 필요합니다.",
+                True,
+            )
+        has_navigation_semantics = any(
+            term in material for term in self.SAFE_HINTS
+        ) or any(
+            term in element.resource_id.casefold()
+            for term in self.SAFE_RESOURCE_TERMS
+        )
+        if class_name in self.SAFE_NAVIGATION_CLASSES and has_navigation_semantics:
+            return NavigationCandidate(
+                "tap",
+                element.element_id,
+                label,
+                "low",
+                "검증된 탐색 클래스와 명확한 목록·탭·상세 이동 의미를 모두 만족합니다.",
+                False,
+            )
         return NavigationCandidate(
             "tap",
             element.element_id,
-            element.label or "unlabelled control",
-            "low",
-            "현재 UI Tree에 존재하는 읽기·화면 이동 후보입니다.",
-            False,
+            label,
+            "medium",
+            "자동 탐색 allowlist에 없는 clickable 요소이므로 기본 거부했습니다.",
+            True,
         )
 
     def candidates(self, state: UIState, target_package: str) -> list[NavigationCandidate]:

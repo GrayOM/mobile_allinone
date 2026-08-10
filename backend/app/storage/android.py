@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import shlex
 import tarfile
 from pathlib import Path, PurePosixPath
 
-from backend.app.core.command import run_binary_command
+from backend.app.core.command import run_streaming_command_to_file
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus
 from backend.app.core.targets import is_valid_app_identifier
@@ -71,8 +72,9 @@ class AndroidStorageCollector:
         root = f"/data/data/{self.package_name}"
         # package_name is strictly validated above; every other shell token is fixed.
         remote_command = f"tar -C {shlex.quote(root)} -cf - ."
-        result, archive = await run_binary_command(
+        result = await run_streaming_command_to_file(
             [self.adb, "-s", self.device_id, "exec-out", "su", "-c", remote_command],
+            destination,
             timeout=max(60, self.settings.command_timeout_seconds),
             max_output_bytes=self.settings.storage_archive_max_bytes,
         )
@@ -82,10 +84,10 @@ class AndroidStorageCollector:
                 result.error or result.stderr.strip() or "Root package archive collection failed",
                 command=result.display_command,
             )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(archive)
         try:
-            snapshot = self._inspect_archive(phase, destination, root)
+            snapshot = await asyncio.to_thread(
+                self._inspect_archive, phase, destination, root
+            )
         except (OSError, tarfile.TarError, ValueError) as exc:
             destination.unlink(missing_ok=True)
             return StorageCapture(
@@ -168,6 +170,7 @@ class AndroidStorageCollector:
                                 extracted,
                                 logical_path=normalized,
                                 max_bytes=self.settings.storage_database_max_bytes,
+                                max_seconds=self.settings.storage_sqlite_timeout_seconds,
                             )
                         )
                     finally:
