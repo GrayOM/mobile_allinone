@@ -24,16 +24,20 @@ def _node(
     resource: str,
     bounds: str = "[0,0][100,100]",
     class_name: str = "android.widget.TextView",
+    *,
+    clickable: bool = True,
+    scrollable: bool = False,
 ) -> str:
     return (
         f'<node text="{text}" content-desc="" resource-id="demo:id/{resource}" '
         f'class="{class_name}" package="demo" bounds="{bounds}" '
-        'clickable="true" enabled="true" scrollable="false" password="false" '
+        f'clickable="{str(clickable).lower()}" enabled="true" '
+        f'scrollable="{str(scrollable).lower()}" password="false" '
         'selected="false" checked="false" />'
     )
 
 
-def test_navigation_state_uses_structure_for_visits_and_content_for_evidence():
+def test_navigation_state_bounds_dynamic_content_with_interaction_variants():
     first = UIState.from_xml(
         _xml([_node("Account", "account"), _node("Help", "help", "[0,100][100,200]")]),
         package="demo",
@@ -44,16 +48,40 @@ def test_navigation_state_uses_structure_for_visits_and_content_for_evidence():
         package="demo",
         activity=".Main",
     )
-    changed = UIState.from_xml(
-        _xml([_node("Account changed", "account"), _node("Help", "help", "[0,100][100,200]")]),
+    dynamic = UIState.from_xml(
+        _xml([_node("Account 1200", "account"), _node("Help", "help", "[0,100][100,200]")]),
+        package="demo",
+        activity=".Main",
+    )
+    same_dynamic_shape = UIState.from_xml(
+        _xml([_node("Account 9876", "account"), _node("Help", "help", "[0,100][100,200]")]),
+        package="demo",
+        activity=".Main",
+    )
+    different_semantics = UIState.from_xml(
+        _xml([_node("Remove profile", "account"), _node("Help", "help", "[0,100][100,200]")]),
         package="demo",
         activity=".Main",
     )
     assert first.fingerprint == reordered.fingerprint
-    assert first.fingerprint == changed.fingerprint
-    assert first.structural_fingerprint == changed.structural_fingerprint
-    assert first.content_fingerprint != changed.content_fingerprint
-    assert first.text_hash != changed.text_hash
+    assert dynamic.structural_fingerprint == same_dynamic_shape.structural_fingerprint
+    assert dynamic.interaction_fingerprint == same_dynamic_shape.interaction_fingerprint
+    assert dynamic.content_fingerprint != same_dynamic_shape.content_fingerprint
+    assert dynamic.interaction_fingerprint != different_semantics.interaction_fingerprint
+
+
+def test_element_identity_is_stable_across_bounds_and_description_changes():
+    first = UIState.from_xml(
+        _xml([_node("Help", "help", "[0,0][100,100]")]),
+        package="demo",
+        activity=".Main",
+    )
+    moved = UIState.from_xml(
+        _xml([_node("Help", "help", "[20,40][220,160]")]),
+        package="demo",
+        activity=".Main",
+    )
+    assert first.elements[0].element_id == moved.elements[0].element_id
 
 
 def test_navigation_policy_is_default_deny_for_controls_and_external_intents():
@@ -83,6 +111,34 @@ def test_navigation_policy_is_default_deny_for_controls_and_external_intents():
         assert candidates[label].requires_approval is True
     assert candidates["브라우저로 보기"].risk == "high"
     assert candidates["브라우저로 보기"].requires_approval is True
+
+
+def test_navigation_policy_blocks_destructive_semantics_before_safe_hints():
+    from backend.app.navigation import NavigationRiskPolicy
+
+    state = UIState.from_xml(
+        _xml(
+            [
+                _node("프로필 삭제", "profile_item"),
+                _node("보안 해제", "security_menu", "[0,100][100,200]"),
+                _node("Remove profile", "profile_item", "[0,200][100,300]"),
+                _node("Reset settings", "settings_item", "[0,300][100,400]"),
+                _node("Details", "delete_item", "[0,400][100,500]"),
+                _node("Opaque", "profiled", "[0,500][100,600]"),
+                _node("Details", "resetSettingsItem", "[0,600][100,700]"),
+            ]
+        ),
+        package="demo",
+        activity=".Main",
+    )
+    candidates = NavigationRiskPolicy().candidates(state, "demo")
+    assert len(candidates) == 7
+    destructive = [item for item in candidates if item.label != "Opaque"]
+    assert all(item.risk == "high" for item in destructive)
+    assert all(item.requires_approval for item in destructive)
+    opaque = next(item for item in candidates if item.label == "Opaque")
+    assert opaque.risk == "medium"
+    assert opaque.requires_approval is True
 
 
 @pytest.mark.asyncio
@@ -154,6 +210,114 @@ async def test_navigation_total_timeout_stops_before_unbounded_actions():
     assert result.status == CapabilityStatus.AVAILABLE.value
     assert result.termination_reason == "timeout"
     assert not result.actions
+
+
+class BoundedScrollDriver(MockAndroidUIDriver):
+    def __init__(self):
+        super().__init__(package_name="demo")
+        self.page = 0
+        self.swipe_count = 0
+        self.tap_count = 0
+
+    def _scroll_xml(self) -> str:
+        child = (
+            _node("Help details", "row", "[0,450][300,520]")
+            if self.page
+            else _node("Row 1", "row", "[0,20][300,80]")
+        )
+        return (
+            '<?xml version="1.0"?><hierarchy>'
+            '<node text="" content-desc="" resource-id="demo:id/list" '
+            'class="android.widget.ScrollView" package="demo" bounds="[0,0][300,600]" '
+            'clickable="false" enabled="true" scrollable="true" password="false" '
+            f'selected="false" checked="false">{child}</node></hierarchy>'
+        )
+
+    async def dump_ui(self) -> UIState:
+        return UIState.from_xml(
+            self._scroll_xml(), package="demo", activity=".Main"
+        )
+
+    async def wait_for_idle(self, timeout_seconds: float = 5.0) -> UIState:
+        return await self.dump_ui()
+
+    async def swipe(
+        self, start_x: int, start_y: int, end_x: int, end_y: int, duration_ms: int = 400
+    ) -> DeviceOperation:
+        self.swipe_count += 1
+        self.page = 1
+        return DeviceOperation(CapabilityStatus.AVAILABLE, "scrolled", synthetic=True)
+
+    async def tap(self, x: int, y: int) -> DeviceOperation:
+        self.tap_count += 1
+        return DeviceOperation(CapabilityStatus.FAILED, "test stop", synthetic=True)
+
+
+@pytest.mark.asyncio
+async def test_scroll_is_container_scoped_and_stops_on_repeated_content():
+    driver = BoundedScrollDriver()
+    result = await NavigationEngine(
+        driver,
+        target_package="demo",
+        limits=NavigationLimits(
+            max_states=10,
+            max_depth=2,
+            max_actions=10,
+            max_scrolls_per_state=3,
+            max_interaction_variants_per_structure=3,
+        ),
+        synthetic=True,
+    ).run()
+    assert driver.swipe_count == 2
+    assert driver.tap_count == 1
+    assert [item.action_type for item in result.actions].count("swipe") == 2
+    assert len({item.structural_fingerprint for item in result.states}) == 1
+    assert len(result.states) == 2
+
+
+class VariantScrollDriver(BoundedScrollDriver):
+    LABELS = ("Row", "Alpha details", "Beta details", "Gamma details")
+
+    def _scroll_xml(self) -> str:
+        child = _node(
+            self.LABELS[min(self.page, len(self.LABELS) - 1)],
+            "row",
+            "[0,450][300,520]",
+        )
+        return (
+            '<?xml version="1.0"?><hierarchy>'
+            '<node text="" content-desc="" resource-id="demo:id/list" '
+            'class="android.widget.ScrollView" package="demo" bounds="[0,0][300,600]" '
+            'clickable="false" enabled="true" scrollable="true" password="false" '
+            f'selected="false" checked="false">{child}</node></hierarchy>'
+        )
+
+    async def swipe(
+        self, start_x: int, start_y: int, end_x: int, end_y: int, duration_ms: int = 400
+    ) -> DeviceOperation:
+        self.swipe_count += 1
+        self.page += 1
+        return DeviceOperation(CapabilityStatus.AVAILABLE, "scrolled", synthetic=True)
+
+
+@pytest.mark.asyncio
+async def test_interaction_variants_per_structure_are_hard_capped():
+    driver = VariantScrollDriver()
+    result = await NavigationEngine(
+        driver,
+        target_package="demo",
+        limits=NavigationLimits(
+            max_states=10,
+            max_depth=2,
+            max_actions=20,
+            max_scrolls_per_state=5,
+            max_interaction_variants_per_structure=2,
+        ),
+        synthetic=True,
+    ).run()
+    assert len(result.states) == 2
+    assert driver.swipe_count == 2
+    assert result.termination_reason == "max_interaction_variants_per_structure"
 
 
 def _wait_for_terminal(client, run_id: str) -> dict:

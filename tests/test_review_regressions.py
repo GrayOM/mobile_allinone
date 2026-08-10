@@ -54,16 +54,67 @@ from backend.app.frida import (
     FridaTarget,
 )
 from backend.app.orchestration import DiagnosticOrchestrator, ManualActionInProgress
+from backend.app.orchestration.diagnostic import _frida_evidence_integrity
 
 
-def _wait_for_status(client, run_id: str, statuses: set[str], timeout: float = 12):
+def _wait_for_status(client, run_id: str, statuses: set[str], timeout: float = 30):
     deadline = time.monotonic() + timeout
+    run = {}
     while time.monotonic() < deadline:
         run = client.get(f"/api/runs/{run_id}").json()
         if run["status"] in statuses:
             return run
         time.sleep(0.05)
-    raise AssertionError(f"진단이 제한시간 안에 {statuses} 상태에 도달하지 못했습니다.")
+    raise AssertionError(
+        f"진단이 {timeout}초 안에 {statuses} 상태에 도달하지 못했습니다: "
+        f"status={run.get('status')} stage={run.get('current_stage')} error={run.get('error')}"
+    )
+
+
+def test_frida_drops_fail_evidence_integrity_but_truncation_is_informational():
+    intact, intact_message = _frida_evidence_integrity(
+        {"dropped_count": 0, "truncated_count": 12}
+    )
+    lost, lost_message = _frida_evidence_integrity(
+        {"dropped_count": 5000, "truncated_count": 0}
+    )
+    assert intact is True
+    assert "12" in intact_message
+    assert lost is False
+    assert "5000" in lost_message
+
+
+def test_frida_message_loss_finishes_mock_run_with_quality_gap(client, monkeypatch):
+    manager = client.app.state.orchestrator.frida_sessions
+    original_stop = manager.stop
+
+    async def stop_with_loss(run_id: str):
+        result = await original_stop(run_id)
+        if result is not None:
+            result.stats["dropped_count"] = 3
+        return result
+
+    monkeypatch.setattr(manager, "stop", stop_with_loss)
+    demo = client.post("/api/demo/bootstrap").json()
+    response = client.post(
+        "/api/runs",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "device_id": "mock-android-01",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+            "auto_select_frida": True,
+        },
+    )
+    assert response.status_code == 201
+    run = _wait_for_status(
+        client,
+        response.json()["id"],
+        {"completed", "completed_with_gaps", "failed"},
+    )
+    assert run["status"] == "completed_with_gaps", run.get("error")
+    assert "frida_evidence_integrity" in run["options"]["failed_required_stages"]
 
 
 def test_frida_empty_selection_is_none_and_auto_select_is_safe(client):

@@ -10,6 +10,9 @@ from xml.etree import ElementTree
 
 
 BOUNDS_PATTERN = re.compile(r"^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$")
+SEMANTIC_NUMBER_PATTERN = re.compile(
+    r"(?:\b\d{1,2}:\d{2}(?::\d{2})?\b|\b\d+(?:[.,]\d+)*\b)"
+)
 
 
 def _bool(value: str | None) -> bool:
@@ -18,6 +21,13 @@ def _bool(value: str | None) -> bool:
 
 def _clean(value: str | None, *, limit: int = 512) -> str:
     return " ".join((value or "").split())[:limit]
+
+
+def _stable_semantic_label(value: str) -> str:
+    """Keep action meaning while collapsing frequently changing numeric content."""
+
+    normalized = SEMANTIC_NUMBER_PATTERN.sub("<number>", _clean(value).casefold())
+    return normalized[:160]
 
 
 @dataclass(slots=True, frozen=True)
@@ -79,8 +89,6 @@ class UIElement:
             [
                 _clean(attributes.get("resource-id")),
                 _clean(attributes.get("class")),
-                _clean(attributes.get("content-desc")),
-                str(bounds.to_list()),
                 tree_path,
             ]
         )
@@ -125,42 +133,51 @@ class UIState:
     )
     fingerprint: str = ""
     structural_fingerprint: str = ""
+    interaction_fingerprint: str = ""
     content_fingerprint: str = ""
     text_hash: str = ""
 
     def __post_init__(self) -> None:
         text_material = "\x1f".join(
-            item.text or item.content_desc for item in self.elements if item.text or item.content_desc
+            item.text or item.content_desc
+            for item in self.elements
+            if item.text or item.content_desc
         )
         self.text_hash = hashlib.sha256(text_material.encode("utf-8")).hexdigest()
         structural = {
             "package": self.package,
             "activity": self.activity,
             "elements": sorted(
-                [{
-                    "tree_path": item.tree_path,
-                    "resource_id": item.resource_id,
-                    "class": item.class_name,
-                    "clickable": item.clickable,
-                    "scrollable": item.scrollable,
-                    "password": item.password,
-                } for item in self.elements],
+                [
+                    {
+                        "tree_path": item.tree_path,
+                        "resource_id": item.resource_id,
+                        "class": item.class_name,
+                        "clickable": item.clickable,
+                        "scrollable": item.scrollable,
+                        "password": item.password,
+                    }
+                    for item in self.elements
+                ],
                 key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False),
             ),
         }
         content = {
             "structure": structural,
             "elements": sorted(
-                [{
-                    "tree_path": item.tree_path,
-                    "resource_id": item.resource_id,
-                    "text": item.text,
-                    "content_desc": item.content_desc,
-                    "bounds": item.bounds.to_list(),
-                    "enabled": item.enabled,
-                    "selected": item.selected,
-                    "checked": item.checked,
-                } for item in self.elements],
+                [
+                    {
+                        "tree_path": item.tree_path,
+                        "resource_id": item.resource_id,
+                        "text": item.text,
+                        "content_desc": item.content_desc,
+                        "bounds": item.bounds.to_list(),
+                        "enabled": item.enabled,
+                        "selected": item.selected,
+                        "checked": item.checked,
+                    }
+                    for item in self.elements
+                ],
                 key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False),
             ),
         }
@@ -171,9 +188,34 @@ class UIState:
             content, sort_keys=True, separators=(",", ":"), ensure_ascii=False
         ).encode("utf-8")
         self.structural_fingerprint = hashlib.sha256(structural_encoded).hexdigest()
+        interaction = {
+            "structure": self.structural_fingerprint,
+            "actions": sorted(
+                [
+                    {
+                        "tree_path": item.tree_path,
+                        "resource_id": item.resource_id,
+                        "class": item.class_name,
+                        "semantic_label": _stable_semantic_label(
+                            item.text or item.content_desc or item.label
+                        ),
+                    }
+                    for item in self.elements
+                    if item.clickable and item.enabled
+                ],
+                key=lambda item: json.dumps(
+                    item, sort_keys=True, ensure_ascii=False
+                ),
+            ),
+        }
+        interaction_encoded = json.dumps(
+            interaction, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        self.interaction_fingerprint = hashlib.sha256(interaction_encoded).hexdigest()
         self.content_fingerprint = hashlib.sha256(content_encoded).hexdigest()
-        # Compatibility alias: traversal uses the stable structural identity.
-        self.fingerprint = self.structural_fingerprint
+        # Compatibility alias: graph traversal uses the bounded interaction
+        # identity, while callers can still inspect structure and content.
+        self.fingerprint = self.interaction_fingerprint
 
     @classmethod
     def from_xml(
@@ -196,6 +238,7 @@ class UIState:
         elements: list[UIElement] = []
 
         def walk(parent: ElementTree.Element, parent_path: str) -> None:
+            sibling_occurrences: dict[str, int] = {}
             for node in parent:
                 if node.tag != "node":
                     walk(node, parent_path)
@@ -204,7 +247,9 @@ class UIState:
                 resource = _clean(attributes.get("resource-id"))
                 class_name = _clean(attributes.get("class"))
                 segment = resource or class_name or "node"
-                tree_path = f"{parent_path}/{segment}"[:2048]
+                occurrence = sibling_occurrences.get(segment, 0)
+                sibling_occurrences[segment] = occurrence + 1
+                tree_path = f"{parent_path}/{segment}[{occurrence}]"[:2048]
                 elements.append(
                     UIElement.from_attributes(attributes, len(elements), tree_path)
                 )
@@ -239,6 +284,7 @@ class UIState:
         data: dict[str, Any] = {
             "fingerprint": self.fingerprint,
             "structural_fingerprint": self.structural_fingerprint,
+            "interaction_fingerprint": self.interaction_fingerprint,
             "content_fingerprint": self.content_fingerprint,
             "package": self.package,
             "activity": self.activity,
@@ -294,6 +340,8 @@ class NavigationLimits:
     per_screen_action_limit: int = 5
     action_timeout: float = 10.0
     repeated_state_limit: int = 2
+    max_interaction_variants_per_structure: int = 3
+    max_scrolls_per_state: int = 2
     total_navigation_minutes: float = 2.0
 
     @classmethod
@@ -321,6 +369,10 @@ class NavigationLimits:
             per_screen_action_limit=integer("per_screen_action_limit", 5, 1, 20),
             action_timeout=number("action_timeout", 10.0, 1.0, 30.0),
             repeated_state_limit=integer("repeated_state_limit", 2, 1, 10),
+            max_interaction_variants_per_structure=integer(
+                "max_interaction_variants_per_structure", 3, 1, 10
+            ),
+            max_scrolls_per_state=integer("max_scrolls_per_state", 2, 0, 5),
             total_navigation_minutes=number(
                 "total_navigation_minutes", 2.0, 0.1, 30.0
             ),

@@ -10,6 +10,7 @@ permissions:
 jobs:
   backend:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,7 +22,7 @@ jobs:
       - name: Compile backend
         run: python -m compileall -q backend
       - name: Run Mock and unit tests
-        run: python -m pytest -q
+        run: python -m pytest -q --durations=20
 
   frontend:
     runs-on: windows-latest

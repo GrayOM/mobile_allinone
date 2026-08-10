@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
@@ -59,6 +59,9 @@ class NavigationEngine:
         self._pending: dict[tuple[str, str], dict[str, object]] = {}
         self._visits: Counter[str] = Counter()
         self._attempted: set[tuple[str, str]] = set()
+        self._interaction_variants: dict[str, set[str]] = defaultdict(set)
+        self._scroll_counts: Counter[str] = Counter()
+        self._seen_scroll_views: set[tuple[str, str]] = set()
         self._deadline = 0.0
         self._termination_reason = "exhausted"
 
@@ -91,9 +94,18 @@ class NavigationEngine:
         self._visits[state.fingerprint] += 1
         if state.fingerprint in self._states:
             return True
+        variants = self._interaction_variants[state.structural_fingerprint]
+        if (
+            state.interaction_fingerprint not in variants
+            and len(variants)
+            >= self.limits.max_interaction_variants_per_structure
+        ):
+            self._termination_reason = "max_interaction_variants_per_structure"
+            return False
         if len(self._states) >= self.limits.max_states:
             self._termination_reason = "max_states"
             return False
+        variants.add(state.interaction_fingerprint)
         self._states[state.fingerprint] = state
         return True
 
@@ -248,6 +260,108 @@ class NavigationEngine:
         await self._update("action", action=action.to_dict())
         return after_state
 
+    async def _execute_scroll(
+        self, state: UIState, container_id: str
+    ) -> tuple[NavigationAction, UIState | None]:
+        candidate = NavigationCandidate(
+            action_type="swipe",
+            element_id=container_id,
+            label="스크롤 가능한 영역",
+            risk="low",
+            rationale="대상 앱의 scrollable container 내부에서만 제한적으로 위로 스와이프합니다.",
+        )
+        sequence = len(self._actions) + 1
+        before_evidence: list[str] = []
+        if self.hooks.before_action:
+            before_evidence = await self.hooks.before_action(sequence, state, candidate)
+        operation: DeviceOperation
+        after_state: UIState | None = None
+        try:
+            live_state = await asyncio.wait_for(
+                self.driver.dump_ui(), timeout=self.limits.action_timeout
+            )
+            container = live_state.element(container_id)
+            if live_state.fingerprint != state.fingerprint or not container:
+                operation = DeviceOperation(
+                    CapabilityStatus.FAILED,
+                    "실행 직전 UI Tree가 변경되어 stale scroll을 차단했습니다.",
+                    synthetic=self.synthetic,
+                )
+            elif (
+                not container.scrollable
+                or not container.enabled
+                or container.bounds.area <= 0
+                or (
+                    container.package
+                    and self.target_package
+                    and container.package != self.target_package
+                )
+            ):
+                operation = DeviceOperation(
+                    CapabilityStatus.MANUAL_REQUIRED,
+                    "검증된 대상 앱 scrollable container가 아니어서 스와이프를 차단했습니다.",
+                    synthetic=self.synthetic,
+                )
+            else:
+                bounds = container.bounds
+                x = (bounds.left + bounds.right) // 2
+                start_y = bounds.top + int((bounds.bottom - bounds.top) * 0.8)
+                end_y = bounds.top + int((bounds.bottom - bounds.top) * 0.25)
+                operation = await asyncio.wait_for(
+                    self.driver.swipe(x, start_y, x, end_y),
+                    timeout=self.limits.action_timeout,
+                )
+                if operation.status == CapabilityStatus.AVAILABLE:
+                    after_state = await asyncio.wait_for(
+                        self.driver.wait_for_idle(self.limits.action_timeout),
+                        timeout=self.limits.action_timeout + 0.5,
+                    )
+        except asyncio.TimeoutError:
+            operation = DeviceOperation(
+                CapabilityStatus.FAILED,
+                "UI scroll timeout을 초과했습니다.",
+                synthetic=self.synthetic,
+            )
+        evidence_ids = list(before_evidence)
+        if self.hooks.after_action:
+            evidence_ids.extend(
+                await self.hooks.after_action(
+                    sequence,
+                    state,
+                    candidate,
+                    operation,
+                    after_state,
+                    list(before_evidence),
+                )
+            )
+        action = NavigationAction(
+            sequence=sequence,
+            action_type="swipe",
+            element_id=container_id,
+            label=candidate.label,
+            risk="low",
+            source_state=state.fingerprint,
+            destination_state=after_state.fingerprint if after_state else None,
+            result=operation.status.value,
+            message=operation.message,
+            timestamp=self._now(),
+            evidence_ids=list(dict.fromkeys(evidence_ids)),
+            command=operation.command,
+            synthetic=bool(operation.synthetic or self.synthetic),
+        )
+        self._actions.append(action)
+        await self._update("action", action=action.to_dict())
+        return action, after_state
+
+    @staticmethod
+    def _scroll_container(state: UIState):
+        candidates = [
+            item
+            for item in state.elements
+            if item.scrollable and item.enabled and item.bounds.area > 0
+        ]
+        return max(candidates, key=lambda item: item.bounds.area, default=None)
+
     async def _explore(self, state: UIState, depth: int) -> UIState:
         # Preserve the observed destination even when the action that reached it
         # consumes the final action/time budget.
@@ -266,7 +380,7 @@ class NavigationEngine:
             if item.risk == "low" and not item.requires_approval
         ][: self.limits.per_screen_action_limit]
         if depth >= self.limits.max_depth:
-            return state
+            safe = []
 
         current = state
         for candidate in safe:
@@ -303,6 +417,33 @@ class NavigationEngine:
             if current.fingerprint != state.fingerprint:
                 self._termination_reason = "back_navigation_mismatch"
                 break
+        if (
+            current.fingerprint == state.fingerprint
+            and not self._limit_reached()
+            and self.limits.max_scrolls_per_state > 0
+        ):
+            container = self._scroll_container(state)
+            structure = state.structural_fingerprint
+            if (
+                container
+                and (not container.package or container.package == self.target_package)
+                and self._scroll_counts[structure] < self.limits.max_scrolls_per_state
+            ):
+                before_view = (structure, state.content_fingerprint)
+                self._seen_scroll_views.add(before_view)
+                self._scroll_counts[structure] += 1
+                action, after = await self._execute_scroll(state, container.element_id)
+                if action.result == CapabilityStatus.AVAILABLE.value and after:
+                    if after.package and after.package != self.target_package:
+                        self._termination_reason = "left_target_package"
+                        return after
+                    after_view = (
+                        after.structural_fingerprint,
+                        after.content_fingerprint,
+                    )
+                    if after_view not in self._seen_scroll_views:
+                        self._seen_scroll_views.add(after_view)
+                        return await self._explore(after, depth)
         return current
 
     async def run(self) -> NavigationResult:

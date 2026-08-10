@@ -98,6 +98,16 @@ def test_finding_without_relevant_evidence_remains_candidate():
     assert decision.effective_verdict == "candidate"
 
 
+def test_category_aliases_are_exact_and_do_not_match_storage_substrings():
+    policy = EvidencePolicyEngine()
+    assert policy.requirements_for("insecure-data-storage") == (
+        ("storage_snapshot", "storage_diff"),
+    )
+    requirements = policy.requirements_for("network_storage_exposure")
+    assert requirements != (("storage_snapshot", "storage_diff"),)
+    assert "network_capture" in requirements[0]
+
+
 def test_evidence_policy_detects_activity_text_dialog_and_runtime_events():
     before = UIState.from_xml(
         '<?xml version="1.0"?><hierarchy><node text="Home" content-desc="" '

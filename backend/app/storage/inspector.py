@@ -77,11 +77,31 @@ def inspect_sqlite_database(
     size = path.stat().st_size
     digest_builder = hashlib.sha256()
     header = b""
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            if len(header) < 16:
-                header += chunk[: 16 - len(header)]
-            digest_builder.update(chunk)
+    hash_timed_out = time.monotonic() >= deadline
+    if not hash_timed_out:
+        with path.open("rb") as stream:
+            while True:
+                if time.monotonic() >= deadline:
+                    hash_timed_out = True
+                    break
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                if time.monotonic() >= deadline:
+                    hash_timed_out = True
+                    break
+                if len(header) < 16:
+                    header += chunk[: 16 - len(header)]
+                digest_builder.update(chunk)
+    if hash_timed_out:
+        return DatabaseArtifact(
+            path=logical_path or path.name,
+            size=size,
+            sha256="",
+            tables=[],
+            status="failed",
+            message=f"SQLite 파일 Hash 시간 제한({max_seconds:.3g}초)을 초과했습니다.",
+        )
     digest = digest_builder.hexdigest()
     if time.monotonic() >= deadline:
         return DatabaseArtifact(

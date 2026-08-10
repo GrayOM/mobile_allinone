@@ -8,6 +8,30 @@ from .models import NavigationCandidate, UIElement, UIState
 class NavigationRiskPolicy:
     """Default-deny policy for deterministic, in-app UI exploration."""
 
+    DESTRUCTIVE_TERMS = (
+        "삭제",
+        "제거",
+        "초기화",
+        "해제",
+        "비활성화",
+        "연결 끊기",
+        "연결 해제",
+        "폐기",
+        "지우기",
+        "delete",
+        "remove",
+        "reset",
+        "disable",
+        "deactivate",
+        "revoke",
+        "disconnect",
+        "unlink",
+        "erase",
+        "wipe",
+        "clear data",
+        "terminate",
+    )
+
     BLOCKED_TERMS = (
         "결제",
         "송금",
@@ -169,14 +193,56 @@ class NavigationRiskPolicy:
         "certificate_info",
     )
 
-    @staticmethod
-    def _material(element: UIElement) -> str:
-        return " ".join(
+    @classmethod
+    def _material(cls, element: UIElement) -> str:
+        raw = " ".join(
             [element.text, element.content_desc, element.resource_id, element.class_name]
-        ).casefold()
+        )
+        return re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", raw).casefold()
+
+    @staticmethod
+    def _resource_tokens(value: str) -> list[str]:
+        leaf = value.rsplit("/", 1)[-1]
+        leaf = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", leaf)
+        return [
+            token
+            for token in re.split(r"(?:_|[^\w가-힣])+", leaf.casefold())
+            if token
+        ]
+
+    @classmethod
+    def _safe_resource_match(cls, value: str) -> bool:
+        tokens = cls._resource_tokens(value)
+        for term in cls.SAFE_RESOURCE_TERMS:
+            expected = [item for item in term.casefold().split("_") if item]
+            width = len(expected)
+            if width and any(
+                tokens[index : index + width] == expected
+                for index in range(len(tokens) - width + 1)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _contains_semantic_term(material: str, terms: tuple[str, ...]) -> bool:
+        for term in terms:
+            normalized = term.casefold()
+            if re.search(r"[가-힣]", normalized):
+                if normalized in material:
+                    return True
+                continue
+            pattern = r"(?<![a-z0-9])" + re.escape(normalized) + r"(?![a-z0-9])"
+            if re.search(pattern, material):
+                return True
+        return False
 
     def classify(self, element: UIElement, target_package: str) -> NavigationCandidate:
         material = self._material(element)
+        label_material = re.sub(
+            r"([a-z0-9])([A-Z])",
+            r"\1 \2",
+            " ".join([element.text, element.content_desc]),
+        ).casefold()
         label = element.label.strip()
         class_name = element.class_name.rsplit(".", 1)[-1].casefold()
         if element.package and target_package and element.package != target_package:
@@ -195,6 +261,15 @@ class NavigationRiskPolicy:
                 element.label,
                 "medium",
                 "자격증명·개인정보 입력은 사용자 수동 단계로 남깁니다.",
+                True,
+            )
+        if self._contains_semantic_term(material, self.DESTRUCTIVE_TERMS):
+            return NavigationCandidate(
+                "tap",
+                element.element_id,
+                element.label,
+                "high",
+                "삭제·해제·초기화 등 파괴적 의미가 있어 자동 실행을 차단했습니다.",
                 True,
             )
         if any(term in material for term in self.BLOCKED_TERMS):
@@ -245,12 +320,9 @@ class NavigationRiskPolicy:
                 "Button·토글 또는 확인/저장 계열 제어는 상태 변경 가능성이 있어 승인이 필요합니다.",
                 True,
             )
-        has_navigation_semantics = any(
-            term in material for term in self.SAFE_HINTS
-        ) or any(
-            term in element.resource_id.casefold()
-            for term in self.SAFE_RESOURCE_TERMS
-        )
+        has_navigation_semantics = self._contains_semantic_term(
+            label_material, self.SAFE_HINTS
+        ) or self._safe_resource_match(element.resource_id)
         if class_name in self.SAFE_NAVIGATION_CLASSES and has_navigation_semantics:
             return NavigationCandidate(
                 "tap",
@@ -280,7 +352,11 @@ class NavigationRiskPolicy:
             material = candidate.label.casefold()
             safe_hint = any(term in material for term in self.SAFE_HINTS)
             risk_order = {"low": 0, "medium": 1, "high": 2, "blocked": 3}
-            return (risk_order.get(candidate.risk, 9) - int(safe_hint), material, candidate.element_id)
+            return (
+                risk_order.get(candidate.risk, 9) - int(safe_hint),
+                material,
+                candidate.element_id,
+            )
 
         unique: dict[str, NavigationCandidate] = {}
         for candidate in sorted(candidates, key=score):
@@ -290,4 +366,6 @@ class NavigationRiskPolicy:
     @classmethod
     def contains_dangerous_label(cls, value: str) -> bool:
         normalized = re.sub(r"\s+", " ", value.casefold()).strip()
-        return any(term in normalized for term in cls.BLOCKED_TERMS)
+        return cls._contains_semantic_term(
+            normalized, cls.DESTRUCTIVE_TERMS
+        ) or any(term in normalized for term in cls.BLOCKED_TERMS)

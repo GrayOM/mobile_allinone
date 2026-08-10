@@ -60,6 +60,10 @@ from backend.app.network_testing import (
     NetworkExecution,
     classify_proxy_flow,
 )
+from backend.app.orchestration.resources import (
+    ResourceLeaseManager,
+    allocate_available_port,
+)
 from backend.app.proxy import (
     BurpProxyAdapter,
     FiddlerProxyAdapter,
@@ -73,7 +77,21 @@ from backend.app.storage import (
     StorageCapture,
     diff_snapshots,
 )
-from backend.app.orchestration.resources import ResourceLeaseManager, allocate_available_port
+
+
+def _frida_evidence_integrity(health: dict[str, Any]) -> tuple[bool, str]:
+    dropped = max(0, int(health.get("dropped_count") or 0))
+    truncated = max(0, int(health.get("truncated_count") or 0))
+    if dropped:
+        return (
+            False,
+            f"Frida transcript에서 {dropped}개 메시지가 유실되었습니다. "
+            "Run 증적은 불완전하며 재검증이 필요합니다.",
+        )
+    return (
+        True,
+        f"Frida 메시지 유실이 없습니다. 크기 제한으로 축약된 메시지는 {truncated}개입니다.",
+    )
 
 
 class DiagnosticStopped(Exception):
@@ -2112,6 +2130,14 @@ class DiagnosticOrchestrator:
                                 ),
                                 "cleanup_status": stop_result.status.value,
                             }
+                        )
+                        integrity_ok, integrity_message = _frida_evidence_integrity(
+                            final_health
+                        )
+                        record_check(
+                            "frida_evidence_integrity",
+                            integrity_ok,
+                            integrity_message,
                         )
                         options = dict(run.options)
                         options["frida_health"] = final_health

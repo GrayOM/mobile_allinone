@@ -15,8 +15,11 @@ FastAPI ──┼─ DiagnosticOrchestrator
           │    ├─ Analyzer Federation
           │    │    └─ Native / Androguard / APKiD / Semgrep / MobSF
           │    ├─ DeviceAdapter (Android / iOS / Mock)
+          │    ├─ UIDriver + bounded NavigationEngine + RiskPolicy
           │    ├─ FridaRunner + ScriptLibrary
           │    ├─ ProxyAdapter (mitmproxy / Fiddler / Burp / Mock)
+          │    ├─ Android app-scoped Storage Inspector
+          │    ├─ Network Candidate + Response Comparator
           │    ├─ AIProviderChain (NVIDIA → Claude → 명시적 오류)
           │    ├─ RuntimeAdapter (objection / drozer)
           │    ├─ MASTG Control Ledger

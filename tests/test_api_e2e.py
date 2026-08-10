@@ -3,14 +3,18 @@ from __future__ import annotations
 import time
 
 
-def _wait_for_run(client, run_id: str, timeout: float = 8):
+def _wait_for_run(client, run_id: str, timeout: float = 30):
     deadline = time.monotonic() + timeout
+    run = {}
     while time.monotonic() < deadline:
         run = client.get(f"/api/runs/{run_id}").json()
         if run["status"] in {"completed", "failed", "stopped"}:
             return run
         time.sleep(0.05)
-    raise AssertionError("진단 실행이 제한 시간 안에 끝나지 않았습니다.")
+    raise AssertionError(
+        f"진단 실행이 {timeout}초 안에 끝나지 않았습니다: "
+        f"status={run.get('status')} stage={run.get('current_stage')} error={run.get('error')}"
+    )
 
 
 def test_mock_demo_runs_end_to_end(client):

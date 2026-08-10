@@ -142,7 +142,7 @@ tests/               단위·API·Mock E2E 테스트
 - 내장 스크립트는 동작을 바꾸지 않는 저위험 관찰용이다.
 - 자동 진단의 Frida는 Python 바인딩으로 앱을 한 번 Spawn/Attach하고 여러 스크립트를 같은 Session에 로드한다. 메시지를 로그인·동적·프록시 단계까지 수집하고 정상 경로에서는 JSONL을 확정한 뒤 unload/detach하며, 중지·실패·취소 경로는 `finally`에서 정리한다.
 - Attach는 baseline 프로세스 실행을 재확인한 뒤 연결한다. Spawn은 baseline 증적 후 앱 종료·종료 확인·spawn·script load·resume·재실행 확인 순서로 진행하며 각 단계 증적 ID를 연결한다.
-- Frida 메시지는 최근 500~2000건 Ring Buffer와 Run별 append-only JSONL로 분리한다. Callback은 bounded Queue에만 넣고 단일 writer가 파일을 한 번 열어 기록한다. Binary는 base64로 직렬화하고 개별/전체/Queue 크기 제한의 `dropped_count`, `truncated_count`를 Run health와 UI에 보존한다. WebSocket은 설정된 초당 빈도로 sampling한다.
+- Frida 메시지는 최근 500~2000건 Ring Buffer와 Run별 append-only JSONL로 분리한다. Callback은 bounded Queue에만 넣고 단일 writer가 파일을 한 번 열어 기록한다. Binary는 base64로 직렬화하고 개별/전체/Queue 크기 제한의 `dropped_count`, `truncated_count`를 Run health와 UI에 보존한다. WebSocket은 설정된 초당 빈도로 sampling한다. `dropped_count > 0`은 실제 증적 손실이므로 `frida_evidence_integrity` 품질 Gap과 `completed_with_gaps`를 만들고, `truncated_count`만 있는 경우는 정보로 남긴다.
 - iOS USB는 UDID transport를 사용하고, SSH 프로필은 검증된 `frida_endpoint`를 Python Frida `add_remote_device`에 실제 전달한다. 설정 route와 실제 연결 Device를 단말/Run UI에 표시하며 종료 시 `remove_remote_device`로 등록을 정리한다.
 - 빈 Frida 선택은 “실행 안 함”이며 자동 선택은 별도 `auto_select_frida=true`에서만 동작한다.
 - 자동 진단은 대상 앱의 플랫폼·프레임워크·정적 신호와 맞는 `builtin + low` 스크립트만 실행한다. 사용자·AI·medium/high 스크립트는 `safely_paused` Run의 1회 승인 직접 실행만 허용한다.
@@ -177,12 +177,12 @@ tests/               단위·API·Mock E2E 테스트
 
 ### Android 자동 탐색·동적 저장소·API Candidate
 
-- `backend/app/navigation/`은 ADB UIAutomator XML 기반 `UIDriver`, 제한형 DFS, default-deny 위험 정책과 결정론적 Mock 화면 그래프를 제공한다. TextView/ViewGroup/탭 계열과 명확한 목록·상세·정보 의미가 모두 있는 요소만 low이며 Button·Switch·CheckBox·확인/저장 계열·무라벨·unknown clickable·외부 Intent 가능 요소는 `pending_approval`로만 남긴다.
-- 방문 판단은 activity/resource-id/class/tree shape의 `structural_fingerprint`를 사용한다. Text/content-desc/bounds/checked 변화는 `content_fingerprint`와 증적 신호로 분리해 동적 문구가 `max_states`를 소모하지 않게 한다.
-- 허용 UI 동작은 Before Screenshot/UI Tree → Action → After Screenshot/UI Tree 순서와 Edge 증적 ID를 보존한다. 상태·깊이·동작·화면별 동작·반복·동작 시간·전체 시간 제한에는 서버 hard cap이 있다.
+- `backend/app/navigation/`은 ADB UIAutomator XML 기반 `UIDriver`, 제한형 DFS, default-deny 위험 정책과 결정론적 Mock 화면 그래프를 제공한다. TextView/ViewGroup/탭 계열과 명확한 목록·상세·정보 의미가 모두 있는 요소만 low이며 Button·Switch·CheckBox·확인/저장 계열·무라벨·unknown clickable·외부 Intent 가능 요소는 `pending_approval`로만 남긴다. 삭제·제거·초기화·해제·비활성화·revoke/disconnect 등 파괴적 의미는 safe hint보다 먼저 high로 분류하고 resource allowlist는 토큰 경계로만 일치시킨다.
+- UI 상태는 activity/resource-id/class/tree shape의 `structural_fingerprint`, clickable path/resource/class와 숫자를 정규화한 의미 label의 `interaction_fingerprint`, 전체 Text/content-desc/bounds/checked의 `content_fingerprint`를 분리한다. 그래프 방문은 interaction identity를 사용하되 동일 구조의 variant 수를 제한해 동적 화면 폭증과 동일 layout 과병합을 함께 막는다. Element ID는 bounds/content-desc 변화에 의존하지 않는다.
+- 허용 UI 동작은 Before Screenshot/UI Tree → Action → After Screenshot/UI Tree 순서와 Edge 증적 ID를 보존한다. 상태·깊이·동작·화면별 동작·반복·동작 시간·전체 시간 제한에는 서버 hard cap이 있다. 스크롤은 대상 앱의 `scrollable=true` container 내부에서만 `max_scrolls_per_state`까지 실행하고 동일 content 반복 시 중단한다.
 - `backend/app/storage/`은 Root Android의 검증된 `/data/data/<package>`만 제한형 tar로 수집한다. ADB stdout은 RAM bytes가 아니라 제한형 임시 파일로 streaming하고 성공 시 원자 교체한다. Archive hash와 SQLite 검사는 worker thread에서 실행하며 SQLite progress handler 시간 제한을 둔다. Before/After 파일 diff와 table/column/row count 및 기본 마스킹 Preview를 제공한다.
 - `backend/app/network_testing/`은 ProxyFlow를 로컬 구조화한 뒤 실행 전 Candidate를 만든다. Live 재전송은 현재 승인 대기로 남고, Mock의 읽기 전용 합성 재현만 자동 실행한다. POST/PUT/PATCH/DELETE·업로드·Object 경계 후보는 자동 실행하지 않는다.
-- Finding 증적 정책은 범주별 required evidence group을 검사한다. `local_storage` confirmed에는 반드시 `storage_snapshot` 또는 `storage_diff`가 필요하며 network/runtime 노출과 분리한다. 출처가 모호한 `sensitive_data_exposure`는 `needs_review`로 제한한다.
+- Finding 증적 정책은 AI 자유 문자열을 exact alias 기반 `CanonicalFindingCategory`로 먼저 정규화한 뒤 범주별 required evidence group을 검사한다. `local_storage` confirmed에는 반드시 `storage_snapshot` 또는 `storage_diff`가 필요하며 network/runtime 노출과 분리한다. 출처가 모호한 `sensitive_data_exposure`는 `needs_review`로 제한한다.
 - 기본 `/api/runs/{id}/flows`와 Frida WebSocket은 마스킹한다. 인증된 `/api/runs/{id}/flows/raw`와 원본 Frida JSONL은 명시적 Raw 접근이다.
 
 ### 입력·외부 도구 방어
@@ -365,7 +365,7 @@ MSW_ENABLE_API_DOCS=false
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          74 passed
+pytest -q                          81 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -387,6 +387,8 @@ npm audit --audit-level=high      0 vulnerabilities
 - 1440×1000·390×844에서 인증된 Blob 증적 이미지(360px 원본), 다운로드, HTML 보고서를 확인하고 브라우저 콘솔 오류·경고 0건과 모바일 가로 넘침 0을 확인
 - 확장 Mock E2E에서 8개 UI 상태·14개 실행 동작·2개 승인 대기 동작, 파일 변화 3개·SQLite 1개, API Candidate 4개(3개 실행·1개 승인 대기)와 Finding 증적 연결을 확인
 - 자동 탐색·저장소·API Candidate 원장을 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건
+- Windows CI의 Mock Run 8~12초 절대 timeout과 초미세 SQLite deadline 플랫폼 차이를 수정했다. Run 대기는 30초로 보정하고 실패 시 status/stage/error를 출력하며 SQLite deadline은 파일 Hash loop부터 강제한다.
+- destructive semantic 우회, resource 토큰 경계, interaction variant, container 한정 bounded scroll, Frida drop 품질 Gap과 Finding category exact alias 회귀 테스트를 확인했다.
 
 테스트 명령:
 

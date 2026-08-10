@@ -6,6 +6,8 @@ from typing import Iterable
 from backend.app.database.models import Evidence
 from backend.app.navigation.models import UIState
 
+from .categories import CanonicalFindingCategory, normalize_finding_category
+
 
 @dataclass(slots=True)
 class FindingEvidenceDecision:
@@ -18,36 +20,34 @@ class FindingEvidenceDecision:
 class EvidencePolicyEngine:
     """Select relevant evidence and enforce category-specific confirmation gates."""
 
-    CATEGORY_RULES: tuple[tuple[tuple[str, ...], tuple[tuple[str, ...], ...]], ...] = (
-        (
-            ("idor", "authorization", "access_control", "object_boundary"),
-            (("network_capture",), ("network_test",)),
+    CATEGORY_RULES: dict[
+        CanonicalFindingCategory, tuple[tuple[str, ...], ...]
+    ] = {
+        CanonicalFindingCategory.AUTHORIZATION: (
+            ("network_capture",),
+            ("network_test",),
         ),
-        (
-            ("local_storage", "local_data", "shared_preferences", "sqlite", "storage"),
-            (("storage_snapshot", "storage_diff"),),
+        CanonicalFindingCategory.LOCAL_STORAGE: (
+            ("storage_snapshot", "storage_diff"),
         ),
-        (
-            ("network_sensitive_exposure", "api_sensitive_exposure"),
-            (("network_capture", "network_test"),),
+        CanonicalFindingCategory.NETWORK_SENSITIVE_EXPOSURE: (
+            ("network_capture", "network_test"),
         ),
-        (
-            ("runtime_log_exposure", "log_sensitive_exposure"),
-            (("device_log", "frida_session"),),
+        CanonicalFindingCategory.RUNTIME_LOG_EXPOSURE: (
+            ("device_log", "frida_session"),
         ),
-        (
-            ("sensitive_data_exposure",),
-            (("storage_snapshot", "storage_diff", "network_capture", "device_log"),),
+        CanonicalFindingCategory.SENSITIVE_DATA_EXPOSURE: (
+            ("storage_snapshot", "storage_diff", "network_capture", "device_log"),
         ),
-        (
-            ("frida", "hook", "root_detection", "certificate_pinning", "anti_tamper"),
-            (("frida_script", "frida_session"), ("screenshot", "device_log")),
+        CanonicalFindingCategory.FRIDA_CONTROL: (
+            ("frida_script", "frida_session"),
+            ("screenshot", "device_log"),
         ),
-        (
-            ("navigation", "deep_link", "exported_component"),
-            (("navigation_action",), ("screenshot", "ui_tree")),
+        CanonicalFindingCategory.NAVIGATION: (
+            ("navigation_action",),
+            ("screenshot", "ui_tree"),
         ),
-    )
+    }
     GENERIC_RELEVANT = {
         "network_capture",
         "network_test",
@@ -65,18 +65,16 @@ class EvidencePolicyEngine:
 
     @classmethod
     def requirements_for(cls, category: str) -> tuple[tuple[str, ...], ...]:
-        normalized = category.casefold()
-        for terms, requirements in cls.CATEGORY_RULES:
-            if any(term in normalized for term in terms):
-                return requirements
+        canonical = normalize_finding_category(category)
+        if canonical is not None:
+            return cls.CATEGORY_RULES[canonical]
         return ((tuple(sorted(cls.GENERIC_RELEVANT))),)
 
     @staticmethod
     def _ambiguous_exposure_category(category: str) -> bool:
-        normalized = category.casefold().replace("-", "_").replace(" ", "_")
-        return "sensitive_data_exposure" in normalized and not any(
-            qualifier in normalized
-            for qualifier in ("local_storage", "network_", "api_", "runtime_", "log_")
+        return (
+            normalize_finding_category(category)
+            == CanonicalFindingCategory.SENSITIVE_DATA_EXPOSURE
         )
 
     def decide_finding(
