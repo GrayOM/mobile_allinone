@@ -112,6 +112,9 @@ export default function DevicesPage() {
                 <StatusChip value={device.frida_status} label={`Frida · ${device.frida_status}`} />
                 <StatusChip value={device.proxy_status} label={`Proxy · ${device.proxy_status}`} />
               </div>
+              {Boolean(device.details.frida_target) && (
+                <FridaRoute target={device.details.frida_target} />
+              )}
               <div className="button-row">
                 <button className="button button--small" onClick={() => void inspect(device, "list_packages")}>앱 목록</button>
                 <button className="button button--small" onClick={() => void inspect(device, "frida_status")}>Frida 확인</button>
@@ -130,6 +133,19 @@ export default function DevicesPage() {
           <pre className="code-view">{JSON.stringify(operation, null, 2)}</pre>
         </section>
       )}
+    </div>
+  );
+}
+
+function FridaRoute({ target }: { target: unknown }) {
+  const value = target && typeof target === "object"
+    ? target as Record<string, unknown>
+    : {};
+  const route = String(value.endpoint ?? value.device_id ?? "endpoint 미설정");
+  return (
+    <div className="device-frida-route">
+      <span>FRIDA ROUTE · {String(value.transport ?? "unknown")}</span>
+      <code>{route}</code>
     </div>
   );
 }

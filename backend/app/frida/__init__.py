@@ -5,6 +5,7 @@ from .session import (
     FridaSessionScript,
     messages_as_text,
 )
+from .target import FridaTarget, normalize_frida_endpoint
 
 __all__ = [
     "FridaExecution",
@@ -12,5 +13,7 @@ __all__ = [
     "FridaSessionManager",
     "FridaSessionResult",
     "FridaSessionScript",
+    "FridaTarget",
     "messages_as_text",
+    "normalize_frida_endpoint",
 ]

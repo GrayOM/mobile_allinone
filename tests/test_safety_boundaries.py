@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import create_engine, inspect, text
 
+import backend.app.devices.ios as ios_module
+
 from backend.app.ai.masking import mask_context
 from backend.app.ai.storage import save_ai_raw_response
 from backend.app.analyzers.adapters import AndroguardAnalyzerAdapter, MobSFAnalyzerAdapter
@@ -499,6 +501,16 @@ async def test_ios_inputs_and_bundle_id_are_rejected_before_command(client):
         json={"name": "bad", "host": "127.0.0.1", "username": "root;id"},
     )
     assert invalid_user.status_code == 422
+    invalid_frida = client.post(
+        "/api/devices/ios/profiles",
+        json={
+            "name": "bad",
+            "host": "127.0.0.1",
+            "username": "root",
+            "frida_endpoint": "http://127.0.0.1:27042/path",
+        },
+    )
+    assert invalid_frida.status_code == 422
     with pytest.raises(ValueError):
         IOSDeviceAdapter(host="127.0.0.1;id")
     operation = await IOSDeviceAdapter(host="127.0.0.1").start_app(
@@ -506,6 +518,38 @@ async def test_ios_inputs_and_bundle_id_are_rejected_before_command(client):
     )
     assert operation.status == CapabilityStatus.FAILED
     assert operation.command is None
+
+
+@pytest.mark.asyncio
+async def test_ios_frida_endpoint_is_used_for_remote_transport(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    commands: list[list[str]] = []
+
+    async def fake_run(command, **_kwargs):
+        commands.append(command)
+        return CommandResult(
+            CapabilityStatus.AVAILABLE,
+            command,
+            stdout="1234 TestApp\n",
+        )
+
+    monkeypatch.setattr(ios_module, "run_command", fake_run)
+    settings = AppSettings(tools=ToolPaths(frida_ps=sys.executable))
+    adapter = IOSDeviceAdapter(
+        settings,
+        host="192.0.2.25",
+        frida_endpoint="192.0.2.25:27042",
+        include_usb=False,
+    )
+    status = await adapter.frida_status("ios-ssh:192.0.2.25:22")
+
+    assert status.status == CapabilityStatus.AVAILABLE
+    assert commands == [
+        [sys.executable, "-H", "192.0.2.25:27042", "-a", "-i"]
+    ]
+    assert status.data["frida_target"]["transport"] == "remote"
+    assert status.data["frida_target"]["endpoint"] == "192.0.2.25:27042"
 
 
 def test_mobsf_destination_and_project_policy_block_unapproved_upload(tmp_path: Path):

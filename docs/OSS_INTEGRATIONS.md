@@ -74,6 +74,61 @@ run. All selected scripts are loaded into that session, their messages remain
 available through login and dynamic/network stages, and scripts are unloaded and
 the session detached from the orchestrator's final cleanup.
 
+Attach keeps the verified baseline process alive. Spawn first captures the
+baseline, stops the app, verifies that its process exited, then spawns, loads the
+scripts, resumes and verifies the new process before continuing. Session messages
+are normalized into a configurable 500–2000 item ring and an append-only per-run
+JSONL transcript. Binary data is base64 encoded; per-message and per-run limits
+increment truncation/drop counters instead of failing the diagnostic. WebSocket
+delivery is sampled independently from the full on-disk transcript.
+
+iOS USB sessions use the selected UDID. A jailbroken SSH profile must provide a
+validated `host:port` Frida endpoint; the Python binding connects through
+`DeviceManager.add_remote_device`. The configured route and the actual connected
+Frida device are exposed in device discovery and Run health instead of treating
+an SSH process probe as a usable transport.
+
+## Android navigation and dynamic data boundary
+
+Android automatic navigation uses only ADB, UIAutomator XML and the fixed
+`UIDriver` operation set. The local planner ranks clickable elements that exist
+in the current tree; the executor rejects stale element IDs and never accepts AI
+coordinates or shell commands. State fingerprints, depth/action/time limits and
+repeat counters bound traversal. Payment, transfer, purchase, deletion,
+communication, account/credential and system-setting labels are retained in an
+approval queue and are not clicked automatically. Mock Android exposes the same
+graph and policy path with a deterministic synthetic UI.
+
+Every executed transition records Before screenshot/tree, the fixed action, and
+After screenshot/tree in sequence. `navigation-graph.json` links those evidence
+IDs. Password fields are masked in normalized state; raw local trees remain
+authenticated evidence rather than default UI content.
+
+Optional Android storage capture is root-only and strictly scoped to
+`/data/data/<validated-package>`. A bounded tar stream is rejected on byte,
+entry, path or link violations. Before/After metadata identifies created,
+modified and deleted files. SQLite files below the configured limit are opened
+read-only and show table/column/count data with masked previews. ADB Clipboard
+collection is explicitly `unsupported` because it cannot reliably attribute a
+global clipboard value to the target app; Mock provides only a synthetic,
+masked change signal.
+
+## API candidate boundary
+
+Proxy flows are locally normalized into method, endpoint, content type,
+authentication scheme, cookie names, parameter shapes, object-ID candidates,
+pagination, upload/GraphQL signals and sensitive response field names. Candidate
+generation does not send requests. Passive metadata work runs locally; Mock may
+perform a marked synthetic GET replay for comparator testing. Live GET replay,
+all state-changing methods, uploads and object-boundary changes remain approval
+candidates. The response comparator evaluates status, body length, JSON shape,
+key/type changes, sensitive fields, redirects and authentication/authorization
+responses instead of treating HTTP status as the only signal.
+
+Default flow and Frida stream views are structurally masked. Full proxy and
+Frida transcripts remain authenticated raw evidence; the explicit raw-flow API
+uses `Cache-Control: no-store`.
+
 Every runtime command is bound to the selected device. pymobiledevice3 receives
 the selected UDID, iOS Frida uses `-D <device-id>`, and drozer gets a per-run ADB
 forward to the selected Android device instead of sharing its default port.
@@ -122,6 +177,13 @@ rechecks the actual peer IP and certificate before sending data. The destination
 addresses, certificate, artifact hash and approval metadata are retained in the
 analyzer tool run.
 
+The pinned MobSF transport intentionally uses an `httpcore` backend hook because
+the public `httpx` transport API cannot both preserve Host/SNI and connect only
+to the approved IP snapshot. Security checks are not weakened: dependencies are
+pinned to `httpx>=0.28,<0.29` and `httpcore>=1.0.9,<1.1`, startup validates the
+required backend interfaces, and compatibility tests exercise peer-IP and TLS
+revalidation.
+
 Static reanalysis uses an app-scoped in-process lease and a unique output
 directory per attempt. A concurrent request returns `409 analysis_in_progress`;
 each attempt has an `AnalysisRun` row. Successful output is validated and
@@ -139,6 +201,10 @@ and administrator tokens are not placed in URLs or browser storage.
 Evidence images, source downloads and HTML reports are fetched with the Bearer
 header and exposed to the browser through short-lived Blob object URLs. The UI
 does not embed unauthenticated `/api` URLs, so the same flows work in LAN mode.
+
+GitHub Actions runs Python 3.12 compile/test and the frontend `npm ci`, build and
+high-severity audit on Windows. Hardware, external API keys and live analyzer
+services are not required; CI exercises unit and synthetic Mock paths only.
 
 ## Windows installation
 

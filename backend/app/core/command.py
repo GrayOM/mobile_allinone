@@ -135,11 +135,13 @@ async def run_binary_command(
     args: Sequence[str],
     *,
     timeout: int = 30,
+    max_output_bytes: int | None = None,
 ) -> tuple[CommandResult, bytes]:
     command = [str(part) for part in args]
     result = CommandResult(status=CapabilityStatus.FAILED, command=command)
     output = b""
     communicate: asyncio.Task[tuple[bytes, bytes]] | None = None
+    readers: list[asyncio.Task[bytes]] = []
     process: asyncio.subprocess.Process | None = None
     if not command or not command[0]:
         result.status = CapabilityStatus.NOT_CONFIGURED
@@ -153,10 +155,48 @@ async def run_binary_command(
             stderr=asyncio.subprocess.PIPE,
             **subprocess_group_options(),
         )
-        communicate = asyncio.create_task(process.communicate())
-        output, stderr = await asyncio.wait_for(
-            asyncio.shield(communicate), timeout=timeout
-        )
+        if max_output_bytes is None:
+            communicate = asyncio.create_task(process.communicate())
+            output, stderr = await asyncio.wait_for(
+                asyncio.shield(communicate), timeout=timeout
+            )
+        else:
+            if max_output_bytes < 1:
+                raise ValueError("max_output_bytes must be positive")
+
+            async def read_limited(
+                stream: asyncio.StreamReader | None, limit: int
+            ) -> bytes:
+                if stream is None:
+                    return b""
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = await stream.read(64 * 1024)
+                    if not chunk:
+                        return b"".join(chunks)
+                    total += len(chunk)
+                    if total > limit:
+                        raise OverflowError(
+                            f"binary command output exceeded {limit} bytes"
+                        )
+                    chunks.append(chunk)
+
+            readers = [
+                asyncio.create_task(read_limited(process.stdout, max_output_bytes)),
+                asyncio.create_task(read_limited(process.stderr, 1 * 1024 * 1024)),
+            ]
+            try:
+                output, stderr = await asyncio.wait_for(
+                    asyncio.gather(*readers), timeout=timeout
+                )
+                await process.wait()
+            except OverflowError as exc:
+                result.error = str(exc)
+                await terminate_process_tree(process)
+                await asyncio.gather(*readers, return_exceptions=True)
+                result.return_code = process.returncode
+                return result, b""
         result.return_code = process.returncode
         result.stdout = f"<binary {len(output)} bytes>"
         result.stderr = stderr.decode("utf-8", errors="replace")
@@ -187,6 +227,11 @@ async def run_binary_command(
         if process is not None:
             await terminate_process_tree(process)
     finally:
+        for reader in readers:
+            if not reader.done():
+                reader.cancel()
+        if readers:
+            await asyncio.gather(*readers, return_exceptions=True)
         if communicate is not None and not communicate.done():
             communicate.cancel()
             await asyncio.gather(communicate, return_exceptions=True)

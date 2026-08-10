@@ -5,13 +5,18 @@ import hashlib
 import ipaddress
 import socket
 import ssl
+import re
+from importlib.metadata import version
 from dataclasses import dataclass
 from typing import Any, Iterable
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import httpcore
 import httpx
-from httpcore._backends.auto import AutoBackend
+try:
+    from httpcore._backends.auto import AutoBackend
+except ImportError:  # pragma: no cover - guarded by the startup compatibility check.
+    AutoBackend = None  # type: ignore[assignment,misc]
 
 from backend.app.core.config import AppSettings
 
@@ -79,6 +84,10 @@ class PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
     """Resolve no DNS during HTTP transfer; connect only to approved addresses."""
 
     def __init__(self, snapshot: DestinationSnapshot):
+        if AutoBackend is None:
+            raise RuntimeError(
+                "설치된 httpcore가 MobSF pinned transport와 호환되지 않습니다."
+            )
         parsed = urlsplit(snapshot.base_url)
         self.hostname = str(parsed.hostname or "").rstrip(".").lower()
         self.addresses = snapshot.addresses
@@ -141,6 +150,42 @@ class PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
 
 def pinned_http_transport(snapshot: DestinationSnapshot) -> httpx.AsyncHTTPTransport:
     return PinnedAsyncHTTPTransport(snapshot)
+
+
+def _version_tuple(value: str) -> tuple[int, int, int]:
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)", value)
+    if not match:
+        return (0, 0, 0)
+    return tuple(int(item) for item in match.groups())  # type: ignore[return-value]
+
+
+def check_mobsf_transport_compatibility(
+    *,
+    httpx_version: str | None = None,
+    httpcore_version: str | None = None,
+) -> tuple[bool, str]:
+    """Guard the intentionally pinned private httpcore backend integration."""
+    actual_httpx = httpx_version or version("httpx")
+    actual_httpcore = httpcore_version or version("httpcore")
+    httpx_tuple = _version_tuple(actual_httpx)
+    httpcore_tuple = _version_tuple(actual_httpcore)
+    compatible = (
+        (0, 28, 0) <= httpx_tuple < (0, 29, 0)
+        and (1, 0, 9) <= httpcore_tuple < (1, 1, 0)
+        and AutoBackend is not None
+        and hasattr(httpcore, "AsyncConnectionPool")
+        and hasattr(httpcore, "AsyncNetworkBackend")
+        and hasattr(httpcore, "AsyncNetworkStream")
+    )
+    if compatible:
+        return True, (
+            f"MobSF pinned transport dependency compatible: "
+            f"httpx={actual_httpx}, httpcore={actual_httpcore}"
+        )
+    return False, (
+        "MobSF IP/DNS/TLS pinning은 httpx>=0.28,<0.29 및 "
+        f"httpcore>=1.0.9,<1.1이 필요합니다 (현재 {actual_httpx}/{actual_httpcore})."
+    )
 
 
 def _parsed_destination(settings: AppSettings) -> tuple[SplitResult | None, str | None]:

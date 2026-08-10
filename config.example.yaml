@@ -14,6 +14,15 @@ archive_max_entry_mb: 256
 archive_max_nested_mb: 50
 external_tool_memory_mb: 2048
 external_tool_cpu_seconds: 300
+frida_message_buffer_size: 1000
+frida_message_max_bytes: 65536
+frida_transcript_max_bytes: 67108864
+frida_stream_events_per_second: 10
+storage_archive_max_bytes: 67108864
+storage_database_max_bytes: 52428800
+storage_max_files: 20000
+network_analysis_max_flows: 500
+network_candidate_max_count: 1000
 # MobSF API 키는 config.yaml이 아니라 .env의 MOBSF_API_KEY에 둡니다.
 # mobsf_url: http://127.0.0.1:8000
 mobsf_allowed_networks:

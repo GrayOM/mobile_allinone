@@ -18,6 +18,7 @@ from backend.app.core.targets import (
     is_valid_host,
 )
 from backend.app.devices.base import DeviceAdapter, DeviceInfo, DeviceOperation
+from backend.app.frida.target import FridaTarget
 
 
 class IOSDeviceAdapter(DeviceAdapter):
@@ -30,6 +31,9 @@ class IOSDeviceAdapter(DeviceAdapter):
         host: str | None = None,
         port: int = 22,
         username: str = "root",
+        frida_endpoint: str | None = None,
+        profile_id: str | None = None,
+        profile_name: str | None = None,
         include_usb: bool = True,
     ):
         self.settings = settings or get_settings()
@@ -40,6 +44,11 @@ class IOSDeviceAdapter(DeviceAdapter):
         self.host = host.strip().rstrip(".") if host else None
         self.port = port
         self.username = username
+        self.remote_frida_target = (
+            FridaTarget.remote(frida_endpoint) if frida_endpoint else None
+        )
+        self.profile_id = profile_id
+        self.profile_name = profile_name
         self.include_usb = include_usb
         self.ssh = self.settings.resolved_tool("ssh")
         self.scp = self.settings.resolved_tool("scp")
@@ -50,6 +59,19 @@ class IOSDeviceAdapter(DeviceAdapter):
         self.idevicesyslog = self.settings.resolved_tool("idevicesyslog")
         self.idevicescreenshot = self.settings.resolved_tool("idevicescreenshot")
         self.frida_ps = self.settings.resolved_tool("frida_ps")
+
+    @staticmethod
+    def ssh_device_id(host: str, port: int) -> str:
+        return f"ios-ssh:{host}:{port}"
+
+    def frida_target(self, device_id: str) -> FridaTarget:
+        if device_id.startswith("ios-ssh:"):
+            if not self.remote_frida_target:
+                raise ValueError(
+                    "SSH iOS 단말은 실제 Frida remote endpoint를 프로필에 설정해야 합니다."
+                )
+            return self.remote_frida_target
+        return FridaTarget.usb(device_id)
 
     def _manual(self, message: str) -> DeviceOperation:
         return DeviceOperation(CapabilityStatus.MANUAL_REQUIRED, message)
@@ -160,6 +182,7 @@ class IOSDeviceAdapter(DeviceAdapter):
                         "product_type": info.get("ProductType"),
                         "build_version": info.get("BuildVersion"),
                         "connection_backend": "libimobiledevice",
+                        "frida_target": FridaTarget.usb(udid).to_dict(),
                     },
                 )
             )
@@ -213,6 +236,7 @@ class IOSDeviceAdapter(DeviceAdapter):
                     adapter=self.name,
                     details={
                         "connection_backend": "pymobiledevice3",
+                        "frida_target": FridaTarget.usb(str(udid)).to_dict(),
                         **properties,
                     },
                 )
@@ -227,7 +251,7 @@ class IOSDeviceAdapter(DeviceAdapter):
                 devices = await self._discover_pymobiledevice3()
         if self.host:
             probe = await self._ssh("uname", "-a")
-            ssh_id = f"ios-ssh:{self.host}:{self.port}"
+            ssh_id = self.ssh_device_id(self.host, self.port)
             if not any(item.id == ssh_id for item in devices):
                 devices.append(
                     DeviceInfo(
@@ -250,7 +274,21 @@ class IOSDeviceAdapter(DeviceAdapter):
                             "frida_status",
                         ],
                         adapter=self.name,
-                        details={"ssh_host": self.host, "ssh_port": self.port},
+                        details={
+                            "ssh_host": self.host,
+                            "ssh_port": self.port,
+                            "profile_id": self.profile_id,
+                            "profile_name": self.profile_name,
+                            "frida_target": (
+                                self.remote_frida_target.to_dict()
+                                if self.remote_frida_target
+                                else {
+                                    "transport": "remote",
+                                    "endpoint": None,
+                                    "status": CapabilityStatus.NOT_CONFIGURED.value,
+                                }
+                            ),
+                        },
                     )
                 )
         return devices
@@ -417,17 +455,31 @@ class IOSDeviceAdapter(DeviceAdapter):
         )
 
     async def frida_status(self, device_id: str) -> DeviceOperation:
-        if device_id.startswith("ios-ssh:"):
-            return await self._ssh("pgrep", "-af", "frida")
+        try:
+            target = self.frida_target(device_id)
+        except ValueError as exc:
+            return DeviceOperation(
+                CapabilityStatus.NOT_CONFIGURED,
+                str(exc),
+                data={
+                    "frida_target": {
+                        "transport": "remote",
+                        "endpoint": None,
+                    }
+                },
+            )
         if not self.frida_ps:
             return DeviceOperation(
                 CapabilityStatus.NOT_CONFIGURED,
                 "frida-ps를 찾을 수 없습니다.",
+                data={"frida_target": target.to_dict()},
             )
+        target_args = [target.command_option, target.display]
         result = await run_command(
-            [self.frida_ps, "-D", device_id, "-a", "-i"], timeout=20
+            [self.frida_ps, *target_args, "-a", "-i"], timeout=20
         )
         operation = self._operation(result, "Frida iOS 연결을 확인했습니다.")
+        operation.data["frida_target"] = target.to_dict()
         if result.ok and not result.stdout.strip():
             operation.status = CapabilityStatus.NOT_CONFIGURED
             operation.message = "Frida에 연결됐지만 설치 앱 목록이 비어 있습니다."

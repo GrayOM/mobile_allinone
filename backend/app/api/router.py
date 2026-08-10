@@ -19,6 +19,7 @@ from fastapi import (
     File,
     HTTPException,
     Request,
+    Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -29,6 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.ai import AIProviderChain, MockAIProvider
+from backend.app.ai.masking import mask_context
 from backend.app.analyzers import (
     APKiDAnalyzerAdapter,
     AndroguardAnalyzerAdapter,
@@ -75,6 +77,7 @@ from backend.app.evidence.service import EvidenceService
 from backend.app.frida import FridaManager, FridaSessionScript
 from backend.app.frida.policy import is_safe_automatic_script, script_applies_to_app
 from backend.app.orchestration import DiagnosticOrchestrator, ManualActionInProgress
+from backend.app.navigation import NavigationLimits
 from backend.app.orchestration.approvals import (
     ApprovalError,
     consume_approval,
@@ -872,6 +875,8 @@ async def list_devices(request: Request):
                     host=ios_host,
                     port=int(os.getenv("MSW_IOS_SSH_PORT", "22")),
                     username=os.getenv("MSW_IOS_SSH_USER", "root"),
+                    frida_endpoint=os.getenv("MSW_IOS_FRIDA_ENDPOINT"),
+                    profile_name="environment",
                     include_usb=False,
                 )
             )
@@ -891,6 +896,9 @@ async def list_devices(request: Request):
                         host=profile.host,
                         port=profile.ssh_port,
                         username=profile.username,
+                        frida_endpoint=profile.frida_endpoint,
+                        profile_id=profile.id,
+                        profile_name=profile.name,
                         include_usb=False,
                     )
                 )
@@ -1017,22 +1025,48 @@ async def device_action(
     if payload.adapter == "android_adb":
         adapter = AndroidDeviceAdapter(settings)
     elif payload.adapter == "ios_windows":
-        ssh_host = os.getenv("MSW_IOS_SSH_HOST")
-        ssh_port = int(os.getenv("MSW_IOS_SSH_PORT", "22"))
         if payload.device_id.startswith("ios-ssh:"):
-            parts = payload.device_id.split(":")
-            if len(parts) >= 3:
-                ssh_host = parts[1]
-                try:
-                    ssh_port = int(parts[2])
-                except ValueError:
-                    raise HTTPException(422, "iOS SSH 단말 ID의 포트가 올바르지 않습니다.")
-        adapter = IOSDeviceAdapter(
-            settings,
-            host=ssh_host,
-            port=ssh_port,
-            username=os.getenv("MSW_IOS_SSH_USER", "root"),
-        )
+            profiles = db.scalars(select(IOSDeviceProfile)).all()
+            profile = next(
+                (
+                    item
+                    for item in profiles
+                    if IOSDeviceAdapter.ssh_device_id(item.host, item.ssh_port)
+                    == payload.device_id
+                ),
+                None,
+            )
+            if profile:
+                adapter = IOSDeviceAdapter(
+                    settings,
+                    host=profile.host,
+                    port=profile.ssh_port,
+                    username=profile.username,
+                    frida_endpoint=profile.frida_endpoint,
+                    profile_id=profile.id,
+                    profile_name=profile.name,
+                    include_usb=False,
+                )
+            else:
+                ssh_host = os.getenv("MSW_IOS_SSH_HOST")
+                ssh_port = int(os.getenv("MSW_IOS_SSH_PORT", "22"))
+                if (
+                    not ssh_host
+                    or IOSDeviceAdapter.ssh_device_id(ssh_host, ssh_port)
+                    != payload.device_id
+                ):
+                    raise HTTPException(422, "등록된 iOS SSH 단말 프로필을 찾을 수 없습니다.")
+                adapter = IOSDeviceAdapter(
+                    settings,
+                    host=ssh_host,
+                    port=ssh_port,
+                    username=os.getenv("MSW_IOS_SSH_USER", "root"),
+                    frida_endpoint=os.getenv("MSW_IOS_FRIDA_ENDPOINT"),
+                    profile_name="environment",
+                    include_usb=False,
+                )
+        else:
+            adapter = IOSDeviceAdapter(settings)
     else:
         if payload.adapter != "mock":
             raise HTTPException(422, "지원하지 않는 단말 Adapter입니다.")
@@ -1253,11 +1287,39 @@ async def create_run(
                 f"대상 앱 적용 조건을 충족하지 않는 Frida 스크립트입니다: {', '.join(not_applicable)}",
             )
     options = dict(payload.options)
+    frida_mode = str(options.get("frida_mode") or "attach")
+    if frida_mode not in {"spawn", "attach"}:
+        raise HTTPException(422, "Frida 연결 방식은 spawn 또는 attach여야 합니다.")
+    auto_navigation = options.get(
+        "auto_navigation",
+        run_mode == RunMode.MOCK and app_platform == "android",
+    )
+    if not isinstance(auto_navigation, bool):
+        raise HTTPException(422, "auto_navigation은 boolean이어야 합니다.")
+    if auto_navigation and app_platform != "android":
+        raise HTTPException(422, "자동 UI 탐색은 현재 Android에서만 지원합니다.")
+    dynamic_storage = options.get(
+        "dynamic_storage",
+        run_mode == RunMode.MOCK and app_platform == "android",
+    )
+    if not isinstance(dynamic_storage, bool):
+        raise HTTPException(422, "dynamic_storage는 boolean이어야 합니다.")
+    if dynamic_storage and app_platform != "android":
+        raise HTTPException(422, "동적 저장소 수집은 현재 Android에서만 지원합니다.")
+    navigation_options = options.get("navigation_limits", {})
+    if not isinstance(navigation_options, dict):
+        raise HTTPException(422, "navigation_limits는 객체여야 합니다.")
     options.update(
         {
             "frida_script_ids": selected_script_ids,
             "auto_select_frida": payload.auto_select_frida,
             "pause_for_login": payload.pause_for_login,
+            "frida_mode": frida_mode,
+            "auto_navigation": auto_navigation,
+            "dynamic_storage": dynamic_storage,
+            "navigation_limits": NavigationLimits.from_options(
+                navigation_options
+            ).to_dict(),
         }
     )
     active_device_run = db.scalar(
@@ -1348,6 +1410,20 @@ async def create_run(
 @router.get("/runs/{run_id}", response_model=RunOut)
 def get_run(run_id: str, db: Session = Depends(get_db)):
     return _run_or_404(db, run_id)
+
+
+@router.get("/runs/{run_id}/frida/health")
+def get_run_frida_health(
+    request: Request, run_id: str, db: Session = Depends(get_db)
+):
+    run = _run_or_404(db, run_id)
+    live = _orchestrator(request).frida_sessions.health(run_id)
+    if live.get("active"):
+        return live
+    saved = run.options.get("frida_health")
+    if isinstance(saved, dict):
+        return saved
+    return live
 
 
 @router.post("/runs/{run_id}/pause")
@@ -1522,6 +1598,37 @@ def list_evidence(run_id: str, db: Session = Depends(get_db)):
 @router.get("/runs/{run_id}/flows", response_model=list[ProxyFlowOut])
 def list_flows(run_id: str, db: Session = Depends(get_db)):
     _run_or_404(db, run_id)
+    rows = db.scalars(
+        select(ProxyFlow)
+        .where(ProxyFlow.run_id == run_id)
+        .order_by(ProxyFlow.captured_at)
+    ).all()
+    masked = []
+    for row in rows:
+        payload = ProxyFlowOut.model_validate(row).model_dump()
+        serialized, _ = mask_context(
+            {
+                "request_headers": payload["request_headers"],
+                "request_body": payload["request_body"],
+                "response_headers": payload["response_headers"],
+                "response_body": payload["response_body"],
+            }
+        )
+        sanitized = json.loads(serialized)
+        payload.update(sanitized)
+        masked.append(payload)
+    return masked
+
+
+@router.get("/runs/{run_id}/flows/raw", response_model=list[ProxyFlowOut])
+def list_raw_flows(
+    run_id: str,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Explicit authenticated raw-data action; the default endpoint is masked."""
+    _run_or_404(db, run_id)
+    response.headers["Cache-Control"] = "no-store"
     return db.scalars(
         select(ProxyFlow)
         .where(ProxyFlow.run_id == run_id)
@@ -1790,6 +1897,13 @@ async def execute_frida_script(
     if normalize_platform(script.platform) != app_platform:
         raise HTTPException(422, "Frida 스크립트 플랫폼이 대상 앱과 일치하지 않습니다.")
     target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
+    try:
+        device_adapter = _orchestrator(request).device_for_run(db, run)
+        frida_target = _orchestrator(request).frida_target_for_device(
+            device_adapter, run.device_id
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     action_scope = f"execute:{script.id}"
     if not await _orchestrator(request).begin_manual_action(run.id):
         raise HTTPException(409, "자동 Task가 안전하게 대기 중이거나 다른 수동 작업이 끝난 뒤 실행하세요.")
@@ -1818,6 +1932,69 @@ async def execute_frida_script(
         raise
     try:
         session_manager = _orchestrator(request).frida_sessions
+        lifecycle_evidence_ids: list[str] = []
+        session_was_active = session_manager.is_active(run.id)
+        evidence_service = EvidenceService(_settings(request))
+
+        async def record_lifecycle(title: str, operation) -> None:
+            evidence = evidence_service.add(
+                db,
+                run_id=run.id,
+                evidence_type="command_log",
+                title=title,
+                description=operation.message,
+                command=operation.command,
+                file_path=operation.file_path,
+                inline_data=operation.to_dict(),
+            )
+            lifecycle_evidence_ids.append(evidence.id)
+
+        if not session_was_active:
+            if payload.mode == "spawn":
+                stopped = await device_adapter.stop_app(run.device_id, target)
+                await record_lifecycle("직접 Frida Spawn 전 앱 정상 종료", stopped)
+                if stopped.status != CapabilityStatus.AVAILABLE:
+                    raise HTTPException(
+                        409, f"Frida Spawn 전 앱 종료 실패: {stopped.message}"
+                    )
+                stopped_process = await _orchestrator(
+                    request
+                )._wait_for_process_state(
+                    device_adapter,
+                    run.device_id,
+                    target,
+                    expected_running=False,
+                )
+                await record_lifecycle(
+                    "직접 Frida Spawn 전 프로세스 종료 확인", stopped_process
+                )
+                if (
+                    stopped_process.status != CapabilityStatus.AVAILABLE
+                    or _orchestrator(request)._process_running(
+                        stopped_process, target
+                    )
+                ):
+                    raise HTTPException(
+                        409, "Frida Spawn 전 대상 앱 프로세스 종료를 확인하지 못했습니다."
+                    )
+            else:
+                attach_process = await _orchestrator(
+                    request
+                )._wait_for_process_state(
+                    device_adapter,
+                    run.device_id,
+                    target,
+                    expected_running=True,
+                )
+                await record_lifecycle(
+                    "직접 Frida Attach 대상 프로세스 확인", attach_process
+                )
+                if not _orchestrator(request)._process_running(
+                    attach_process, target
+                ):
+                    raise HTTPException(
+                        409, "Frida Attach 대상 앱 프로세스 실행을 확인하지 못했습니다."
+                    )
         session_script = FridaSessionScript(
             script_id=script.id,
             name=script.name,
@@ -1829,6 +2006,10 @@ async def execute_frida_script(
             loop = asyncio.get_running_loop()
 
             def publish_message(item: dict[str, Any]) -> None:
+                masked_json, _ = mask_context(
+                    {"message": item}, settings.ai_sensitive_keys
+                )
+                masked_item = json.loads(masked_json)["message"]
                 loop.call_soon_threadsafe(
                     asyncio.create_task,
                     event_bus.publish(
@@ -1837,20 +2018,53 @@ async def execute_frida_script(
                         {
                             "status": CapabilityStatus.AVAILABLE.value,
                             "persistent": True,
-                            "messages": [item],
+                            "messages": [masked_item],
+                            "masked": True,
+                            "health": session_manager.health(run.id),
                         },
                     ),
                 )
 
             result = await session_manager.start(
                 run_id=run.id,
-                device_id=run.device_id,
+                frida_target=frida_target,
                 target=target,
                 scripts=[session_script],
                 mode=payload.mode,
                 mock=run.run_mode == RunMode.MOCK.value,
                 on_message=publish_message,
             )
+        if result.status == CapabilityStatus.AVAILABLE and not session_was_active:
+            if payload.mode == "spawn":
+                note_resume = getattr(
+                    device_adapter, "note_frida_spawn_resumed", None
+                )
+                if callable(note_resume):
+                    note_resume(target)
+            resumed_process = await _orchestrator(
+                request
+            )._wait_for_process_state(
+                device_adapter,
+                run.device_id,
+                target,
+                expected_running=True,
+            )
+            await record_lifecycle(
+                (
+                    "직접 Frida Spawn 후 프로세스 실행 확인"
+                    if payload.mode == "spawn"
+                    else "직접 Frida Attach 후 프로세스 유지 확인"
+                ),
+                resumed_process,
+            )
+            if not _orchestrator(request)._process_running(
+                resumed_process, target
+            ):
+                await session_manager.stop(run.id)
+                result.status = CapabilityStatus.FAILED
+                result.message = (
+                    "Frida 연결 후 대상 앱 프로세스 실행을 확인하지 못했습니다."
+                )
         if run.run_mode == RunMode.LIVE.value and result.status == CapabilityStatus.AVAILABLE:
             script.success_count += 1
         elif run.run_mode == RunMode.LIVE.value:
@@ -1869,6 +2083,7 @@ async def execute_frida_script(
                 "approval_id": approval.id,
                 "approved_by": approval.approved_by,
                 "approved_at": approval.approved_at.isoformat(),
+                "lifecycle_evidence_ids": lifecycle_evidence_ids,
             },
         )
         db.commit()

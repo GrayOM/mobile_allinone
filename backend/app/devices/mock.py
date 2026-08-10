@@ -158,6 +158,10 @@ class MockDeviceAdapter(DeviceAdapter):
         self.started_packages.discard(package_name)
         return self._result(CapabilityStatus.AVAILABLE, "Mock 앱을 종료했습니다.")
 
+    def note_frida_spawn_resumed(self, package_name: str) -> None:
+        """Reflect the synthetic Frida spawn/resume lifecycle in process probes."""
+        self.started_packages.add(package_name)
+
     async def screenshot(self, device_id: str, destination: Path) -> DeviceOperation:
         await self._delay()
         destination.parent.mkdir(parents=True, exist_ok=True)

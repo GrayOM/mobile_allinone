@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from backend.app.core.status import FindingVerdict, RunMode
 from backend.app.core.targets import SSH_USERNAME_PATTERN, is_valid_host
+from backend.app.frida.target import normalize_frida_endpoint
 
 
 class ORMModel(BaseModel):
@@ -270,6 +271,14 @@ class IOSDeviceProfileCreate(BaseModel):
         if not SSH_USERNAME_PATTERN.fullmatch(value):
             raise ValueError("SSH 사용자명 형식이 올바르지 않습니다.")
         return value
+
+    @field_validator("frida_endpoint")
+    @classmethod
+    def validate_frida_endpoint(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized, _, _ = normalize_frida_endpoint(value)
+        return normalized
 
 
 class IOSDeviceProfileOut(ORMModel):

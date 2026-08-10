@@ -32,6 +32,7 @@ from backend.app.core.network import (
     DestinationSnapshot,
     PinnedNetworkBackend,
     approval_matches_destination,
+    check_mobsf_transport_compatibility,
     inspect_mobsf_destination,
     pinned_http_transport,
 )
@@ -46,7 +47,11 @@ from backend.app.database.models import (
 from backend.app.database.session import SessionLocal
 from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDeviceAdapter
 from backend.app.devices.base import DeviceOperation
-from backend.app.frida import FridaSessionManager, FridaSessionScript
+from backend.app.frida import (
+    FridaSessionManager,
+    FridaSessionScript,
+    FridaTarget,
+)
 from backend.app.orchestration import DiagnosticOrchestrator, ManualActionInProgress
 
 
@@ -222,6 +227,279 @@ async def test_frida_session_loads_multiple_scripts_once_and_detaches_at_run_end
     assert stopped.status == CapabilityStatus.AVAILABLE
     assert events[-3:] == ["unload:two", "unload:one", "detach"]
     assert not manager.is_active("run-1")
+
+
+@pytest.mark.asyncio
+async def test_frida_messages_use_bounded_ring_binary_serialization_and_transcript_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    callback = None
+
+    class FakeScript:
+        def on(self, _event, handler):
+            nonlocal callback
+            callback = handler
+
+        def load(self):
+            return None
+
+        def unload(self):
+            return None
+
+    class FakeSession:
+        def create_script(self, _content, *, name):
+            assert name == "bounded"
+            return FakeScript()
+
+        def detach(self):
+            return None
+
+    class FakeDevice:
+        def attach(self, target):
+            assert target == "com.example.app"
+            return FakeSession()
+
+    class FakeFrida:
+        @staticmethod
+        def get_device(device_id, timeout):
+            assert (device_id, timeout) == ("device-1", 5)
+            return FakeDevice()
+
+    settings = AppSettings(
+        data_dir=tmp_path,
+        database_url=f"sqlite:///{(tmp_path / 'test.db').as_posix()}",
+        frida_message_buffer_size=500,
+        frida_message_max_bytes=512,
+        frida_transcript_max_bytes=4_096,
+        frida_stream_events_per_second=1_000,
+    )
+    manager = FridaSessionManager(settings)
+
+    async def syntax_ok(_content):
+        return CapabilityStatus.AVAILABLE, "ok"
+
+    monkeypatch.setattr(manager.syntax, "check_syntax", syntax_ok)
+    monkeypatch.setattr(
+        "backend.app.frida.session.importlib.import_module",
+        lambda name: FakeFrida if name == "frida" else None,
+    )
+    result = await manager.start(
+        run_id="run-bounded",
+        device_id="device-1",
+        target="com.example.app",
+        mode="attach",
+        scripts=[FridaSessionScript("script-1", "bounded", "send('ok')")],
+    )
+    assert result.status == CapabilityStatus.AVAILABLE
+    assert callback is not None
+
+    for index in range(510):
+        callback(
+            {"type": "send", "payload": {"index": index, "text": "x" * 900}},
+            b"\x00\xff" * 300,
+        )
+
+    snapshot = manager.snapshot("run-bounded")
+    assert len(snapshot) == 500
+    assert snapshot[-1]["message_type"] == "send"
+    assert snapshot[-1]["data"]["encoding"] == "base64"
+    assert snapshot[-1]["data"]["size"] == 600
+    assert snapshot[-1]["truncated"] is True
+    assert snapshot[-1]["original_size"] > settings.frida_message_max_bytes
+
+    health = manager.health("run-bounded")
+    assert health["buffer_count"] == 500
+    assert health["truncated_count"] >= 510
+    assert health["dropped_count"] > 0
+    transcript = Path(str(health["transcript_path"]))
+    assert transcript.is_file()
+    assert transcript.stat().st_size <= settings.frida_transcript_max_bytes
+    transcript_lines = transcript.read_bytes().splitlines()
+    assert all(len(line) <= settings.frida_message_max_bytes for line in transcript_lines)
+    assert all(json.loads(line) for line in transcript_lines)
+
+    stopped = await manager.stop("run-bounded")
+    assert stopped is not None
+    assert stopped.stats["dropped_count"] == health["dropped_count"]
+
+
+@pytest.mark.asyncio
+async def test_frida_remote_target_uses_official_device_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    calls: list[tuple[str, str]] = []
+
+    class FakeScript:
+        def on(self, _event, _callback):
+            return None
+
+        def load(self):
+            return None
+
+        def unload(self):
+            return None
+
+    class FakeSession:
+        def create_script(self, _content, *, name):
+            return FakeScript()
+
+        def detach(self):
+            return None
+
+    class FakeRemoteDevice:
+        def attach(self, target):
+            calls.append(("attach", target))
+            return FakeSession()
+
+    class FakeDeviceManager:
+        def add_remote_device(self, endpoint):
+            calls.append(("remote", endpoint))
+            return FakeRemoteDevice()
+
+    class FakeFrida:
+        @staticmethod
+        def get_device_manager():
+            return FakeDeviceManager()
+
+        @staticmethod
+        def get_device(*_args, **_kwargs):
+            raise AssertionError("remote target must not use get_device")
+
+    manager = FridaSessionManager(AppSettings(data_dir=tmp_path))
+
+    async def syntax_ok(_content):
+        return CapabilityStatus.AVAILABLE, "ok"
+
+    monkeypatch.setattr(manager.syntax, "check_syntax", syntax_ok)
+    monkeypatch.setattr(
+        "backend.app.frida.session.importlib.import_module",
+        lambda name: FakeFrida if name == "frida" else None,
+    )
+    result = await manager.start(
+        run_id="run-remote",
+        frida_target=FridaTarget.remote("192.0.2.25:27042"),
+        target="com.example.ios",
+        mode="attach",
+        scripts=[FridaSessionScript("script-1", "remote", "send('ok')")],
+    )
+    assert result.status == CapabilityStatus.AVAILABLE
+    assert calls == [("remote", "192.0.2.25:27042"), ("attach", "com.example.ios")]
+    assert result.transport == "remote"
+    assert result.endpoint == "192.0.2.25:27042"
+    await manager.stop("run-remote")
+
+
+def test_frida_attach_and_spawn_lifecycles_preserve_ordered_evidence(client):
+    demo = client.post("/api/demo/bootstrap").json()
+    common = {
+        "project_id": demo["project"]["id"],
+        "app_id": demo["app"]["id"],
+        "device_id": "mock-android-01",
+        "device_adapter": "mock",
+        "proxy_adapter": "mock",
+        "auto_select_frida": True,
+    }
+
+    attach_response = client.post(
+        "/api/runs",
+        json={**common, "options": {"frida_mode": "attach"}},
+    )
+    assert attach_response.status_code == 201
+    attach_run = _wait_for_status(
+        client, attach_response.json()["id"], {"completed", "failed"}
+    )
+    assert attach_run["status"] == "completed", attach_run.get("error")
+    attach_evidence = client.get(
+        f"/api/runs/{attach_run['id']}/evidence"
+    ).json()
+    attach_titles = [item["title"] for item in attach_evidence]
+    assert "Frida Attach 대상 프로세스 확인" in attach_titles
+    assert "Frida Attach 후 프로세스 유지 확인" in attach_titles
+    assert "Frida Spawn 전 앱 정상 종료" not in attach_titles
+
+    spawn_response = client.post(
+        "/api/runs",
+        json={**common, "options": {"frida_mode": "spawn"}},
+    )
+    assert spawn_response.status_code == 201
+    spawn_run = _wait_for_status(
+        client, spawn_response.json()["id"], {"completed", "failed"}
+    )
+    assert spawn_run["status"] == "completed", spawn_run.get("error")
+    spawn_evidence = client.get(
+        f"/api/runs/{spawn_run['id']}/evidence"
+    ).json()
+    ordered = sorted(spawn_evidence, key=lambda item: item["sequence"])
+    positions = {item["title"]: index for index, item in enumerate(ordered)}
+    assert positions["앱 실행 직후"] < positions["Frida Spawn 전 앱 정상 종료"]
+    assert (
+        positions["Frida Spawn 전 앱 정상 종료"]
+        < positions["Frida Spawn 전 프로세스 종료 확인"]
+        < positions["Frida Spawn 후 프로세스 실행 확인"]
+        < positions["우회 적용 후"]
+    )
+    script_evidence = next(
+        item for item in ordered if item["evidence_type"] == "frida_script"
+    )
+    lifecycle_ids = script_evidence["inline_data"]["lifecycle_evidence_ids"]
+    lifecycle_titles = {
+        item["title"] for item in ordered if item["id"] in lifecycle_ids
+    }
+    assert {
+        "우회 적용 전",
+        "Frida Spawn 전 앱 정상 종료",
+        "Frida Spawn 전 프로세스 종료 확인",
+        "Frida Spawn 후 프로세스 실행 확인",
+        "우회 적용 후",
+    } <= lifecycle_titles
+    transcript = next(
+        item
+        for item in ordered
+        if item["title"] == "Run 수명 Frida JSONL transcript"
+    )
+    assert transcript["mime_type"] == "application/x-ndjson"
+    assert spawn_run["options"]["frida_health"]["active"] is False
+    assert spawn_run["options"]["frida_health"]["transport"] == "usb"
+
+
+def test_frida_spawn_stop_failure_is_not_reported_as_success(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class StopFailingDevice(MockDeviceAdapter):
+        async def stop_app(self, device_id: str, package_name: str):
+            return DeviceOperation(
+                CapabilityStatus.FAILED,
+                "synthetic stop failure",
+                synthetic=True,
+            )
+
+    device = StopFailingDevice()
+    monkeypatch.setattr(
+        client.app.state.orchestrator,
+        "device_for_run",
+        lambda _db, _run: device,
+    )
+    demo = client.post("/api/demo/bootstrap").json()
+    response = client.post(
+        "/api/runs",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "device_id": "mock-android-01",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+            "auto_select_frida": True,
+            "options": {"frida_mode": "spawn"},
+        },
+    )
+    assert response.status_code == 201
+    run = _wait_for_status(client, response.json()["id"], {"completed", "failed"})
+    assert run["status"] == "failed"
+    assert "Spawn 전 앱 종료 실패" in run["error"]
+    assert not client.app.state.orchestrator.frida_sessions.is_active(run["id"])
 
 
 def _live_artifact_from_demo(client) -> tuple[Project, AppArtifact]:
@@ -642,6 +920,20 @@ async def test_mobsf_http_transport_uses_pinned_peer_without_dns():
     finally:
         server.close()
         await server.wait_closed()
+
+
+def test_mobsf_private_transport_dependency_range_is_checked_at_startup():
+    compatible, message = check_mobsf_transport_compatibility(
+        httpx_version="0.28.1", httpcore_version="1.0.9"
+    )
+    assert compatible is True
+    assert "compatible" in message
+
+    incompatible, message = check_mobsf_transport_compatibility(
+        httpx_version="0.29.0", httpcore_version="1.1.0"
+    )
+    assert incompatible is False
+    assert "httpx>=0.28,<0.29" in message
 
 
 def test_websocket_ticket_is_run_scoped_and_single_use(client):

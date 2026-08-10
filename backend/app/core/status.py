@@ -42,6 +42,7 @@ class RunMode(StringEnum):
 
 
 class FindingVerdict(StringEnum):
+    CANDIDATE = "candidate"
     CONFIRMED = "confirmed"
     LIKELY = "likely"
     INFORMATIONAL = "informational"

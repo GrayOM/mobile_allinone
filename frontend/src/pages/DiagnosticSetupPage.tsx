@@ -101,6 +101,8 @@ export default function DiagnosticSetupPage() {
         options: {
           frida_mode: data.get("frida_mode"),
           runtime_tool: data.get("runtime_tool"),
+          auto_navigation: data.get("auto_navigation") === "on",
+          dynamic_storage: data.get("dynamic_storage") === "on",
           auto_ai_script_candidate:
             data.get("auto_ai_script_candidate") === "on",
           simulate_nvidia_failure: data.get("simulate_nvidia_failure") === "on",
@@ -291,6 +293,20 @@ export default function DiagnosticSetupPage() {
           <div className="setup-content">
             <h3>사용자 개입과 AI 테스트</h3>
             <div className="option-row">
+              {selectedApp?.platform === "android" && (
+                <>
+                  <label className="toggle-line">
+                    <input type="checkbox" name="auto_navigation" defaultChecked />
+                    <span />
+                    <div><strong>저위험 UI 자동 탐색</strong><small>UIAutomator Tree에 실제 존재하는 요소만 실행하며 결제·송금·삭제 등은 승인 대기로 분리합니다.</small></div>
+                  </label>
+                  <label className="toggle-line">
+                    <input type="checkbox" name="dynamic_storage" defaultChecked />
+                    <span />
+                    <div><strong>앱 저장소 Before/After</strong><small>Root Android에서 대상 package의 /data/data 범위만 수집하고 SQLite Preview는 기본 마스킹합니다.</small></div>
+                  </label>
+                </>
+              )}
               <label className="toggle-line">
                 <input type="checkbox" name="pause_for_login" />
                 <span />

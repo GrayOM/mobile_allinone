@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import hashlib
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,9 +13,10 @@ from sqlalchemy.orm import Session
 
 from backend.app.ai import AIProviderChain, MockAIProvider
 from backend.app.ai.storage import save_ai_raw_response
+from backend.app.ai.masking import mask_context
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.events import EventBus, event_bus
-from backend.app.core.status import CapabilityStatus, RunMode, RunStatus
+from backend.app.core.status import CapabilityStatus, Platform, RunMode, RunStatus
 from backend.app.core.targets import (
     normalize_platform,
     platform_for_adapter,
@@ -29,19 +31,35 @@ from backend.app.database.models import (
     Finding,
     FindingSource,
     FridaScript,
+    IOSDeviceProfile,
     Project,
     ProxyFlow,
 )
 from backend.app.database.session import SessionLocal
 from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDeviceAdapter
-from backend.app.evidence import EvidenceService
+from backend.app.evidence import EvidencePolicyEngine, EvidenceService
 from backend.app.frida import (
     FridaManager,
     FridaSessionManager,
     FridaSessionResult,
     FridaSessionScript,
+    FridaTarget,
 )
 from backend.app.frida.policy import is_safe_automatic_script, script_applies_to_app
+from backend.app.navigation import (
+    AndroidADBUIDriver,
+    MockAndroidUIDriver,
+    NavigationEngine,
+    NavigationHooks,
+    NavigationLimits,
+    NavigationResult,
+)
+from backend.app.network_testing import (
+    MockNetworkTestExecutor,
+    NetworkCandidateEngine,
+    NetworkExecution,
+    classify_proxy_flow,
+)
 from backend.app.proxy import (
     BurpProxyAdapter,
     FiddlerProxyAdapter,
@@ -49,6 +67,12 @@ from backend.app.proxy import (
     MockProxyAdapter,
 )
 from backend.app.runtime import DrozerRuntimeAdapter, ObjectionRuntimeAdapter
+from backend.app.storage import (
+    AndroidStorageCollector,
+    MockAndroidStorageCollector,
+    StorageCapture,
+    diff_snapshots,
+)
 from backend.app.orchestration.resources import ResourceLeaseManager, allocate_available_port
 
 
@@ -73,6 +97,7 @@ class DiagnosticOrchestrator:
         self.settings = settings or get_settings()
         self.events = events or event_bus
         self.evidence = EvidenceService(self.settings)
+        self.evidence_policy = EvidencePolicyEngine()
         self.frida = FridaManager(self.settings)
         self.frida_sessions = FridaSessionManager(self.settings)
         self.ai_chain = AIProviderChain(settings=self.settings)
@@ -265,6 +290,12 @@ class DiagnosticOrchestrator:
         )
 
     def _device(self, adapter: str):
+        """Resolve adapters that do not need run-scoped profile metadata.
+
+        Keep this narrow resolver as a compatibility seam for tests and local
+        deployments that replace a hardware adapter with an explicit fixture.
+        Run-aware iOS SSH profiles are resolved by :meth:`device_for_run`.
+        """
         if adapter == "android_adb":
             return AndroidDeviceAdapter(self.settings)
         if adapter == "ios_windows":
@@ -272,6 +303,104 @@ class DiagnosticOrchestrator:
         if adapter == "mock":
             return MockDeviceAdapter()
         raise ValueError(f"지원하지 않는 단말 Adapter입니다: {adapter}")
+
+    def device_for_run(self, db: Session, run: DiagnosticRun):
+        adapter = run.device_adapter
+        if adapter == "ios_windows":
+            if run.device_id.startswith("ios-ssh:"):
+                profiles = db.scalars(select(IOSDeviceProfile)).all()
+                profile = next(
+                    (
+                        item
+                        for item in profiles
+                        if IOSDeviceAdapter.ssh_device_id(item.host, item.ssh_port)
+                        == run.device_id
+                    ),
+                    None,
+                )
+                if profile:
+                    return IOSDeviceAdapter(
+                        self.settings,
+                        host=profile.host,
+                        port=profile.ssh_port,
+                        username=profile.username,
+                        frida_endpoint=profile.frida_endpoint,
+                        profile_id=profile.id,
+                        profile_name=profile.name,
+                        include_usb=False,
+                    )
+                ssh_host = os.getenv("MSW_IOS_SSH_HOST")
+                ssh_port = int(os.getenv("MSW_IOS_SSH_PORT", "22"))
+                if (
+                    ssh_host
+                    and IOSDeviceAdapter.ssh_device_id(ssh_host, ssh_port)
+                    == run.device_id
+                ):
+                    return IOSDeviceAdapter(
+                        self.settings,
+                        host=ssh_host,
+                        port=ssh_port,
+                        username=os.getenv("MSW_IOS_SSH_USER", "root"),
+                        frida_endpoint=os.getenv("MSW_IOS_FRIDA_ENDPOINT"),
+                        profile_name="environment",
+                        include_usb=False,
+                    )
+                raise ValueError("등록된 iOS SSH 단말 프로필을 찾을 수 없습니다.")
+            return self._device(adapter)
+        if adapter == "mock":
+            device = self._device(adapter)
+            if type(device) is MockDeviceAdapter:
+                device.platform = (
+                    Platform.MOCK_IOS
+                    if "ios" in run.device_id.lower()
+                    else Platform.MOCK_ANDROID
+                )
+            return device
+        return self._device(adapter)
+
+    @staticmethod
+    def frida_target_for_device(device, device_id: str) -> FridaTarget:
+        resolver = getattr(device, "frida_target", None)
+        if callable(resolver):
+            return resolver(device_id)
+        return FridaTarget.usb(device_id)
+
+    def ui_driver_for_run(
+        self, run: DiagnosticRun, device, package_name: str
+    ):
+        if run.device_adapter == "mock" and "ios" not in run.device_id.lower():
+            return MockAndroidUIDriver(
+                run.device_id,
+                package_name=package_name,
+                device_adapter=device,
+            )
+        if run.device_adapter == "android_adb":
+            return AndroidADBUIDriver(
+                run.device_id,
+                settings=self.settings,
+                device_adapter=(
+                    device if isinstance(device, AndroidDeviceAdapter) else None
+                ),
+            )
+        return None
+
+    def storage_collector_for_run(
+        self,
+        run: DiagnosticRun,
+        package_name: str,
+        *,
+        privileged: bool | None,
+    ):
+        if run.device_adapter == "mock" and "ios" not in run.device_id.lower():
+            return MockAndroidStorageCollector(package_name)
+        if run.device_adapter == "android_adb":
+            return AndroidStorageCollector(
+                run.device_id,
+                package_name,
+                privileged=privileged,
+                settings=self.settings,
+            )
+        return None
 
     def _proxy(self, run: DiagnosticRun):
         adapter = run.proxy_adapter
@@ -365,6 +494,291 @@ class DiagnosticOrchestrator:
         )
         await self._emit_evidence(run_id, evidence)
         return evidence
+
+    async def _run_navigation(
+        self,
+        db: Session,
+        run: DiagnosticRun,
+        device,
+        package_name: str,
+    ) -> tuple[NavigationResult, Evidence]:
+        driver = self.ui_driver_for_run(run, device, package_name)
+        if driver is None:
+            result = NavigationResult(
+                status=CapabilityStatus.UNSUPPORTED.value,
+                message="현재 플랫폼에는 자동 UI 탐색 Driver가 없습니다.",
+                termination_reason="unsupported",
+                states=[],
+                actions=[],
+                pending_approval=[],
+                limits=NavigationLimits.from_options(
+                    run.options.get("navigation_limits")
+                ),
+                started_at=datetime.now(timezone.utc).isoformat(),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                synthetic=run.synthetic,
+            )
+            graph = self.evidence.add_json(
+                db,
+                run_id=run.id,
+                filename="navigation-graph.json",
+                title="자동 UI 탐색 그래프",
+                evidence_type="navigation_graph",
+                data=result.to_dict(),
+                description=result.message,
+            )
+            await self._emit_evidence(run.id, graph)
+            return result, graph
+
+        async def before_action(sequence, state, candidate):
+            evidence_ids: list[str] = []
+            screen_path = self.evidence.run_dir(run.id) / (
+                f"navigation-{sequence:03d}-before.png"
+            )
+            screenshot = await driver.screenshot(screen_path)
+            screen_evidence = await self._record_operation(
+                db,
+                run.id,
+                f"UI 동작 {sequence:03d} · Before Screenshot",
+                screenshot,
+                "screenshot",
+            )
+            evidence_ids.append(screen_evidence.id)
+            tree = self.evidence.add_json(
+                db,
+                run_id=run.id,
+                filename=f"navigation-{sequence:03d}-before-ui.json",
+                title=f"UI 동작 {sequence:03d} · Before UI Tree",
+                evidence_type="ui_tree",
+                data={
+                    "phase": "before",
+                    "candidate": candidate.to_dict(),
+                    "state": state.to_dict(),
+                    "raw_xml": state.raw_xml,
+                },
+            )
+            await self._emit_evidence(run.id, tree)
+            evidence_ids.append(tree.id)
+            return evidence_ids
+
+        async def after_action(
+            sequence, state, candidate, operation, after_state, before_ids
+        ):
+            del before_ids
+            evidence_ids: list[str] = []
+            action_evidence = await self._record_operation(
+                db,
+                run.id,
+                f"UI 동작 {sequence:03d} · {candidate.label}",
+                operation,
+                "navigation_action",
+            )
+            evidence_ids.append(action_evidence.id)
+            screen_path = self.evidence.run_dir(run.id) / (
+                f"navigation-{sequence:03d}-after.png"
+            )
+            screenshot = await driver.screenshot(screen_path)
+            screen_evidence = await self._record_operation(
+                db,
+                run.id,
+                f"UI 동작 {sequence:03d} · After Screenshot",
+                screenshot,
+                "screenshot",
+            )
+            evidence_ids.append(screen_evidence.id)
+            if after_state is not None:
+                triggers = self.evidence_policy.transition_triggers(
+                    state, after_state
+                )
+                tree = self.evidence.add_json(
+                    db,
+                    run_id=run.id,
+                    filename=f"navigation-{sequence:03d}-after-ui.json",
+                    title=f"UI 동작 {sequence:03d} · After UI Tree",
+                    evidence_type="ui_tree",
+                    data={
+                        "phase": "after",
+                        "candidate": candidate.to_dict(),
+                        "state": after_state.to_dict(),
+                        "evidence_triggers": triggers,
+                        "raw_xml": after_state.raw_xml,
+                    },
+                )
+                await self._emit_evidence(run.id, tree)
+                evidence_ids.append(tree.id)
+            return evidence_ids
+
+        async def navigation_update(data: dict[str, object]) -> None:
+            await self.events.publish(run.id, "navigation", data)
+
+        engine = NavigationEngine(
+            driver,
+            target_package=package_name,
+            limits=NavigationLimits.from_options(
+                run.options.get("navigation_limits")
+            ),
+            hooks=NavigationHooks(
+                before_action=before_action,
+                after_action=after_action,
+                on_update=navigation_update,
+            ),
+            synthetic=run.synthetic,
+        )
+        result = await engine.run()
+        graph = self.evidence.add_json(
+            db,
+            run_id=run.id,
+            filename="navigation-graph.json",
+            title="자동 UI 탐색 그래프",
+            evidence_type="navigation_graph",
+            data=result.to_dict(include_elements=True),
+            description=result.message,
+        )
+        await self._emit_evidence(run.id, graph)
+        return result, graph
+
+    async def _record_storage_capture(
+        self,
+        db: Session,
+        run: DiagnosticRun,
+        phase: str,
+        capture: StorageCapture,
+    ) -> list[Evidence]:
+        recorded: list[Evidence] = []
+        snapshot = capture.snapshot
+        if capture.archive_path:
+            archive_evidence = self.evidence.add(
+                db,
+                run_id=run.id,
+                evidence_type="storage_archive",
+                title=f"앱 전용 저장소 원본 · {phase}",
+                description=capture.message,
+                file_path=capture.archive_path,
+                mime_type="application/x-tar",
+                command=capture.command,
+                inline_data={
+                    "phase": phase,
+                    "status": capture.status,
+                    "package": snapshot.package_name if snapshot else None,
+                    "root": snapshot.root if snapshot else None,
+                    "file_count": len(snapshot.files) if snapshot else 0,
+                    "synthetic": capture.synthetic,
+                },
+            )
+            await self._emit_evidence(run.id, archive_evidence)
+            recorded.append(archive_evidence)
+        metadata = self.evidence.add_json(
+            db,
+            run_id=run.id,
+            filename=f"storage-{phase}.json",
+            title=f"앱 전용 저장소 구조 · {phase}",
+            evidence_type="storage_snapshot",
+            data=capture.to_dict(),
+            description=capture.message,
+            command=capture.command,
+        )
+        await self._emit_evidence(run.id, metadata)
+        recorded.append(metadata)
+        return recorded
+
+    async def _run_network_testing(
+        self,
+        db: Session,
+        run: DiagnosticRun,
+        flows,
+        flow_rows: list[ProxyFlow],
+    ) -> tuple[dict[str, Any], Evidence]:
+        analyses = []
+        candidates = []
+        executions: list[NetworkExecution] = []
+        engine = NetworkCandidateEngine()
+        mock_executor = MockNetworkTestExecutor()
+        source_by_id = {}
+        bounded_pairs = list(zip(flows, flow_rows))[
+            : self.settings.network_analysis_max_flows
+        ]
+        for flow, row in bounded_pairs:
+            analysis = classify_proxy_flow(flow, source_flow_id=row.id)
+            analyses.append(analysis)
+            source_by_id[row.id] = flow
+            remaining = self.settings.network_candidate_max_count - len(candidates)
+            if remaining <= 0:
+                break
+            candidates.extend(engine.generate(analysis)[:remaining])
+
+        for candidate in candidates:
+            source = source_by_id[candidate.source_flow_id]
+            if candidate.requires_approval or not candidate.auto_executable:
+                candidate.status = "pending_approval"
+                continue
+            if run.run_mode == RunMode.MOCK.value:
+                execution = await mock_executor.execute(candidate, source)
+            elif candidate.test_type == "passive_metadata":
+                execution = NetworkExecution(
+                    candidate_id=candidate.id,
+                    status=CapabilityStatus.AVAILABLE.value,
+                    message="외부 전송 없이 캡처된 Flow metadata를 로컬 분류했습니다.",
+                    synthetic=False,
+                )
+            else:
+                candidate.status = "pending_approval"
+                continue
+            executions.append(execution)
+            candidate.status = (
+                "executed"
+                if execution.status == CapabilityStatus.AVAILABLE.value
+                else execution.status
+            )
+
+        pending = [item for item in candidates if item.requires_approval]
+        payload = {
+            "status": CapabilityStatus.AVAILABLE.value,
+            "message": (
+                f"Flow {len(analyses)}건에서 Candidate {len(candidates)}건을 만들고 "
+                f"로컬·Mock 안전 작업 {len(executions)}건을 실행했습니다."
+            ),
+            "flow_count": len(analyses),
+            "candidate_count": len(candidates),
+            "executed_count": len(executions),
+            "pending_count": len(pending),
+            "analyses": [item.to_dict() for item in analyses],
+            "candidates": [item.to_dict() for item in candidates],
+            "executions": [item.to_dict() for item in executions],
+            "pending_approval": [item.to_dict() for item in pending],
+            "synthetic": run.synthetic,
+            "truncated": (
+                len(flows) > len(analyses)
+                or len(candidates) >= self.settings.network_candidate_max_count
+            ),
+        }
+        evidence = self.evidence.add_json(
+            db,
+            run_id=run.id,
+            filename="network-testing.json",
+            title="API 진단 Candidate와 응답 비교",
+            evidence_type="network_test",
+            data=payload,
+            description=(
+                "상태 변경 요청과 Object 경계 후보는 실행하지 않고 승인 대기로 분리했습니다."
+            ),
+        )
+        await self._emit_evidence(run.id, evidence)
+        for execution in executions:
+            execution.evidence_ids.append(evidence.id)
+        payload["executions"] = [item.to_dict() for item in executions]
+        await self.events.publish(
+            run.id,
+            "network_testing",
+            {
+                "status": payload["status"],
+                "flow_count": payload["flow_count"],
+                "candidate_count": payload["candidate_count"],
+                "executed_count": payload["executed_count"],
+                "pending_count": payload["pending_count"],
+                "evidence_id": evidence.id,
+            },
+        )
+        return payload, evidence
 
     def _seed_run_controls(
         self, db: Session, run: DiagnosticRun, app: AppArtifact | None
@@ -558,7 +972,8 @@ class DiagnosticOrchestrator:
 
     async def _store_proxy_flows(
         self, db: Session, run: DiagnosticRun, proxy, flows
-    ) -> None:
+    ) -> list[ProxyFlow]:
+        rows: list[ProxyFlow] = []
         for item in flows:
             row = ProxyFlow(
                 run_id=run.id,
@@ -575,6 +990,8 @@ class DiagnosticOrchestrator:
                 captured_at=item.captured_at,
             )
             db.add(row)
+            db.flush()
+            rows.append(row)
             await self.events.publish(run.id, "proxy_flow", item.to_dict())
         db.commit()
         packet_evidence = self.evidence.add_json(
@@ -595,6 +1012,7 @@ class DiagnosticOrchestrator:
             summary=f"최종 프록시 흐름 {len(flows)}개를 TLS·인증서 고정 검증 증적으로 연결했습니다.",
             evidence_ids=[packet_evidence.id],
         )
+        return rows
 
     async def _capture(
         self, db: Session, run: DiagnosticRun, device, filename: str, title: str, description: str
@@ -621,6 +1039,34 @@ class DiagnosticOrchestrator:
             {"evidence_id": evidence.id, "url": f"/api/evidence/{evidence.id}/download"},
         )
         return evidence
+
+    @staticmethod
+    def _process_running(operation, package_name: str) -> bool:
+        return operation.status == CapabilityStatus.AVAILABLE and bool(
+            operation.data.get("running")
+            or operation.data.get("pids")
+            or package_name in operation.output
+        )
+
+    async def _wait_for_process_state(
+        self,
+        device,
+        device_id: str,
+        package_name: str,
+        *,
+        expected_running: bool,
+        attempts: int = 5,
+    ):
+        latest = None
+        for attempt in range(attempts):
+            latest = await device.process_info(device_id, package_name)
+            if latest.status != CapabilityStatus.AVAILABLE:
+                break
+            if self._process_running(latest, package_name) is expected_running:
+                break
+            if attempt + 1 < attempts:
+                await asyncio.sleep(0.25)
+        return latest
 
     async def _execute(self, run_id: str) -> None:
         proxy = None
@@ -703,7 +1149,7 @@ class DiagnosticOrchestrator:
                 )
                 await self._leases.acquire(run.id, run.device_id, proxy_port)
                 lease_acquired = True
-                device = self._device(run.device_adapter)
+                device = self.device_for_run(db, run)
                 proxy = self._proxy(run)
                 self._proxy_adapters[run.id] = proxy
                 self._seed_run_controls(db, run, app)
@@ -712,6 +1158,9 @@ class DiagnosticOrchestrator:
                 device_list = await device.discover()
                 if not any(item.id == run.device_id for item in device_list):
                     raise RuntimeError(f"선택한 단말을 찾을 수 없습니다: {run.device_id}")
+                selected_device_info = next(
+                    item for item in device_list if item.id == run.device_id
+                )
                 preflight = self.evidence.add_json(
                     db,
                     run_id=run.id,
@@ -719,9 +1168,7 @@ class DiagnosticOrchestrator:
                     title="진단 전 상태",
                     evidence_type="device_state",
                     data={
-                        "device": next(
-                            item.to_dict() for item in device_list if item.id == run.device_id
-                        ),
+                        "device": selected_device_info.to_dict(),
                         "app": {
                             "name": app.app_name if app else None,
                             "package": app.package_name if app else None,
@@ -876,7 +1323,7 @@ class DiagnosticOrchestrator:
                     summary="원본 실행 로그를 수집했습니다. 탐지 메시지와 종료 동작을 검토하세요.",
                     evidence_ids=[baseline_evidence.id],
                 )
-                await self._capture(
+                before_frida_screen = await self._capture(
                     db,
                     run,
                     device,
@@ -888,6 +1335,9 @@ class DiagnosticOrchestrator:
                 await self._stage(
                     db, run, "frida", 56, "승인된 Frida 스크립트를 선택하고 실행합니다."
                 )
+                frida_mode = str(run.options.get("frida_mode", "attach"))
+                if frida_mode not in {"spawn", "attach"}:
+                    raise RuntimeError("Frida 연결 방식은 spawn 또는 attach여야 합니다.")
                 selected_ids = list(run.options.get("frida_script_ids", []))
                 if selected_ids:
                     query = select(FridaScript).where(
@@ -932,10 +1382,16 @@ class DiagnosticOrchestrator:
                     eligible_scripts.append(script)
                 scripts = eligible_scripts
                 frida_script_rows = list(scripts)
+                after_frida_screen = None
                 if scripts:
                     event_loop = asyncio.get_running_loop()
 
                     def publish_frida_message(item: dict[str, Any]) -> None:
+                        masked_json, _ = mask_context(
+                            {"message": item}, self.settings.ai_sensitive_keys
+                        )
+                        masked_item = json.loads(masked_json)["message"]
+
                         def schedule() -> None:
                             asyncio.create_task(
                                 self.events.publish(
@@ -944,7 +1400,9 @@ class DiagnosticOrchestrator:
                                     {
                                         "status": CapabilityStatus.AVAILABLE.value,
                                         "persistent": True,
-                                        "messages": [item],
+                                        "messages": [masked_item],
+                                        "masked": True,
+                                        "health": self.frida_sessions.health(run.id),
                                     },
                                 )
                             )
@@ -959,7 +1417,82 @@ class DiagnosticOrchestrator:
                         )
                         for script in scripts
                     ]
-                    if self.frida_sessions.is_active(run.id):
+                    lifecycle_evidence_ids = (
+                        [before_frida_screen.id] if before_frida_screen else []
+                    )
+                    frida_target = None
+                    session_was_active = self.frida_sessions.is_active(run.id)
+                    if not session_was_active:
+                        try:
+                            frida_target = self.frida_target_for_device(
+                                device, run.device_id
+                            )
+                        except ValueError as exc:
+                            record_check("frida_session", False, str(exc))
+                            raise DiagnosticManualRequired(str(exc)) from exc
+
+                        if frida_mode == "spawn":
+                            stop_operation = await device.stop_app(
+                                run.device_id, package_name
+                            )
+                            stop_evidence = await self._record_operation(
+                                db,
+                                run.id,
+                                "Frida Spawn 전 앱 정상 종료",
+                                stop_operation,
+                            )
+                            lifecycle_evidence_ids.append(stop_evidence.id)
+                            if stop_operation.status == CapabilityStatus.MANUAL_REQUIRED:
+                                raise DiagnosticManualRequired(stop_operation.message)
+                            if stop_operation.status != CapabilityStatus.AVAILABLE:
+                                raise RuntimeError(
+                                    f"Frida Spawn 전 앱 종료 실패: {stop_operation.message}"
+                                )
+                            stopped_process = await self._wait_for_process_state(
+                                device,
+                                run.device_id,
+                                package_name,
+                                expected_running=False,
+                            )
+                            stopped_evidence = await self._record_operation(
+                                db,
+                                run.id,
+                                "Frida Spawn 전 프로세스 종료 확인",
+                                stopped_process,
+                            )
+                            lifecycle_evidence_ids.append(stopped_evidence.id)
+                            if stopped_process.status == CapabilityStatus.MANUAL_REQUIRED:
+                                raise DiagnosticManualRequired(stopped_process.message)
+                            if stopped_process.status != CapabilityStatus.AVAILABLE:
+                                raise RuntimeError(
+                                    "Frida Spawn 전 프로세스 종료 여부를 확인하지 못했습니다: "
+                                    f"{stopped_process.message}"
+                                )
+                            if self._process_running(stopped_process, package_name):
+                                raise RuntimeError(
+                                    "Frida Spawn 전 대상 앱 프로세스가 아직 실행 중입니다."
+                                )
+                        else:
+                            attach_process = await self._wait_for_process_state(
+                                device,
+                                run.device_id,
+                                package_name,
+                                expected_running=True,
+                            )
+                            attach_evidence = await self._record_operation(
+                                db,
+                                run.id,
+                                "Frida Attach 대상 프로세스 확인",
+                                attach_process,
+                            )
+                            lifecycle_evidence_ids.append(attach_evidence.id)
+                            if attach_process.status == CapabilityStatus.MANUAL_REQUIRED:
+                                raise DiagnosticManualRequired(attach_process.message)
+                            if not self._process_running(attach_process, package_name):
+                                raise RuntimeError(
+                                    "Frida Attach 직전 대상 앱 프로세스 실행을 확인하지 못했습니다."
+                                )
+                    if session_was_active:
                         self.frida_sessions.set_message_callback(
                             run.id, publish_frida_message
                         )
@@ -977,6 +1510,7 @@ class DiagnosticOrchestrator:
                             for item in load_results
                             for script_id, message in item.failed_scripts.items()
                         }
+                        active_health = self.frida_sessions.health(run.id)
                         execution = FridaSessionResult(
                             (
                                 CapabilityStatus.AVAILABLE
@@ -984,20 +1518,27 @@ class DiagnosticOrchestrator:
                                 else CapabilityStatus.FAILED
                             ),
                             "기존 Run 수명 Frida 세션에 자동 스크립트를 추가했습니다.",
-                            str(run.options.get("frida_mode", "attach")),
+                            str(
+                                active_health.get("mode", frida_mode)
+                            ),
                             package_name,
                             command="python-frida --persistent-load",
                             loaded_script_ids=list(dict.fromkeys(loaded_ids)),
                             failed_scripts=failed_scripts,
-                            messages=self.frida_sessions.snapshot(run.id),
+                            messages=self.frida_sessions.snapshot(run.id, limit=20),
+                            transport=str(active_health.get("transport") or ""),
+                            device_id=active_health.get("device_id"),
+                            endpoint=active_health.get("endpoint"),
+                            transcript_path=active_health.get("transcript_path"),
+                            stats=active_health,
                         )
                     else:
                         execution = await self.frida_sessions.start(
                             run_id=run.id,
-                            device_id=run.device_id,
+                            frida_target=frida_target,
                             target=package_name,
                             scripts=session_scripts,
-                            mode=str(run.options.get("frida_mode", "attach")),
+                            mode=frida_mode,
                             mock=run.device_adapter == "mock",
                             on_message=publish_frida_message,
                         )
@@ -1012,6 +1553,57 @@ class DiagnosticOrchestrator:
                         frida_ok,
                         execution.message,
                     )
+                    if frida_ok and not session_was_active:
+                        if frida_mode == "spawn":
+                            note_resume = getattr(
+                                device, "note_frida_spawn_resumed", None
+                            )
+                            if callable(note_resume):
+                                note_resume(package_name)
+                        resumed_process = await self._wait_for_process_state(
+                            device,
+                            run.device_id,
+                            package_name,
+                            expected_running=True,
+                        )
+                        resumed_evidence = await self._record_operation(
+                            db,
+                            run.id,
+                            (
+                                "Frida Spawn 후 프로세스 실행 확인"
+                                if frida_mode == "spawn"
+                                else "Frida Attach 후 프로세스 유지 확인"
+                            ),
+                            resumed_process,
+                        )
+                        lifecycle_evidence_ids.append(resumed_evidence.id)
+                        process_resumed = self._process_running(
+                            resumed_process, package_name
+                        )
+                        if not process_resumed:
+                            frida_ok = False
+                            record_check(
+                                "frida_session",
+                                False,
+                                (
+                                    "Frida Spawn/Attach 후 대상 앱 프로세스 실행을 "
+                                    "확인하지 못했습니다."
+                                ),
+                            )
+                    after_frida_screen = await self._capture(
+                        db,
+                        run,
+                        device,
+                        "03-after-frida.png",
+                        "우회 적용 후",
+                        "Frida 연결 후 앱 실행 상태입니다. 성공 여부는 프로세스와 로그 증적을 함께 검토합니다.",
+                    )
+                    if after_frida_screen:
+                        lifecycle_evidence_ids.append(after_frida_screen.id)
+                    health = self.frida_sessions.health(run.id)
+                    options = dict(run.options)
+                    options["frida_health"] = health
+                    run.options = options
                     for script in scripts:
                         script_loaded = script.id in loaded
                         if not run.synthetic and script_loaded:
@@ -1031,6 +1623,12 @@ class DiagnosticOrchestrator:
                                 "content": script.content,
                                 "persistent_until_run_end": True,
                                 "loaded": script_loaded,
+                                "lifecycle_evidence_ids": lifecycle_evidence_ids,
+                                "transport": {
+                                    "type": execution.transport,
+                                    "device_id": execution.device_id,
+                                    "endpoint": execution.endpoint,
+                                },
                                 "result": execution.to_dict(),
                             },
                         )
@@ -1066,6 +1664,11 @@ class DiagnosticOrchestrator:
                     # session callback; do not replay the full snapshot here.
                     execution_event["messages"] = []
                     await self.events.publish(run.id, "frida_log", execution_event)
+                    await self.events.publish(run.id, "frida_health", health)
+                    if not frida_ok:
+                        raise RuntimeError(
+                            f"Frida {frida_mode} lifecycle 검증 실패: {execution.message}"
+                        )
                 else:
                     record_check(
                         "frida_session",
@@ -1104,14 +1707,45 @@ class DiagnosticOrchestrator:
                     await self.events.publish(
                         run.id, "runtime_tool", runtime_result.to_dict()
                     )
-                await self._capture(
-                    db,
-                    run,
-                    device,
-                    "03-after-frida.png",
-                    "우회 적용 후",
-                    "Frida 스크립트 적용 후 앱 상태입니다. 성공 여부는 로그와 함께 검토합니다.",
-                )
+                if after_frida_screen is None:
+                    await self._capture(
+                        db,
+                        run,
+                        device,
+                        "03-after-frida.png",
+                        "Frida 미적용 상태",
+                        "선택된 Frida 스크립트가 없는 앱 실행 상태입니다.",
+                    )
+
+                storage_enabled = bool(run.options.get("dynamic_storage"))
+                storage_collector = None
+                storage_before: StorageCapture | None = None
+                storage_evidence_ids: list[str] = []
+                if storage_enabled and app_platform == "android":
+                    await self._stage(
+                        db,
+                        run,
+                        "dynamic_storage_before",
+                        61,
+                        "대상 package 범위의 조작 전 저장소 Snapshot을 수집합니다.",
+                    )
+                    storage_collector = self.storage_collector_for_run(
+                        run,
+                        package_name,
+                        privileged=selected_device_info.privileged,
+                    )
+                    if storage_collector is not None:
+                        storage_before = await storage_collector.capture(
+                            "before_interaction",
+                            self.evidence.run_dir(run.id)
+                            / "storage-before-interaction.tar",
+                        )
+                        before_records = await self._record_storage_capture(
+                            db, run, "before_interaction", storage_before
+                        )
+                        storage_evidence_ids.extend(
+                            item.id for item in before_records
+                        )
 
                 if run.options.get("pause_for_login"):
                     run.current_stage = "manual_interaction"
@@ -1131,20 +1765,194 @@ class DiagnosticOrchestrator:
                     record_check(
                         "app_interaction",
                         True,
-                        "사용자가 로그인·기능 조작 완료를 확인했습니다.",
+                        "사용자가 로그인 완료를 확인했습니다.",
                     )
-                elif run.run_mode == RunMode.LIVE.value:
+
+                navigation_enabled = run.options.get("auto_navigation")
+                if navigation_enabled is None:
+                    navigation_enabled = (
+                        run.run_mode == RunMode.MOCK.value
+                        and app_platform == "android"
+                    )
+                if navigation_enabled and app_platform == "android":
+                    await self._stage(
+                        db,
+                        run,
+                        "navigation",
+                        64,
+                        "UI Tree에서 저위험 화면 이동 후보를 자동 탐색합니다.",
+                    )
+                    navigation_result, navigation_graph = await self._run_navigation(
+                        db, run, device, package_name
+                    )
+                    navigation_summary = navigation_result.to_dict()
+                    navigation_summary["graph_evidence_id"] = navigation_graph.id
+                    options = dict(run.options)
+                    options["navigation"] = navigation_summary
+                    options["pending_navigation_actions"] = (
+                        navigation_result.pending_approval
+                    )
+                    run.options = options
+                    db.commit()
+                    navigation_ok = (
+                        navigation_result.status == CapabilityStatus.AVAILABLE.value
+                        and bool(navigation_result.states)
+                    )
+                    record_check(
+                        "navigation",
+                        navigation_ok,
+                        navigation_result.message,
+                    )
+                    if navigation_result.actions:
+                        record_check(
+                            "app_interaction",
+                            True,
+                            (
+                                f"위험 정책을 통과한 UI 동작 "
+                                f"{len(navigation_result.actions)}건을 실행했습니다."
+                            ),
+                        )
+                    elif not run.options.get("pause_for_login"):
+                        record_check(
+                            "app_interaction",
+                            False,
+                            "자동 실행 가능한 저위험 UI 동작을 찾지 못했습니다.",
+                        )
+                    await self.events.publish(
+                        run.id,
+                        "navigation_complete",
+                        navigation_summary,
+                    )
+                elif run.run_mode == RunMode.LIVE.value and not run.options.get(
+                    "pause_for_login"
+                ):
                     record_check(
                         "app_interaction",
                         False,
                         "자동 화면 탐색이나 사용자 기능 조작 확인이 없어 동적 진단 범위가 제한됩니다.",
                     )
-                else:
+                elif run.run_mode == RunMode.MOCK.value and app_platform != "android":
                     record_check(
                         "app_interaction",
                         True,
-                        "Mock 합성 동작을 수행했습니다.",
+                        "Mock iOS 합성 동작을 수행했습니다. iOS 자동 탐색은 아직 지원하지 않습니다.",
                     )
+
+                if storage_enabled and app_platform == "android":
+                    await self._stage(
+                        db,
+                        run,
+                        "dynamic_storage",
+                        68,
+                        "대상 package의 조작 후 저장소와 SQLite 구조 변화를 비교합니다.",
+                    )
+                    storage_after = (
+                        await storage_collector.capture(
+                            "after_interaction",
+                            self.evidence.run_dir(run.id)
+                            / "storage-after-interaction.tar",
+                        )
+                        if storage_collector is not None
+                        else StorageCapture(
+                            CapabilityStatus.UNSUPPORTED.value,
+                            "현재 단말에는 앱 전용 저장소 Collector가 없습니다.",
+                        )
+                    )
+                    after_records = await self._record_storage_capture(
+                        db, run, "after_interaction", storage_after
+                    )
+                    storage_evidence_ids.extend(item.id for item in after_records)
+                    changes = []
+                    diff_evidence = None
+                    if (
+                        storage_before
+                        and storage_before.snapshot
+                        and storage_after.snapshot
+                    ):
+                        changes = diff_snapshots(
+                            storage_before.snapshot, storage_after.snapshot
+                        )
+                        diff_evidence = self.evidence.add_json(
+                            db,
+                            run_id=run.id,
+                            filename="storage-diff.json",
+                            title="앱 전용 저장소 Before/After Diff",
+                            evidence_type="storage_diff",
+                            data={
+                                "package_name": package_name,
+                                "before_phase": storage_before.snapshot.phase,
+                                "after_phase": storage_after.snapshot.phase,
+                                "changes": [item.to_dict() for item in changes],
+                                "synthetic": run.synthetic,
+                            },
+                            description=(
+                                f"created/modified/deleted 파일 변화 {len(changes)}건을 식별했습니다."
+                            ),
+                        )
+                        await self._emit_evidence(run.id, diff_evidence)
+                        storage_evidence_ids.append(diff_evidence.id)
+                    storage_ok = (
+                        storage_before is not None
+                        and storage_before.status
+                        == CapabilityStatus.AVAILABLE.value
+                        and storage_after.status
+                        == CapabilityStatus.AVAILABLE.value
+                    )
+                    record_check(
+                        "dynamic_storage",
+                        storage_ok,
+                        (
+                            f"앱 전용 저장소 변화 {len(changes)}건을 비교했습니다."
+                            if storage_ok
+                            else storage_after.message
+                            or (storage_before.message if storage_before else "저장소 수집 실패")
+                        ),
+                    )
+                    after_snapshot = storage_after.snapshot
+                    options = dict(run.options)
+                    options["storage"] = {
+                        "status": (
+                            CapabilityStatus.AVAILABLE.value
+                            if storage_ok
+                            else storage_after.status
+                        ),
+                        "message": storage_after.message,
+                        "before_file_count": (
+                            len(storage_before.snapshot.files)
+                            if storage_before and storage_before.snapshot
+                            else 0
+                        ),
+                        "after_file_count": (
+                            len(after_snapshot.files) if after_snapshot else 0
+                        ),
+                        "change_count": len(changes),
+                        "changes": [item.to_dict() for item in changes[:500]],
+                        "databases": (
+                            [item.to_dict() for item in after_snapshot.databases[:50]]
+                            if after_snapshot
+                            else []
+                        ),
+                        "clipboard": (
+                            after_snapshot.clipboard if after_snapshot else {}
+                        ),
+                        "evidence_ids": storage_evidence_ids,
+                        "synthetic": run.synthetic,
+                    }
+                    run.options = options
+                    db.commit()
+                    if storage_evidence_ids:
+                        self._complete_controls(
+                            db,
+                            run.id,
+                            {"MASTG-TEST-0001"},
+                            result="needs_review" if storage_ok else "unknown",
+                            summary=(
+                                "앱 package 전용 저장소와 마스킹된 SQLite 구조를 비교했습니다."
+                                if storage_ok
+                                else "앱 전용 저장소 자동 수집을 완료하지 못했습니다."
+                            ),
+                            evidence_ids=storage_evidence_ids,
+                        )
 
                 await self._stage(
                     db, run, "network_dynamic", 70, "프록시 패킷과 동적 증적을 수집합니다."
@@ -1242,13 +2050,36 @@ class DiagnosticOrchestrator:
                 await self.events.publish(run.id, "proxy_status", stop_proxy.to_dict())
                 await asyncio.sleep(0.1)
                 flows = await proxy.read_flows(run.id)
-                await self._store_proxy_flows(db, run, proxy, flows)
+                flow_rows = await self._store_proxy_flows(db, run, proxy, flows)
                 record_check(
                     "proxy_capture",
                     bool(flows),
                     f"최종 프록시 흐름 {len(flows)}개를 저장했습니다."
                     if flows
                     else "프록시 흐름이 0개여서 네트워크 진단 범위를 확인할 수 없습니다.",
+                )
+                await self._stage(
+                    db,
+                    run,
+                    "network_testing",
+                    80,
+                    "ProxyFlow를 구조화하고 API 검증 Candidate의 승인 경계를 판정합니다.",
+                )
+                network_summary, network_evidence = await self._run_network_testing(
+                    db, run, flows, flow_rows
+                )
+                options = dict(run.options)
+                options["network_testing"] = network_summary
+                options["pending_network_tests"] = network_summary[
+                    "pending_approval"
+                ]
+                options["network_testing_evidence_id"] = network_evidence.id
+                run.options = options
+                db.commit()
+                record_check(
+                    "network_testing",
+                    bool(network_summary["flow_count"]),
+                    str(network_summary["message"]),
                 )
                 if self.frida_sessions.is_active(run.id) and not frida_session_started:
                     frida_session_started = True
@@ -1258,27 +2089,62 @@ class DiagnosticOrchestrator:
                         "수동 승인 Frida 스크립트를 Run 종료까지 유지했습니다.",
                     )
                 if frida_session_started:
-                    if not self.frida_sessions.is_healthy(run.id):
+                    session_healthy = self.frida_sessions.is_healthy(run.id)
+                    if not session_healthy:
                         record_check(
                             "frida_session",
                             False,
                             "동적·네트워크 진단이 끝나기 전에 Frida 세션이 분리되었습니다.",
                         )
-                    frida_messages = self.frida_sessions.snapshot(run.id)
-                    transcript = self.evidence.add_json(
-                        db,
-                        run_id=run.id,
-                        filename="frida-session-messages.json",
-                        title="Run 수명 Frida 세션 메시지",
-                        evidence_type="frida_session",
-                        data=frida_messages,
-                        description="앱 조작과 프록시 캡처가 끝날 때까지 유지한 단일 Frida 세션의 메시지입니다.",
-                        command=(
-                            f"python-frida -D {run.device_id} --{str(run.options.get('frida_mode', 'attach'))} "
-                            f"{package_name} --persistent"
-                        ),
+                    stop_result = await asyncio.shield(
+                        self.frida_sessions.stop(run.id)
                     )
-                    await self._emit_evidence(run.id, transcript)
+                    frida_session_started = False
+                    if stop_result:
+                        final_health = dict(stop_result.stats)
+                        final_health.update(
+                            {
+                                "active": False,
+                                "healthy": (
+                                    session_healthy
+                                    and stop_result.status
+                                    == CapabilityStatus.AVAILABLE
+                                ),
+                                "cleanup_status": stop_result.status.value,
+                            }
+                        )
+                        options = dict(run.options)
+                        options["frida_health"] = final_health
+                        run.options = options
+                        db.commit()
+                        await self.events.publish(
+                            run.id, "frida_health", final_health
+                        )
+                        transcript_path = Path(
+                            str(stop_result.transcript_path or "")
+                        )
+                        if transcript_path.is_file():
+                            transcript = self.evidence.add(
+                                db,
+                                run_id=run.id,
+                                title="Run 수명 Frida JSONL transcript",
+                                evidence_type="frida_session",
+                                file_path=transcript_path,
+                                mime_type="application/x-ndjson",
+                                description=(
+                                    "앱 조작과 프록시 캡처가 끝날 때까지 append 방식으로 "
+                                    "보존한 제한형 Frida 원문 transcript입니다."
+                                ),
+                                command=stop_result.command,
+                                inline_data={"health": final_health},
+                            )
+                            await self._emit_evidence(run.id, transcript)
+                        if stop_result.status != CapabilityStatus.AVAILABLE:
+                            record_check(
+                                "frida_session",
+                                False,
+                                stop_result.message,
+                            )
 
                 await self._stage(db, run, "ai_analysis", 84, "증적 후보를 분류합니다.")
                 evidence_rows = db.scalars(
@@ -1369,6 +2235,7 @@ class DiagnosticOrchestrator:
                 db.commit()
 
                 created_findings: list[Finding] = []
+                finding_policy_decisions: list[dict[str, Any]] = []
                 if ai_result and ai_result.analysis:
                     valid_evidence = {
                         item.id: item
@@ -1377,22 +2244,31 @@ class DiagnosticOrchestrator:
                         ).all()
                     }
                     for analysis in ai_result.analysis.findings:
-                        linked_ids = list(dict.fromkeys(
+                        proposed_ids = list(dict.fromkeys(
                             evidence_id
                             for evidence_id in analysis.evidence_ids
                             if evidence_id in valid_evidence
                         ))
                         requested_verdict = analysis.verdict.value
+                        policy_decision = self.evidence_policy.decide_finding(
+                            category=analysis.category,
+                            requested_verdict=requested_verdict,
+                            confidence=analysis.confidence,
+                            proposed_ids=proposed_ids,
+                            evidence_by_id=valid_evidence,
+                            minimum_quality=self.settings.ai_min_quality,
+                        )
+                        linked_ids = policy_decision.selected_ids
+                        verdict = policy_decision.effective_verdict
                         is_candidate = (
-                            analysis.confidence < self.settings.ai_min_quality
+                            verdict == "candidate"
+                            or analysis.confidence < self.settings.ai_min_quality
                             or not linked_ids
                         )
-                        if is_candidate or (
-                            requested_verdict == "confirmed" and not linked_ids
-                        ):
-                            verdict = "needs_review"
-                        else:
-                            verdict = requested_verdict
+                        missing_checks = [
+                            "confirmed 증적 필요: " + " 또는 ".join(group)
+                            for group in policy_decision.missing_requirements
+                        ]
                         finding = Finding(
                             project_id=project.id,
                             run_id=run.id,
@@ -1403,10 +2279,17 @@ class DiagnosticOrchestrator:
                             location=analysis.location,
                             verdict=verdict,
                             confidence=analysis.confidence,
-                            rationale=analysis.rationale,
+                            rationale=(
+                                f"{analysis.rationale}\n\nEvidence policy: "
+                                f"{policy_decision.explanation}"
+                            ),
                             reproduction=analysis.reproduction,
                             false_positive_risk=analysis.false_positive_risk,
-                            additional_checks=analysis.additional_checks,
+                            additional_checks=list(
+                                dict.fromkeys(
+                                    analysis.additional_checks + missing_checks
+                                )
+                            ),
                             source=(
                                 f"ai_candidate:{ai_result.provider}"
                                 if is_candidate
@@ -1424,12 +2307,26 @@ class DiagnosticOrchestrator:
                                 finding_id=finding.id,
                                 raw_finding_id=None,
                                 source_tool=f"ai:{ai_result.provider}",
-                                source_rule_id="ai.evidence_analysis",
+                                source_rule_id="ai.evidence_policy_v2",
                                 fingerprint=fingerprint,
                                 evidence_ids=linked_ids,
                             )
                         )
                         created_findings.append(finding)
+                        finding_policy_decisions.append(
+                            {
+                                "finding_id": finding.id,
+                                "category": analysis.category,
+                                "requested_verdict": requested_verdict,
+                                "effective_verdict": verdict,
+                                "proposed_evidence_ids": proposed_ids,
+                                "selected_evidence_ids": linked_ids,
+                                "missing_requirements": (
+                                    policy_decision.missing_requirements
+                                ),
+                                "explanation": policy_decision.explanation,
+                            }
+                        )
                         await self.events.publish(
                             run.id,
                             "finding",
@@ -1443,6 +2340,19 @@ class DiagnosticOrchestrator:
                             },
                         )
                     db.commit()
+                    policy_evidence = self.evidence.add_json(
+                        db,
+                        run_id=run.id,
+                        filename="finding-evidence-policy.json",
+                        title="Finding 증적 선택 정책",
+                        evidence_type="evidence_policy",
+                        data={
+                            "decisions": finding_policy_decisions,
+                            "synthetic": run.synthetic,
+                        },
+                        description="모든 Run 증적이 아니라 Finding 유형별 관련 증적만 선택했습니다.",
+                    )
+                    await self._emit_evidence(run.id, policy_evidence)
 
                 await self._stage(
                     db, run, "finalize", 96, "증적 인덱스를 검증하고 캡처를 종료합니다."

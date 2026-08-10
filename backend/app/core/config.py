@@ -100,6 +100,27 @@ class AppSettings(BaseModel):
     archive_max_nested_mb: int = 50
     external_tool_memory_mb: int = 2_048
     external_tool_cpu_seconds: int = 300
+    frida_message_buffer_size: int = Field(default=1_000, ge=500, le=2_000)
+    frida_message_max_bytes: int = Field(default=64 * 1_024, ge=512, le=4 * 1_024 * 1_024)
+    frida_transcript_max_bytes: int = Field(
+        default=64 * 1_024 * 1_024,
+        ge=1_024,
+        le=2 * 1_024 * 1_024 * 1_024,
+    )
+    frida_stream_events_per_second: int = Field(default=10, ge=1, le=1_000)
+    storage_archive_max_bytes: int = Field(
+        default=64 * 1_024 * 1_024,
+        ge=1_024 * 1_024,
+        le=512 * 1_024 * 1_024,
+    )
+    storage_database_max_bytes: int = Field(
+        default=50 * 1_024 * 1_024,
+        ge=1_024,
+        le=256 * 1_024 * 1_024,
+    )
+    storage_max_files: int = Field(default=20_000, ge=1, le=100_000)
+    network_analysis_max_flows: int = Field(default=500, ge=1, le=5_000)
+    network_candidate_max_count: int = Field(default=1_000, ge=1, le=10_000)
     mobsf_url: str | None = None
     mobsf_api_key: str | None = None
     mobsf_allowed_networks: list[str] = Field(

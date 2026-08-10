@@ -249,3 +249,172 @@ export interface LiveEvent {
   timestamp?: string;
   data: Record<string, unknown>;
 }
+
+export interface FridaHealth {
+  active: boolean;
+  healthy: boolean;
+  run_id: string;
+  mode?: string;
+  app_target?: string;
+  transport?: string;
+  device_id?: string | null;
+  endpoint?: string | null;
+  actual_device?: {
+    id?: string | null;
+    name?: string | null;
+    type?: string | null;
+  };
+  buffer_count?: number;
+  buffer_capacity?: number;
+  total_message_count?: number;
+  dropped_count?: number;
+  truncated_count?: number;
+  stream_sampled_count?: number;
+  transcript_bytes?: number;
+  transcript_max_bytes?: number;
+  cleanup_status?: string;
+  synthetic?: boolean;
+}
+
+export interface NavigationStateSummary {
+  fingerprint: string;
+  package: string;
+  activity: string;
+  window: string;
+  visible_text: string[];
+  text_hash: string;
+  captured_at: string;
+  element_count: number;
+}
+
+export interface NavigationActionSummary {
+  sequence: number;
+  action_type: string;
+  element_id: string | null;
+  label: string;
+  risk: string;
+  source_state: string;
+  destination_state: string | null;
+  result: CapabilityStatus;
+  message: string;
+  timestamp: string;
+  evidence_ids: string[];
+  synthetic: boolean;
+}
+
+export interface PendingNavigationAction {
+  action_type: string;
+  element_id: string;
+  label: string;
+  risk: string;
+  rationale: string;
+  requires_approval: boolean;
+  state_fingerprint: string;
+  package: string;
+  activity: string;
+  status: "pending_approval";
+  queued_at: string;
+}
+
+export interface NavigationSummary {
+  status: CapabilityStatus;
+  message: string;
+  termination_reason: string;
+  states: NavigationStateSummary[];
+  actions: NavigationActionSummary[];
+  pending_approval: PendingNavigationAction[];
+  state_count: number;
+  action_count: number;
+  graph_evidence_id?: string;
+  synthetic: boolean;
+}
+
+export interface StorageFileChange {
+  path: string;
+  category: string;
+  change_type: "created" | "modified" | "deleted";
+  before_size: number | null;
+  after_size: number | null;
+  before_sha256: string | null;
+  after_sha256: string | null;
+  size_changed: boolean;
+  hash_changed: boolean;
+}
+
+export interface StorageDatabaseArtifact {
+  path: string;
+  size: number;
+  sha256: string;
+  tables: Array<{
+    name: string;
+    columns: Array<{ name: string; type: string }>;
+    row_count: number;
+    preview: Array<Record<string, unknown>>;
+    masked: boolean;
+  }>;
+  masked: boolean;
+  status: CapabilityStatus;
+  message: string;
+}
+
+export interface StorageSummary {
+  status: CapabilityStatus;
+  message: string;
+  before_file_count: number;
+  after_file_count: number;
+  change_count: number;
+  changes: StorageFileChange[];
+  databases: StorageDatabaseArtifact[];
+  clipboard: Record<string, unknown>;
+  evidence_ids: string[];
+  synthetic: boolean;
+}
+
+export interface NetworkTestCandidateSummary {
+  id: string;
+  test_type: string;
+  source_flow_id: string;
+  method: string;
+  endpoint: string;
+  modified_fields: Array<Record<string, unknown>>;
+  expected_result: string;
+  risk: string;
+  requires_approval: boolean;
+  auto_executable: boolean;
+  rationale: string;
+  status: string;
+  synthetic: boolean;
+}
+
+export interface NetworkTestingSummary {
+  status: CapabilityStatus;
+  message: string;
+  flow_count: number;
+  candidate_count: number;
+  executed_count: number;
+  pending_count: number;
+  analyses: Array<{
+    source_flow_id: string;
+    method: string;
+    origin: string;
+    endpoint: string;
+    content_type: string;
+    auth_scheme: string | null;
+    cookie_names: string[];
+    object_id_candidates: Array<Record<string, unknown>>;
+    protocol_style: string;
+    sensitive_response_fields: string[];
+  }>;
+  candidates: NetworkTestCandidateSummary[];
+  executions: Array<{
+    candidate_id: string;
+    status: CapabilityStatus;
+    message: string;
+    comparison: Record<string, unknown> | null;
+    evidence_ids: string[];
+    synthetic: boolean;
+  }>;
+  pending_approval: NetworkTestCandidateSummary[];
+  synthetic: boolean;
+  truncated: boolean;
+}

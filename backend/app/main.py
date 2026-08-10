@@ -15,6 +15,7 @@ from backend.app.api.router import router
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.network import (
     approval_matches_destination,
+    check_mobsf_transport_compatibility,
     inspect_mobsf_destination,
 )
 from backend.app.core.security import ApiSecurityMiddleware, WebSocketTicketStore
@@ -75,6 +76,9 @@ async def _invalidate_changed_mobsf_approvals(settings: AppSettings) -> None:
 async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.ensure_directories()
+    transport_compatible, transport_message = check_mobsf_transport_compatibility()
+    if not transport_compatible:
+        raise RuntimeError(transport_message)
     init_database()
     with SessionLocal() as db:
         interrupted = db.scalars(

@@ -1,6 +1,6 @@
 # Mobile Security Workbench — 세션 인수인계
 
-> 최종 갱신: 2026-08-04
+> 최종 갱신: 2026-08-10
 > 작업 위치: `/mnt/c/Users/PSM/Desktop/project/mobile_allinone`
 > 새 세션에서는 이 파일을 먼저 읽고, 완료된 기능을 처음부터 다시 만들지 않는다.
 
@@ -140,7 +140,10 @@ tests/               단위·API·Mock E2E 테스트
 ### Frida와 AI
 
 - 내장 스크립트는 동작을 바꾸지 않는 저위험 관찰용이다.
-- 자동 진단의 Frida는 Python 바인딩으로 앱을 한 번 Spawn/Attach하고 여러 스크립트를 같은 Session에 로드한다. 메시지를 Run 전체에서 수집하며 로그인·동적·프록시 단계가 끝난 뒤 `finally`에서 Script unload와 Session detach를 수행한다.
+- 자동 진단의 Frida는 Python 바인딩으로 앱을 한 번 Spawn/Attach하고 여러 스크립트를 같은 Session에 로드한다. 메시지를 로그인·동적·프록시 단계까지 수집하고 정상 경로에서는 JSONL을 확정한 뒤 unload/detach하며, 중지·실패·취소 경로는 `finally`에서 정리한다.
+- Attach는 baseline 프로세스 실행을 재확인한 뒤 연결한다. Spawn은 baseline 증적 후 앱 종료·종료 확인·spawn·script load·resume·재실행 확인 순서로 진행하며 각 단계 증적 ID를 연결한다.
+- Frida 메시지는 최근 500~2000건 Ring Buffer와 Run별 append-only JSONL로 분리한다. Binary는 base64로 직렬화하고 개별/전체 크기 제한의 `dropped_count`, `truncated_count`를 Run health와 UI에 보존한다. WebSocket은 설정된 초당 빈도로 sampling한다.
+- iOS USB는 UDID transport를 사용하고, SSH 프로필은 검증된 `frida_endpoint`를 Python Frida `add_remote_device`에 실제 전달한다. 설정 route와 실제 연결 Device를 단말/Run UI에 표시한다.
 - 빈 Frida 선택은 “실행 안 함”이며 자동 선택은 별도 `auto_select_frida=true`에서만 동작한다.
 - 자동 진단은 대상 앱의 플랫폼·프레임워크·정적 신호와 맞는 `builtin + low` 스크립트만 실행한다. 사용자·AI·medium/high 스크립트는 `safely_paused` Run의 1회 승인 직접 실행만 허용한다.
 - 사용자 스크립트와 AI 후보는 `pending_approval`로 저장한다.
@@ -171,6 +174,15 @@ tests/               단위·API·Mock E2E 테스트
 - mitmproxy는 특정 Windows LAN IP에만 바인딩하고 진단 단말의 출발지 IP만 addon에서 허용한다.
 - 동적 테스트 종료 후 프록시 Stop·Flush·최종 Drain 순서로 패킷을 저장한다.
 - mitmdump Listener 바인딩 실패는 임계영역에서 새 포트를 할당해 최대 3회 재시도한다.
+
+### Android 자동 탐색·동적 저장소·API Candidate
+
+- `backend/app/navigation/`은 ADB UIAutomator XML 기반 `UIDriver`, 정규화 상태 fingerprint, 제한형 DFS, 위험 정책과 결정론적 Mock 화면 그래프를 제공한다. AI나 Planner가 좌표·Shell을 직접 실행하지 않으며 결제·송금·삭제·발송·계정/자격증명·시스템 설정 동작은 `pending_approval`로만 남긴다.
+- 허용 UI 동작은 Before Screenshot/UI Tree → Action → After Screenshot/UI Tree 순서와 Edge 증적 ID를 보존한다. 상태·깊이·동작·화면별 동작·반복·동작 시간·전체 시간 제한에는 서버 hard cap이 있다.
+- `backend/app/storage/`은 Root Android의 검증된 `/data/data/<package>`만 제한형 tar로 수집한다. Before/After 파일 diff와 SQLite table/column/row count 및 기본 마스킹 Preview를 제공한다. 일반 ADB Clipboard는 대상 앱 귀속이 불가능해 `unsupported`이며 Mock만 합성 변화 신호를 낸다.
+- `backend/app/network_testing/`은 ProxyFlow를 로컬 구조화한 뒤 실행 전 Candidate를 만든다. Live 재전송은 현재 승인 대기로 남고, Mock의 읽기 전용 합성 재현만 자동 실행한다. POST/PUT/PATCH/DELETE·업로드·Object 경계 후보는 자동 실행하지 않는다.
+- Finding 증적 정책은 범주별 required evidence group을 검사한다. 관련 증적이 없으면 `candidate`, confirmed 기준이 부족하면 `needs_review`이며 모든 Run Screenshot을 Finding에 연결하지 않는다.
+- 기본 `/api/runs/{id}/flows`와 Frida WebSocket은 마스킹한다. 인증된 `/api/runs/{id}/flows/raw`와 원본 Frida JSONL은 명시적 Raw 접근이다.
 
 ### 입력·외부 도구 방어
 
@@ -232,6 +244,8 @@ data/
 /api/runs/{id}/ws
 /api/runs/{id}/evidence
 /api/runs/{id}/flows
+/api/runs/{id}/flows/raw
+/api/runs/{id}/frida/health
 
 /api/frida/scripts
 /api/frida/scripts/generate
@@ -346,11 +360,11 @@ MSW_ENABLE_API_DOCS=false
 
 ## 9. 현재 검증 결과
 
-마지막 검증:
+마지막 검증(2026-08-10):
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          47 passed
+pytest -q                          69 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -370,6 +384,8 @@ npm audit --audit-level=high      0 vulnerabilities
 - Run 수명 Frida Session의 다중 스크립트 Load·Detach, 수동 프록시의 설정/최종 Import 순서, 필수 Stage 기반 완료 판정, 수동 작업 중 Stop 차단 회귀 테스트 통과
 - MobSF Snapshot IP 직접 연결·TLS peer 재검증과 AnalysisRun 활성화 실패 시 DB·`latest.json` 보존 회귀 테스트 통과
 - 1440×1000·390×844에서 인증된 Blob 증적 이미지(360px 원본), 다운로드, HTML 보고서를 확인하고 브라우저 콘솔 오류·경고 0건과 모바일 가로 넘침 0을 확인
+- 확장 Mock E2E에서 8개 UI 상태·14개 실행 동작·2개 승인 대기 동작, 파일 변화 3개·SQLite 1개, API Candidate 4개(3개 실행·1개 승인 대기)와 Finding 증적 연결을 확인
+- 자동 탐색·저장소·API Candidate 원장을 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건
 
 테스트 명령:
 
@@ -388,9 +404,13 @@ npm audit --audit-level=high
 - 제조사별 보안 솔루션·보안 키패드·RASP 전용 검증 Adapter
 - macOS가 필요한 IPA 서명·재서명
 - 모든 iOS 버전/단말 조합의 파일·화면 수집 보장
-- DB/SharedPreferences/Keychain 구조화 뷰어
-- 앱 실행 전후 파일 시스템 diff
+- iOS Keychain 구조화 뷰어와 Android app-specific external storage 수집
+- 실 Android Clipboard의 대상 앱 귀속 검증과 FLAG_SECURE/background snapshot 검증
+- 위험 UI 동작과 Live API Candidate의 1회 승인 후 실행 API·전용 승인 UI
+- Live API 재현 결과의 Response Comparator 실행과 허용된 테스트 계정/데이터 범위 관리
 - 사용자 승인형 딥링크·노출 컴포넌트 호출 전용 UI
+- NVIDIA/Claude UI Candidate ranking과 증적 선택 연동(현재 탐색은 로컬 결정론적 순위)
+- 프로젝트별 retention 설정과 Raw 데이터 열람 전용 UI
 - 장시간 Logcat·화면 녹화 스트리밍 제어 UI
 - 조직용 인증·역할·감사 로그
 
@@ -413,13 +433,13 @@ npm audit --audit-level=high
 
 사용자가 별도 우선순위를 주지 않으면 다음 순서가 합리적이다.
 
-1. DB/SharedPreferences/Keychain 구조화 뷰어와 민감정보 상관분석
-2. 실행 전후 파일 시스템 diff와 증적 연결
-3. 사용자 승인형 딥링크·노출 컴포넌트 호출 UI
-4. Burp/Fiddler 가져오기·세션 연동 강화
-5. 실제 iOS 단말 매트릭스별 검증과 AFC/HouseArrest 확장
-6. 제조사 보안통제용 플러그인형 검증 팩
-7. 장시간 수집 작업의 취소·재연결·스트리밍 제어
+1. 위험 UI 동작·Live API Candidate의 1회 승인 실행과 허용 테스트 범위 UI
+2. 사용자 승인형 딥링크·노출 컴포넌트 호출 및 Before/After 증적
+3. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
+4. NVIDIA/Claude UI 순위·증적 선택과 로컬 정책 실행기의 연동
+5. 프로젝트 retention·Raw 열람 UX와 저장 데이터 보호 확장
+6. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
+7. Burp/Fiddler 세션 연동과 장시간 수집의 취소·재연결 제어
 8. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
 
 ## 13. 참고 문서

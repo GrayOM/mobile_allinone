@@ -36,9 +36,21 @@ def test_mock_demo_runs_end_to_end(client):
     assert run["status"] == "completed", run["error"]
     assert run["run_mode"] == "mock"
     assert run["synthetic"] is True
+    assert run["options"]["navigation"]["state_count"] >= 2
+    assert run["options"]["navigation"]["action_count"] >= 1
+    assert any(
+        item["label"] == "송금"
+        for item in run["options"]["pending_navigation_actions"]
+    )
+    assert run["options"]["storage"]["change_count"] >= 1
+    assert run["options"]["storage"]["databases"][0]["masked"] is True
+    assert run["options"]["network_testing"]["executed_count"] >= 1
+    assert run["options"]["network_testing"]["pending_count"] >= 1
 
     evidence = client.get(f"/api/runs/{run['id']}/evidence").json()
     flows = client.get(f"/api/runs/{run['id']}/flows").json()
+    raw_flows_response = client.get(f"/api/runs/{run['id']}/flows/raw")
+    raw_flows = raw_flows_response.json()
     findings = client.get(f"/api/findings?run_id={run['id']}").json()
 
     assert len(evidence) >= 10
@@ -49,6 +61,10 @@ def test_mock_demo_runs_end_to_end(client):
     assert len(flows) == 2
     assert all(item["synthetic"] is True for item in evidence)
     assert all(item["synthetic"] is True for item in flows)
+    assert flows[0]["request_headers"]["Authorization"] == "[MASKED_FIELD]"
+    assert flows[0]["response_headers"]["Set-Cookie"] == "[MASKED_FIELD]"
+    assert raw_flows_response.headers["Cache-Control"] == "no-store"
+    assert raw_flows[0]["request_headers"]["Authorization"].startswith("Bearer mock-")
     assert findings and findings[0]["source"] == "ai:mock"
     assert findings[0]["synthetic"] is True
     sources = client.get(f"/api/findings/{findings[0]['id']}/sources").json()
