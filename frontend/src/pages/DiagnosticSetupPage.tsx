@@ -37,6 +37,13 @@ export default function DiagnosticSetupPage() {
   const [scripts, setScripts] = useState<FridaScript[]>([]);
   const [selectedScripts, setSelectedScripts] = useState<string[]>([]);
   const [autoSelectFrida, setAutoSelectFrida] = useState(false);
+  const [controlValidationEnabled, setControlValidationEnabled] = useState(false);
+  const [controlValidationDialogOpen, setControlValidationDialogOpen] = useState(false);
+  const [authorizationReference, setAuthorizationReference] = useState("");
+  const [scopeDescription, setScopeDescription] = useState("");
+  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
+  const [testEnvironmentConfirmed, setTestEnvironmentConfirmed] = useState(false);
+  const [testDataOnlyConfirmed, setTestDataOnlyConfirmed] = useState(false);
   const [guideNote, setGuideNote] = useState("");
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
@@ -106,6 +113,8 @@ export default function DiagnosticSetupPage() {
     setProxyAdapter(project.run_mode === "mock" ? "mock" : "mitmproxy");
     setSelectedScripts([]);
     setAutoSelectFrida(false);
+    setControlValidationEnabled(false);
+    setControlValidationDialogOpen(false);
     setGuideNote(
       project.run_mode === "mock"
         ? "Mock 데모에 맞는 안전한 기본값을 적용했습니다. 단말과 앱을 확인한 뒤 진단을 시작하세요."
@@ -136,6 +145,16 @@ export default function DiagnosticSetupPage() {
           runtime_tool: data.get("runtime_tool"),
           auto_navigation: data.get("auto_navigation") === "on",
           dynamic_storage: data.get("dynamic_storage") === "on",
+          ...(controlValidationEnabled ? {
+            control_validation: {
+              enabled: true,
+              authorization_reference: authorizationReference,
+              scope_description: scopeDescription,
+              authorized_scope_confirmed: authorizationConfirmed,
+              test_environment_confirmed: testEnvironmentConfirmed,
+              test_data_only_confirmed: testDataOnlyConfirmed,
+            },
+          } : {}),
           auto_ai_script_candidate:
             data.get("auto_ai_script_candidate") === "on",
           simulate_nvidia_failure: data.get("simulate_nvidia_failure") === "on",
@@ -387,6 +406,25 @@ export default function DiagnosticSetupPage() {
                 <span />
                 <div><strong>실패 시 AI 수정 후보 생성</strong><small>구문 검사 후 승인 대기 상태로만 저장하며 자동 실행하지 않습니다.</small></div>
               </label>
+              <label className="toggle-line">
+                <input
+                  type="checkbox"
+                  checked={controlValidationEnabled}
+                  disabled={project?.run_mode !== "live"}
+                  onChange={(event) => {
+                    if (event.target.checked) {
+                      setControlValidationDialogOpen(true);
+                    } else {
+                      setControlValidationEnabled(false);
+                    }
+                  }}
+                />
+                <span />
+                <div>
+                  <strong>승인된 통제 검증 모드</strong>
+                  <small>{project?.run_mode !== "live" ? "Live 진단에서만 사용할 수 있습니다." : controlValidationEnabled ? "승인 범위가 기록되며 관찰·증적 수집만 수행합니다." : "사용자 동의와 승인 범위를 기록한 뒤에만 활성화합니다."}</small>
+                </div>
+              </label>
             </div>
           </div>
         </section>
@@ -395,6 +433,7 @@ export default function DiagnosticSetupPage() {
         <span className="eyebrow">EXECUTION BOUNDARY</span>
         <h3>진단 시작 전 확인</h3>
         <div className="inline-alert">{project?.run_mode === "mock" ? "Mock 실행: 모든 결과가 SYNTHETIC으로 표시됩니다." : "Live 실행: Mock Adapter와 Mock AI는 차단됩니다."}</div>
+        {controlValidationEnabled && <div className="inline-alert inline-alert--ok"><strong>승인된 통제 검증</strong><br />승인 범위는 로컬 감사 증적으로만 보존됩니다. 자동 통제 무력화와 외부 AI 전송은 허용되지 않습니다.</div>}
         <ol>
           <li><span>1</span>소유하거나 명시적으로 진단 권한을 받은 앱·단말입니다.</li>
           <li><span>2</span>AI 생성 스크립트는 승인 전 실행되지 않습니다.</li>
@@ -405,6 +444,33 @@ export default function DiagnosticSetupPage() {
           {starting ? "실행 준비 중…" : "진단 실행"}
         </button>
       </aside>
+      {controlValidationDialogOpen && (
+        <div className="consent-dialog-backdrop" role="presentation">
+          <section className="consent-dialog panel" role="dialog" aria-modal="true" aria-labelledby="control-validation-title">
+            <span className="eyebrow">APPROVED CONTROL VALIDATION</span>
+            <h3 id="control-validation-title">승인 범위를 확인하세요</h3>
+            <p>이 모드는 루팅·탈옥·후킹 탐지와 앱의 대응을 관찰하고 원본 증적을 수집하기 위한 것입니다. 보안 솔루션을 자동으로 무력화하거나, 운영 계정·실제 고객 데이터에 접근하지 않습니다.</p>
+            <div className="field">
+              <label htmlFor="authorization-reference">승인 참조</label>
+              <input id="authorization-reference" value={authorizationReference} onChange={(event) => setAuthorizationReference(event.target.value)} placeholder="예: 고객사 티켓 또는 승인 문서 번호" maxLength={200} />
+              <small>고객사 또는 앱 소유자의 명시적 승인 기록을 식별할 수 있는 참조값을 입력하세요.</small>
+            </div>
+            <div className="field">
+              <label htmlFor="control-validation-scope">승인된 테스트 범위</label>
+              <textarea id="control-validation-scope" value={scopeDescription} onChange={(event) => setScopeDescription(event.target.value)} placeholder="테스트 단말, 대상 패키지, 테스트 계정·서버, 승인 기간을 적으세요." maxLength={1000} rows={4} />
+            </div>
+            <div className="consent-dialog__checks">
+              <label><input type="checkbox" checked={authorizationConfirmed} onChange={(event) => setAuthorizationConfirmed(event.target.checked)} /> 앱 소유자 또는 권한자의 명시적 진단 승인을 받았습니다.</label>
+              <label><input type="checkbox" checked={testEnvironmentConfirmed} onChange={(event) => setTestEnvironmentConfirmed(event.target.checked)} /> 승인된 테스트 단말·테스트 서버 범위에서만 실행합니다.</label>
+              <label><input type="checkbox" checked={testDataOnlyConfirmed} onChange={(event) => setTestDataOnlyConfirmed(event.target.checked)} /> 테스트 계정과 테스트 데이터만 사용하며 운영 고객 데이터에는 접근하지 않습니다.</label>
+            </div>
+            <div className="consent-dialog__actions">
+              <button className="button button--quiet" type="button" onClick={() => setControlValidationDialogOpen(false)}>취소</button>
+              <button className="button button--signal" type="button" disabled={!authorizationConfirmed || !testEnvironmentConfirmed || !testDataOnlyConfirmed || authorizationReference.trim().length < 4 || scopeDescription.trim().length < 10} onClick={() => { setControlValidationEnabled(true); setControlValidationDialogOpen(false); }}>동의하고 검증 모드 사용</button>
+            </div>
+          </section>
+        </div>
+      )}
     </form>
   );
 }

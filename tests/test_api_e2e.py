@@ -3,6 +3,12 @@ from __future__ import annotations
 import hashlib
 import time
 
+import pytest
+from fastapi import HTTPException
+
+from backend.app.api.router import _normalize_control_validation_options
+from backend.app.core.status import RunMode
+
 
 def _wait_for_run(client, run_id: str, timeout: float = 30):
     deadline = time.monotonic() + timeout
@@ -27,6 +33,38 @@ def test_healthcheck_is_minimal_and_available_without_frontend(client):
         "status": "ok",
         "version": "0.2.0",
     }
+
+
+def test_control_validation_requires_live_scope_and_full_attestation():
+    requested = {
+        "enabled": True,
+        "authorization_reference": "TICKET-2048",
+        "scope_description": "전용 루팅 Android 단말, 테스트 계정, 검증 서버만 사용",
+        "authorized_scope_confirmed": True,
+        "test_environment_confirmed": True,
+        "test_data_only_confirmed": True,
+    }
+    with pytest.raises(HTTPException, match="Live 진단"):
+        _normalize_control_validation_options(
+            {"control_validation": requested}, RunMode.MOCK
+        )
+
+    missing_scope = dict(requested)
+    missing_scope["test_data_only_confirmed"] = False
+    with pytest.raises(HTTPException, match="테스트 계정·데이터"):
+        _normalize_control_validation_options(
+            {"control_validation": missing_scope}, RunMode.LIVE
+        )
+
+    normalized = _normalize_control_validation_options(
+        {"control_validation": requested}, RunMode.LIVE
+    )
+    assert normalized is not None
+    assert normalized["mode"] == "authorized_control_validation"
+    assert normalized["execution_policy"] == "observation_only"
+    assert normalized["automatic_control_evasion"] is False
+    assert normalized["external_ai_excluded"] is True
+    assert normalized["consent_recorded_at"]
 
 
 def test_mock_demo_runs_end_to_end(client):

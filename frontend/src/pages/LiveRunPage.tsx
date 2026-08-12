@@ -45,6 +45,9 @@ export default function LiveRunPage() {
   const [run, setRun] = useState<DiagnosticRun | null>(null);
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [flows, setFlows] = useState<ProxyFlow[]>([]);
+  const [evidenceView, setEvidenceView] = useState<"raw" | "masked">(
+    () => localStorage.getItem("msw.evidenceView") === "masked" ? "masked" : "raw",
+  );
   const [findings, setFindings] = useState<Finding[]>([]);
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [fridaHealth, setFridaHealth] = useState<FridaHealth | null>(null);
@@ -54,12 +57,17 @@ export default function LiveRunPage() {
   const [actionError, setActionError] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
 
+  function selectEvidenceView(view: "raw" | "masked") {
+    localStorage.setItem("msw.evidenceView", view);
+    setEvidenceView(view);
+  }
+
   async function refresh() {
     const current = await api<DiagnosticRun>(`/runs/${runId}`);
     setRun(current);
     const [evidenceItems, flowItems, findingItems, health] = await Promise.all([
       api<Evidence[]>(`/runs/${runId}/evidence`),
-      api<ProxyFlow[]>(`/runs/${runId}/flows`),
+      api<ProxyFlow[]>(`/runs/${runId}/flows${evidenceView === "raw" ? "/raw" : ""}`),
       api<Finding[]>(`/findings?run_id=${runId}`),
       api<FridaHealth>(`/runs/${runId}/frida/health`),
     ]);
@@ -101,7 +109,7 @@ export default function LiveRunPage() {
       window.clearInterval(poll);
       wsRef.current?.close();
     };
-  }, [runId]);
+  }, [runId, evidenceView]);
 
   async function control(action: "pause" | "resume" | "stop") {
     setActionBusy(action);
@@ -178,6 +186,11 @@ export default function LiveRunPage() {
           <div><i style={{ width: `${run.progress}%` }} /></div>
           <strong>{run.progress}%</strong>
           <StatusChip value={run.status} />
+        </div>
+        <div className="live-evidence-mode" aria-label="증적 표시 방식">
+          <span>로컬 증적</span>
+          <button className={evidenceView === "raw" ? "is-active" : ""} type="button" onClick={() => selectEvidenceView("raw")}>원본</button>
+          <button className={evidenceView === "masked" ? "is-active" : ""} type="button" onClick={() => selectEvidenceView("masked")}>마스킹 보기</button>
         </div>
         <div className="live-controls">
           {run.status === "safely_paused" ? (
@@ -335,7 +348,7 @@ export default function LiveRunPage() {
             {fridaMessages.length ? fridaMessages.map((item, index) => (
               <div className="terminal-line" key={`${item.timestamp}-${index}`}>
                 <span>{formatDate(item.timestamp)}</span>
-                <code>{JSON.stringify(maskForDisplay(item.message))}</code>
+                <code>{JSON.stringify(evidenceView === "raw" ? item.message : maskForDisplay(item.message))}</code>
               </div>
             )) : (
               <div className="terminal-empty">$ Frida 메시지를 기다리는 중<span className="terminal-cursor" /></div>
@@ -512,11 +525,16 @@ export default function LiveRunPage() {
               <details className="packet-row" key={flow.id}>
                 <summary>
                   <span className={`method method--${flow.method.toLowerCase()}`}>{flow.method}</span>
-                  <strong>{safeUrl(flow.url)}</strong>
+                  <strong>{safeUrl(flow.url, evidenceView === "raw")}</strong>
                   <span className="http-status">{flow.status_code ?? "—"}</span>
                   {flow.sensitive_candidates.length > 0 && <i>{flow.sensitive_candidates.length} signal</i>}
                 </summary>
-                <pre>{JSON.stringify(maskForDisplay({
+                <pre>{JSON.stringify(evidenceView === "raw" ? {
+                  request: { headers: flow.request_headers, body: flow.request_body },
+                  response: { status: flow.status_code, headers: flow.response_headers, body: flow.response_body },
+                  source_ip: flow.source_ip,
+                  sensitive_candidates: flow.sensitive_candidates,
+                } : maskForDisplay({
                   request: { headers: flow.request_headers, body: flow.request_body },
                   response: { status: flow.status_code, headers: flow.response_headers, body: flow.response_body },
                   source_ip: flow.source_ip,
@@ -575,7 +593,8 @@ export default function LiveRunPage() {
   );
 }
 
-function safeUrl(value: string) {
+function safeUrl(value: string, raw = false) {
+  if (raw) return value;
   try {
     const url = new URL(value);
     return `${url.host}${url.pathname}`;

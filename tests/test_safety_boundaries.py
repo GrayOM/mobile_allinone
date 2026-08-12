@@ -662,3 +662,31 @@ def test_ai_confirmed_verdict_requires_evidence_and_platform_enum():
         AIFindingCandidate.model_validate(
             {**base, "platform": "windows", "evidence_ids": ["evidence"]}
         )
+
+
+def test_archive_safety_allows_flat_apk_resource_case_variants_only(tmp_path: Path):
+    settings = AppSettings()
+    android_apk = tmp_path / "compiled-resources.apk"
+    with zipfile.ZipFile(android_apk, "w") as archive:
+        archive.writestr("AndroidManifest.xml", b"manifest")
+        archive.writestr("res/HC.xml", b"one")
+        archive.writestr("res/hc.xml", b"two")
+    with zipfile.ZipFile(android_apk) as archive:
+        report = validate_archive(archive, settings)
+    assert report.entry_count == 3
+
+    unsafe_apk = tmp_path / "unsafe-case-collision.apk"
+    with zipfile.ZipFile(unsafe_apk, "w") as archive:
+        archive.writestr("assets/Config.json", b"one")
+        archive.writestr("assets/config.json", b"two")
+    with zipfile.ZipFile(unsafe_apk) as archive:
+        with pytest.raises(UnsafeArchiveError, match="대소문자만 다른 안전하지 않은 Entry"):
+            validate_archive(archive, settings)
+
+    unsafe_ipa = tmp_path / "unsafe-case-collision.ipa"
+    with zipfile.ZipFile(unsafe_ipa, "w") as archive:
+        archive.writestr("Payload/App.app/HC.xml", b"one")
+        archive.writestr("Payload/App.app/hc.xml", b"two")
+    with zipfile.ZipFile(unsafe_ipa) as archive:
+        with pytest.raises(UnsafeArchiveError, match="대소문자만 다른 안전하지 않은 Entry"):
+            validate_archive(archive, settings)

@@ -168,6 +168,64 @@ def _clear_mobsf_approval(project: Project) -> None:
     project.external_analyzer_certificate_sha256 = None
 
 
+def _normalize_control_validation_options(
+    options: dict[str, Any], run_mode: RunMode
+) -> dict[str, Any] | None:
+    """Validate a locally recorded, authorised control-validation request.
+
+    This mode records the user's approved test boundary for observation and
+    evidence collection. It never changes device security state or permits
+    automatic evasion of security controls.
+    """
+    raw = options.get("control_validation")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise HTTPException(422, "통제 검증 설정은 객체여야 합니다.")
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise HTTPException(422, "통제 검증 활성화 값은 boolean이어야 합니다.")
+    if not enabled:
+        return {
+            "enabled": False,
+            "execution_policy": "observation_only",
+            "automatic_control_evasion": False,
+            "external_ai_excluded": True,
+        }
+    if run_mode != RunMode.LIVE:
+        raise HTTPException(422, "통제 검증 모드는 실제 Live 진단에서만 사용할 수 있습니다.")
+
+    acknowledgement_fields = {
+        "authorized_scope_confirmed": "명시적 진단 권한 확인",
+        "test_environment_confirmed": "테스트 환경 확인",
+        "test_data_only_confirmed": "테스트 계정·데이터 확인",
+    }
+    for field, label in acknowledgement_fields.items():
+        if raw.get(field) is not True:
+            raise HTTPException(422, f"통제 검증에는 {label} 동의가 필요합니다.")
+
+    authorization_reference = raw.get("authorization_reference")
+    if not isinstance(authorization_reference, str) or not 4 <= len(authorization_reference.strip()) <= 200:
+        raise HTTPException(422, "승인 참조 값은 4~200자로 입력하세요.")
+    scope_description = raw.get("scope_description")
+    if not isinstance(scope_description, str) or not 10 <= len(scope_description.strip()) <= 1000:
+        raise HTTPException(422, "승인된 테스트 범위는 10~1000자로 입력하세요.")
+
+    return {
+        "enabled": True,
+        "mode": "authorized_control_validation",
+        "execution_policy": "observation_only",
+        "automatic_control_evasion": False,
+        "external_ai_excluded": True,
+        "authorization_reference": authorization_reference.strip(),
+        "scope_description": scope_description.strip(),
+        "authorized_scope_confirmed": True,
+        "test_environment_confirmed": True,
+        "test_data_only_confirmed": True,
+        "consent_recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _analysis_run_directory(
     settings: AppSettings, source_path: Path
 ) -> tuple[str, Path]:
@@ -1318,6 +1376,9 @@ async def create_run(
                 f"대상 앱 적용 조건을 충족하지 않는 Frida 스크립트입니다: {', '.join(not_applicable)}",
             )
     options = dict(payload.options)
+    control_validation = _normalize_control_validation_options(options, run_mode)
+    if control_validation is not None:
+        options["control_validation"] = control_validation
     frida_mode = str(options.get("frida_mode") or "attach")
     if frida_mode not in {"spawn", "attach"}:
         raise HTTPException(422, "Frida 연결 방식은 spawn 또는 attach여야 합니다.")
@@ -1434,6 +1495,22 @@ async def create_run(
     db.add(run)
     db.commit()
     db.refresh(run)
+    if control_validation and control_validation["enabled"]:
+        db.add(
+            Evidence(
+                run_id=run.id,
+                evidence_type="approval_record",
+                title="승인된 통제 검증 동의 기록",
+                description=(
+                    "사용자가 명시한 승인 범위에서 관찰·증적 수집만 수행합니다. "
+                    "보안 통제를 자동으로 무력화하거나 외부 AI에 승인 정보를 전송하지 않습니다."
+                ),
+                sequence=0,
+                inline_data=control_validation,
+                synthetic=False,
+            )
+        )
+        db.commit()
     _orchestrator(request).launch(run.id)
     return run
 

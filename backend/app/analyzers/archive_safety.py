@@ -32,6 +32,26 @@ class ArchiveSafetyReport:
         }
 
 
+def _allows_android_compiled_resource_case_variants(
+    archive: zipfile.ZipFile, path: PurePosixPath
+) -> bool:
+    """Permit only flat APK compiled-resource names that Android resolves exactly.
+
+    APK resource entries may legitimately differ only by case after AAPT2
+    compilation (for example, ``res/HC.xml`` and ``res/hc.xml``). The analyzer
+    reads archive members by their exact ZIP name and never extracts them onto a
+    case-insensitive filesystem. Keep the narrow exception out of arbitrary
+    archive paths and IPA files, where a case collision remains unsafe.
+    """
+    filename = str(getattr(archive, "filename", "") or "").lower()
+    return (
+        filename.endswith(".apk")
+        and len(path.parts) == 2
+        and path.parts[0] == "res"
+        and bool(path.suffix)
+    )
+
+
 def validate_archive(
     archive: zipfile.ZipFile, settings: AppSettings, *, _depth: int = 0
 ) -> ArchiveSafetyReport:
@@ -54,7 +74,8 @@ def validate_archive(
             f"전체 압축률 {total_ratio:.1f}:1이 제한 {settings.archive_max_total_ratio:.1f}:1을 초과했습니다."
         )
 
-    seen: set[str] = set()
+    seen_exact: set[str] = set()
+    seen_folded: dict[str, str] = {}
     nested: list[str] = []
     nested_bytes = 0
     max_entry = settings.archive_max_entry_mb * 1024 * 1024
@@ -71,10 +92,21 @@ def validate_archive(
             or (path.parts and ":" in path.parts[0])
         ):
             raise UnsafeArchiveError(f"비정상 압축 경로가 포함되어 있습니다: {raw_name!r}")
+        if normalized_name in seen_exact:
+            raise UnsafeArchiveError(f"중복 Entry가 있습니다: {raw_name}")
+        seen_exact.add(normalized_name)
         folded = normalized_name.casefold()
-        if folded in seen:
-            raise UnsafeArchiveError(f"중복되거나 대소문자만 다른 Entry가 있습니다: {raw_name}")
-        seen.add(folded)
+        previous_name = seen_folded.get(folded)
+        if previous_name and not (
+            _allows_android_compiled_resource_case_variants(archive, path)
+            and _allows_android_compiled_resource_case_variants(
+                archive, PurePosixPath(previous_name)
+            )
+        ):
+            raise UnsafeArchiveError(
+                f"대소문자만 다른 안전하지 않은 Entry가 있습니다: {raw_name}"
+            )
+        seen_folded[folded] = normalized_name
         if info.flag_bits & 0x1:
             raise UnsafeArchiveError(f"암호화된 Entry는 자동 분석하지 않습니다: {raw_name}")
         unix_mode = (info.external_attr >> 16) & 0xFFFF
