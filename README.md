@@ -43,6 +43,27 @@ run_windows.bat
 
 브라우저 주소는 기본 `http://127.0.0.1:8765`다. 서버는 기본적으로 loopback에만 바인딩된다.
 
+### Linux / macOS 로컬 실행
+
+Python 3.12, Node.js LTS와 npm이 설치된 POSIX 환경에서는 다음 스크립트로 의존성 설치·프론트엔드 빌드·로컬 서버 실행을 한 번에 수행할 수 있다.
+
+```bash
+chmod +x scripts/run.sh
+./scripts/run.sh --install
+```
+
+이후 실행은 `./scripts/run.sh`만 사용한다. 기본값은 `127.0.0.1:8765`이며, `--host`와 `--port`로 명시적으로 바꿀 수 있다. loopback 이외의 주소에 바인딩하려면 `.env`에서 `MSW_LAN_ACCESS=true`와 32자 이상의 `MSW_API_TOKEN`, `MSW_ADMIN_TOKEN`을 함께 설정해야 한다. 진단 원본과 증적은 민감할 수 있으므로 별도 인증 없이 LAN이나 인터넷에 노출하지 않는다.
+
+### Docker Mock 데모
+
+Docker는 하드웨어 단말·ADB·Frida Server 접근을 대신하지 않으며, **Mock 데모와 웹 UI를 안전하게 검토하는 용도**로 제공된다.
+
+```bash
+docker compose up --build
+```
+
+Compose 구성은 호스트의 `127.0.0.1:8765`에만 포트를 공개하고 `./data`를 컨테이너의 영속 데이터 디렉터리로 연결한다. 컨테이너 상태는 `http://127.0.0.1:8765/healthz`에서 확인할 수 있다. `docker run -p 8765:8765`처럼 모든 네트워크 인터페이스에 포트를 노출하는 명령은 사용하지 않는다.
+
 추가 OSS 도구는 기본 설치와 분리되어 있다. 라이선스와 플랫폼 요구사항을 검토한 뒤 필요한 도구만 선택한다.
 
 ```powershell
@@ -134,6 +155,7 @@ MSW_MASK_EXTERNAL_AI_DATA=true
 8. 원문 응답은 파싱 성공 여부와 관계없이 프로젝트 데이터 디렉터리에 보존할 수 있다.
 9. Frida 실패 후보 생성은 별도 JSON Schema를 검증하고 구문 검사 후 `pending_approval`로만 저장한다.
 10. 진단의 자동 수정 옵션도 후보를 실행하지 않으며 사용자가 Frida 라이브러리에서 승인해야 한다.
+11. 승인자는 전체 코드·적용 대상·위험도를 명시적으로 검토해야 하며, 브라우저가 전송한 현재 코드 SHA-256이 서버에서 재계산한 해시와 일치할 때만 승인된다. 내용이 변경되면 재승인이 필요하다.
 
 NVIDIA 연동은 OpenAI 호환 `POST /v1/chat/completions`, Claude 연동은 Messages `POST /v1/messages`와 JSON Schema `output_config`를 사용한다.
 

@@ -148,6 +148,10 @@ def create_app() -> FastAPI:
     )
     app.include_router(router)
 
+    @app.get("/healthz", include_in_schema=False)
+    async def healthz():
+        return {"service": "Mobile Security Workbench", "status": "ok", "version": app.version}
+
     assets = settings.frontend_dist / "assets"
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=assets), name="assets")

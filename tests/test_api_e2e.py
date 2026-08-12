@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 
 
@@ -15,6 +16,17 @@ def _wait_for_run(client, run_id: str, timeout: float = 30):
         f"진단 실행이 {timeout}초 안에 끝나지 않았습니다: "
         f"status={run.get('status')} stage={run.get('current_stage')} error={run.get('error')}"
     )
+
+
+def test_healthcheck_is_minimal_and_available_without_frontend(client):
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "service": "Mobile Security Workbench",
+        "status": "ok",
+        "version": "0.2.0",
+    }
 
 
 def test_mock_demo_runs_end_to_end(client):
@@ -88,6 +100,25 @@ def test_mock_demo_runs_end_to_end(client):
     assert client.get(f"/api/projects/{demo['project']['id']}").status_code == 404
 
 
+def test_run_creation_rechecks_that_selected_device_is_discovered(client):
+    demo = client.post("/api/demo/bootstrap").json()
+
+    response = client.post(
+        "/api/runs",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "device_id": "mock-android-not-connected",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+            "pause_for_login": False,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "선택한 단말을 찾을 수 없습니다" in response.json()["detail"]
+
+
 def test_custom_frida_script_requires_approval(client):
     demo = client.post("/api/demo/bootstrap").json()
     created = client.post(
@@ -113,7 +144,29 @@ def test_custom_frida_script_requires_approval(client):
     )
     assert denied.status_code == 409
 
-    approved = client.post(f"/api/frida/scripts/{script['id']}/approve")
+    missing_review = client.post(f"/api/frida/scripts/{script['id']}/approve")
+    assert missing_review.status_code == 422
+
+    stale_review = client.post(
+        f"/api/frida/scripts/{script['id']}/approve",
+        json={
+            "approver": "local_user",
+            "review_acknowledged": True,
+            "reviewed_sha256": "0" * 64,
+        },
+    )
+    assert stale_review.status_code == 409
+
+    approved = client.post(
+        f"/api/frida/scripts/{script['id']}/approve",
+        json={
+            "approver": "local_user",
+            "review_acknowledged": True,
+            "reviewed_sha256": hashlib.sha256(
+                script["content"].encode("utf-8")
+            ).hexdigest(),
+        },
+    )
     assert approved.status_code == 200
     started = client.post(
         "/api/runs",

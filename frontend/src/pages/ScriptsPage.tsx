@@ -3,6 +3,14 @@ import { api, post } from "../api";
 import type { DiagnosticRun, FridaScript, Project } from "../types";
 import { EmptyState, SectionHeading, StatusChip } from "../components/UI";
 
+async function sha256(content: string): Promise<string> {
+  if (!globalThis.crypto?.subtle) {
+    throw new Error("이 브라우저는 안전한 스크립트 검토 확인에 필요한 Web Crypto를 지원하지 않습니다.");
+  }
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export default function ScriptsPage() {
   const [scripts, setScripts] = useState<FridaScript[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -77,9 +85,17 @@ export default function ScriptsPage() {
 
   async function approve() {
     if (!selected) return;
+    const acknowledged = window.confirm(
+      "스크립트 전체 내용, 적용 대상, 위험도를 직접 검토했습니까?\n\n승인하면 현재 내용의 해시가 고정되며, 한 글자라도 변경되면 다시 승인해야 합니다.",
+    );
+    if (!acknowledged) return;
     setError("");
     try {
-      await post(`/frida/scripts/${selected.id}/approve`);
+      await post(`/frida/scripts/${selected.id}/approve`, {
+        approver: "local_user",
+        review_acknowledged: true,
+        reviewed_sha256: await sha256(selected.content),
+      });
       load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "승인 실패");
@@ -234,7 +250,7 @@ export default function ScriptsPage() {
                     구문 재검사 후 승인
                   </button>
                 )}
-                {selected.approval_status !== "approved" && <small>Node.js 구문 검사를 통과한 스크립트만 승인할 수 있습니다.</small>}
+                {selected.approval_status !== "approved" && <small>승인 전 전체 코드·대상·위험도를 검토해야 하며, Node.js 구문 검사와 현재 내용 해시가 모두 일치해야 합니다.</small>}
               </div>
               {result && <pre className="code-view">{JSON.stringify(result, null, 2)}</pre>}
             </>

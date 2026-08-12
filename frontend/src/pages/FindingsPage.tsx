@@ -9,6 +9,7 @@ export default function FindingsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("");
   const [severity, setSeverity] = useState("");
+  const [verdict, setVerdict] = useState("");
 
   useEffect(() => {
     void Promise.all([api<Finding[]>("/findings"), api<Project[]>("/projects")]).then(
@@ -24,10 +25,14 @@ export default function FindingsPage() {
       findings.filter(
         (item) =>
           (!projectId || item.project_id === projectId) &&
-          (!severity || item.severity === severity),
+          (!severity || item.severity === severity) &&
+          (!verdict || item.verdict === verdict),
       ),
-    [findings, projectId, severity],
+    [findings, projectId, severity, verdict],
   );
+  const highCount = filtered.filter((item) => item.severity === "high").length;
+  const reviewCount = filtered.filter((item) => item.verdict === "needs_review").length;
+  const syntheticCount = filtered.filter((item) => item.synthetic).length;
 
   return (
     <div className="stack stack--lg">
@@ -36,6 +41,22 @@ export default function FindingsPage() {
         title="신호와 판정을 분리해서 봅니다"
         description="정적 시그니처는 런타임 증적 없이 확정하지 않으며, 자동 판정의 근거와 오탐 가능성을 함께 표시합니다."
       />
+      <section className="result-guide panel" aria-labelledby="result-guide-title">
+        <div>
+          <span className="eyebrow">HOW TO READ RESULTS</span>
+          <h2 id="result-guide-title">결과는 우선순위와 근거를 함께 보세요</h2>
+          <p>심각도는 먼저 확인할 순서이고, 판정은 현재 증거가 얼마나 충분한지를 뜻합니다. 자동 분류만으로 확정하지 말고 상세 화면의 증적과 재현 조건을 확인하세요.</p>
+        </div>
+        <div className="result-guide__metrics">
+          <div><span>우선 확인</span><strong>{highCount}</strong><small>High 심각도</small></div>
+          <div><span>사람 검토</span><strong>{reviewCount}</strong><small>증거 보강 필요</small></div>
+          <div><span>합성 데이터</span><strong>{syntheticCount}</strong><small>Mock 결과 표기</small></div>
+        </div>
+        <div className="button-row">
+          <button className="button button--quiet" type="button" onClick={() => setVerdict("needs_review")}>검토 필요한 항목만 보기</button>
+          {verdict && <button className="button button--quiet" type="button" onClick={() => setVerdict("")}>판정 필터 해제</button>}
+        </div>
+      </section>
       <div className="filter-bar">
         <div className="field field--compact">
           <label htmlFor="finding-project">프로젝트</label>
@@ -52,6 +73,16 @@ export default function FindingsPage() {
             <option value="medium">Medium</option>
             <option value="low">Low</option>
             <option value="info">Info</option>
+          </select>
+        </div>
+        <div className="field field--compact">
+          <label htmlFor="finding-verdict">판정 상태</label>
+          <select id="finding-verdict" value={verdict} onChange={(event) => setVerdict(event.target.value)}>
+            <option value="">전체 판정</option>
+            <option value="confirmed">확인됨</option>
+            <option value="needs_review">검토 필요</option>
+            <option value="informational">참고</option>
+            <option value="unknown">미확인</option>
           </select>
         </div>
         <span className="filter-result">{filtered.length}개 항목</span>

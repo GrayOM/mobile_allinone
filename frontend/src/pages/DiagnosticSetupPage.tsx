@@ -4,6 +4,24 @@ import { api, post } from "../api";
 import type { AppArtifact, Device, FridaScript, Project, DiagnosticRun } from "../types";
 import { EmptyState, SectionHeading, StatusChip } from "../components/UI";
 
+function deviceReadinessMessage(device: Device): string {
+  const details = device.details;
+  const adapterMessage = ["error", "message", "reason"]
+    .map((key) => details[key])
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  if (adapterMessage) return adapterMessage;
+  if (device.availability === "not_configured") {
+    return "선택한 단말 Adapter가 준비되지 않았습니다. 설정에서 관련 실행 파일 경로를 확인한 뒤 단말 목록을 새로고침하세요.";
+  }
+  if (device.availability === "manual_required") {
+    return "선택한 단말은 수동 준비가 필요합니다. USB 디버깅·신뢰 확인·필수 단말 도구 상태를 점검한 뒤 다시 시도하세요.";
+  }
+  if (device.availability === "unsupported") {
+    return "선택한 단말 연결 방식은 현재 자동 진단 범위에서 지원하지 않습니다. 지원되는 USB/SSH 프로필 또는 수동 절차를 사용하세요.";
+  }
+  return "선택한 단말이 현재 연결 또는 권한 문제로 준비되지 않았습니다. 단말 케이블·디버깅 승인·Adapter 상태를 확인하세요.";
+}
+
 export default function DiagnosticSetupPage() {
   const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -19,6 +37,7 @@ export default function DiagnosticSetupPage() {
   const [scripts, setScripts] = useState<FridaScript[]>([]);
   const [selectedScripts, setSelectedScripts] = useState<string[]>([]);
   const [autoSelectFrida, setAutoSelectFrida] = useState(false);
+  const [guideNote, setGuideNote] = useState("");
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
 
@@ -44,6 +63,7 @@ export default function DiagnosticSetupPage() {
 
   const project = projects.find((item) => item.id === projectId);
   const selectedApp = apps.find((item) => item.id === appId);
+  const selectedDevice = devices.find((item) => item.id === deviceId);
   const matchesAppPlatform = (device: Device) => !selectedApp || (
     selectedApp.platform === "android"
       ? device.platform.includes("android")
@@ -81,6 +101,18 @@ export default function DiagnosticSetupPage() {
     }
   }, [project, devices, deviceId, selectedApp?.id, selectedApp?.platform]);
 
+  function applyGuidedDefaults() {
+    if (!project) return;
+    setProxyAdapter(project.run_mode === "mock" ? "mock" : "mitmproxy");
+    setSelectedScripts([]);
+    setAutoSelectFrida(false);
+    setGuideNote(
+      project.run_mode === "mock"
+        ? "Mock 데모에 맞는 안전한 기본값을 적용했습니다. 단말과 앱을 확인한 뒤 진단을 시작하세요."
+        : "Live 진단의 보수적인 기본값을 적용했습니다. 단말 IP와 프록시 정보를 확인한 뒤 진단을 시작하세요.",
+    );
+  }
+
   async function start(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -89,6 +121,7 @@ export default function DiagnosticSetupPage() {
     setError("");
     try {
       if (!project || !device) throw new Error("프로젝트 모드에 맞는 단말을 선택하세요.");
+      if (device.availability !== "available") throw new Error(deviceReadinessMessage(device));
       const run = await post<DiagnosticRun>("/runs", {
         project_id: projectId,
         app_id: appId || null,
@@ -139,9 +172,34 @@ export default function DiagnosticSetupPage() {
         <SectionHeading
           eyebrow="RUN CONFIGURATION"
           title="실행 범위와 승인 경계를 정합니다"
-          description="선택 내용을 확인한 뒤 진단을 시작하세요. 상태 변경 네트워크 요청은 자동 재전송하지 않습니다."
+          description="아래 준비도를 위에서 아래 순서로 확인하세요. 상태 변경 네트워크 요청은 자동 재전송하지 않습니다."
         />
         {error && <div className="inline-alert">{error}</div>}
+        <section className="diagnostic-guide panel" aria-labelledby="diagnostic-guide-title">
+          <div className="diagnostic-guide__head">
+            <div>
+              <span className="eyebrow">STEP-BY-STEP CHECK</span>
+              <h3 id="diagnostic-guide-title">진단 전에 네 가지만 확인하세요</h3>
+              <p>복잡한 옵션은 기본적으로 안전한 값으로 유지됩니다. 준비되지 않은 항목을 먼저 해결하면 실행 실패를 줄일 수 있습니다.</p>
+            </div>
+            <button className="button button--quiet" type="button" onClick={applyGuidedDefaults}>권장 설정 적용</button>
+          </div>
+          <div className="diagnostic-guide__checks">
+            <div className={project ? "guide-check guide-check--done" : "guide-check"}>
+              <span>1</span><div><strong>프로젝트</strong><small>{project ? `${project.run_mode === "mock" ? "Mock 연습" : "Live 진단"} 모드 선택됨` : "프로젝트를 선택하세요"}</small></div>
+            </div>
+            <div className={selectedApp ? "guide-check guide-check--done" : "guide-check"}>
+              <span>2</span><div><strong>대상 앱</strong><small>{selectedApp ? (selectedApp.app_name || selectedApp.original_name) : "APK 또는 IPA를 선택하세요"}</small></div>
+            </div>
+            <div className={selectedDevice?.availability === "available" ? "guide-check guide-check--done" : "guide-check"}>
+              <span>3</span><div><strong>단말 준비</strong><small>{selectedDevice?.availability === "available" ? `${selectedDevice.model} 연결 확인` : "연결·권한·도구 상태를 확인하세요"}</small></div>
+            </div>
+            <div className={project?.run_mode === "mock" || (proxyListenHost && (proxyAdapter !== "mitmproxy" || proxyAllowedClientIp)) ? "guide-check guide-check--done" : "guide-check"}>
+              <span>4</span><div><strong>캡처 범위</strong><small>{project?.run_mode === "mock" ? "합성 프록시 사용" : "프록시 Listener와 단말 IP를 입력하세요"}</small></div>
+            </div>
+          </div>
+          {guideNote && <div className="inline-alert inline-alert--ok">{guideNote}</div>}
+        </section>
         <section className="panel setup-section">
           <div className="setup-number">01</div>
           <div className="setup-content">
@@ -186,6 +244,13 @@ export default function DiagnosticSetupPage() {
                 </label>
               ))}
             </div>
+            {selectedDevice && selectedDevice.availability !== "available" && (
+              <div className="inline-alert">
+                <strong>선택한 단말은 아직 진단을 시작할 수 없습니다.</strong><br />
+                {deviceReadinessMessage(selectedDevice)}{" "}
+                <button className="button button--quiet" type="button" onClick={() => navigate("/devices")}>단말 상태 확인</button>
+              </div>
+            )}
             <div className="form-grid">
               <div className="field">
                 <label htmlFor="proxy">프록시 Adapter</label>
@@ -336,7 +401,7 @@ export default function DiagnosticSetupPage() {
           <li><span>3</span>POST·PUT·PATCH·DELETE 요청은 자동 재전송하지 않습니다.</li>
           <li><span>4</span>도구가 없으면 성공으로 위장하지 않고 상태를 남깁니다.</li>
         </ol>
-        <button className="button button--signal button--full" disabled={starting || !appId || !deviceId || (project?.run_mode === "live" && !proxyListenHost) || (proxyAdapter === "mitmproxy" && !proxyAllowedClientIp) || (["burp", "fiddler"].includes(proxyAdapter) && !proxyPort)}>
+        <button className="button button--signal button--full" disabled={starting || !appId || !deviceId || selectedDevice?.availability !== "available" || (project?.run_mode === "live" && !proxyListenHost) || (proxyAdapter === "mitmproxy" && !proxyAllowedClientIp) || (["burp", "fiddler"].includes(proxyAdapter) && !proxyPort)}>
           {starting ? "실행 준비 중…" : "진단 실행"}
         </button>
       </aside>

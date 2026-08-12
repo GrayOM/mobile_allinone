@@ -4725,3 +4725,228 @@ a:hover {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Guided onboarding and diagnostic preflight */
+.getting-started,
+.diagnostic-guide {
+  border-top: 3px solid var(--teal-600);
+}
+
+.getting-started__head,
+.diagnostic-guide__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.getting-started__head h2,
+.diagnostic-guide__head h3 {
+  margin: 6px 0 8px;
+  color: var(--ink-950);
+}
+
+.getting-started__head p,
+.diagnostic-guide__head p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--slate-600);
+  line-height: 1.65;
+}
+
+.guide-time {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  color: var(--teal-700);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--teal-100);
+  border: 1px solid rgba(8, 117, 112, 0.2);
+}
+
+.getting-started__steps,
+.diagnostic-guide__checks {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0;
+  margin: 24px 0;
+  list-style: none;
+}
+
+.getting-started__steps li,
+.guide-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-height: 92px;
+  padding: 16px;
+  background: var(--white);
+  border: 1px solid var(--line);
+}
+
+.getting-started__steps li > span,
+.guide-check > span {
+  display: grid;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  color: var(--slate-600);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  place-items: center;
+  background: var(--canvas);
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+}
+
+.getting-started__steps strong,
+.guide-check strong {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--ink-900);
+}
+
+.getting-started__steps small,
+.guide-check small {
+  display: block;
+  color: var(--slate-600);
+  line-height: 1.45;
+}
+
+.diagnostic-guide__checks {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.guide-check {
+  min-height: 76px;
+  padding: 13px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.guide-check--done {
+  background: var(--teal-100);
+  border-color: rgba(8, 117, 112, 0.32);
+}
+
+.guide-check--done > span {
+  color: var(--white);
+  background: var(--teal-700);
+  border-color: var(--teal-700);
+}
+
+@media (max-width: 900px) {
+  .getting-started__steps,
+  .diagnostic-guide__checks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .getting-started__head,
+  .diagnostic-guide__head {
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .getting-started__steps,
+  .diagnostic-guide__checks {
+    grid-template-columns: 1fr;
+    margin: 18px 0;
+  }
+
+  .getting-started__steps li,
+  .guide-check {
+    min-height: 0;
+  }
+}
+
+.result-guide {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(300px, 1fr);
+  gap: 20px 30px;
+  align-items: center;
+  border-left: 4px solid var(--signal);
+}
+
+.result-guide h2 {
+  margin: 6px 0 8px;
+  color: var(--ink-950);
+}
+
+.result-guide p {
+  margin: 0;
+  color: var(--slate-600);
+  line-height: 1.65;
+}
+
+.result-guide__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--line);
+}
+
+.result-guide__metrics > div {
+  min-width: 0;
+  padding: 13px;
+  border-right: 1px solid var(--line);
+}
+
+.result-guide__metrics > div:last-child {
+  border-right: 0;
+}
+
+.result-guide__metrics span,
+.result-guide__metrics small {
+  display: block;
+  color: var(--slate-600);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.result-guide__metrics strong {
+  display: block;
+  margin: 4px 0;
+  color: var(--signal-dark);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 25px;
+  line-height: 1;
+}
+
+.result-guide > .button-row {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+@media (max-width: 760px) {
+  .result-guide {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .result-guide__metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .result-guide__metrics > div {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .result-guide__metrics > div:last-child {
+    border-bottom: 0;
+  }
+
+  .result-guide__metrics strong {
+    grid-row: span 2;
+    grid-column: 2;
+    margin: 0;
+  }
+}

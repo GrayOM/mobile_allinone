@@ -10,7 +10,7 @@ import zipfile
 import ipaddress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from fastapi import (
@@ -1243,6 +1243,37 @@ async def create_run(
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    try:
+        provisional_run = DiagnosticRun(
+            device_adapter=payload.device_adapter,
+            device_id=payload.device_id,
+        )
+        selected_device_adapter = _orchestrator(request).device_for_run(
+            db, provisional_run
+        )
+        discovered_devices = await selected_device_adapter.discover()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            422,
+            "선택한 단말 Adapter 상태를 확인하지 못했습니다. 연결·권한·실행 파일 설정을 점검하세요.",
+        ) from exc
+    selected_device = next(
+        (item for item in discovered_devices if item.id == payload.device_id), None
+    )
+    if selected_device is None:
+        raise HTTPException(
+            422,
+            "선택한 단말을 찾을 수 없습니다. 단말 연결·디버깅 승인·Adapter 설정을 새로고침한 뒤 다시 선택하세요.",
+        )
+    if selected_device.availability != CapabilityStatus.AVAILABLE:
+        raise HTTPException(
+            422,
+            f"선택한 단말은 준비되지 않았습니다 ({selected_device.availability.value}). "
+            "단말 연결·권한과 관련 실행 파일 설정을 확인한 뒤 다시 시도하세요.",
+        )
+
     selected_script_ids = list(dict.fromkeys(payload.frida_script_ids))
     if selected_script_ids:
         selected_scripts = db.scalars(
@@ -1824,7 +1855,16 @@ async def create_frida_script(
 
 
 class FridaApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     approver: str = Field(default="local_user", min_length=1, max_length=100)
+    review_acknowledged: Literal[True]
+    reviewed_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+        description="승인자가 화면에서 검토한 현재 스크립트 내용의 SHA-256",
+    )
 
 
 @router.post("/frida/scripts/{script_id}/approve", response_model=FridaScriptOut)
@@ -1846,10 +1886,18 @@ async def approve_frida_script(
         script.approved_sha256 = None
         db.commit()
         raise HTTPException(422, f"완전한 구문 검사가 필요합니다: {message}")
+    if payload is None:
+        raise HTTPException(422, "스크립트 내용 검토 확인과 현재 SHA-256이 필요합니다.")
+    current_sha256 = hashlib.sha256(script.content.encode("utf-8")).hexdigest()
+    if payload.reviewed_sha256 != current_sha256:
+        raise HTTPException(
+            409,
+            "검토한 스크립트 내용이 현재 버전과 다릅니다. 내용을 다시 확인한 뒤 승인하세요.",
+        )
     script.approval_status = "approved"
-    script.approved_by = (payload or FridaApproveRequest()).approver
+    script.approved_by = payload.approver
     script.approved_at = datetime.now(timezone.utc)
-    script.approved_sha256 = hashlib.sha256(script.content.encode("utf-8")).hexdigest()
+    script.approved_sha256 = current_sha256
     db.commit()
     db.refresh(script)
     return script

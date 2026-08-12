@@ -80,6 +80,30 @@ export default function DashboardPage() {
         </div>
       </section>
 
+      {!loading && (data?.counts.runs ?? 0) === 0 && (
+        <section className="getting-started panel" aria-labelledby="getting-started-title">
+          <div className="getting-started__head">
+            <div>
+              <span className="eyebrow">GUIDED FIRST RUN</span>
+              <h2 id="getting-started-title">처음이라면 이 순서로 시작하세요</h2>
+              <p>실제 앱이나 단말을 바로 연결하지 않아도 됩니다. 먼저 합성 데모로 결과 화면과 승인 절차를 익힌 뒤, 권한을 받은 앱·단말만 Live 진단에 연결하세요.</p>
+            </div>
+            <span className="guide-time">약 3분</span>
+          </div>
+          <ol className="getting-started__steps">
+            <li><span>1</span><div><strong>Mock 데모 실행</strong><small>실제 단말·외부 AI 전송 없이 전체 과정을 안전하게 체험합니다.</small></div></li>
+            <li><span>2</span><div><strong>결과와 증적 확인</strong><small>발견항목이 어떤 근거로 분류됐는지와 보류된 작업을 확인합니다.</small></div></li>
+            <li><span>3</span><div><strong>실제 진단 준비</strong><small>승인받은 APK·IPA와 단말을 선택하고, 안내형 진단 설정에서 범위를 확인합니다.</small></div></li>
+          </ol>
+          <div className="button-row">
+            <button className="button button--signal" onClick={makeDemo} disabled={demoLoading}>
+              {demoLoading ? "데모 준비 중…" : "안전한 Mock 데모로 연습"}
+            </button>
+            <Link className="button button--quiet" to="/diagnostics/new">이미 준비됨 · 진단 설정으로</Link>
+          </div>
+        </section>
+      )}
+
       <section className="metric-strip" aria-label="누적 현황">
         {[
           ["프로젝트", data?.counts.projects ?? 0, "P"],

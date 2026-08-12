@@ -24,6 +24,50 @@ jobs:
       - name: Run Mock and unit tests
         run: python -m pytest -q --durations=20
 
+  portable-startup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MSW_AUTO_OPEN_BROWSER: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Prepare POSIX local environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e ".[dev]"
+          cd frontend
+          npm ci
+          npm run build
+      - name: Validate portable startup assets
+        run: |
+          chmod +x scripts/run.sh
+          bash -n scripts/run.sh
+          ./scripts/run.sh --help
+          docker compose config
+      - name: Start locally and verify health endpoint
+        run: |
+          ./scripts/run.sh --skip-frontend > workbench.log 2>&1 &
+          workbench_pid=$!
+          trap 'kill "$workbench_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8765/healthz | grep -q '"status":"ok"'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Workbench did not become healthy within 30 seconds." >&2
+          cat workbench.log >&2
+          exit 1
+
   frontend:
     runs-on: windows-latest
     defaults:

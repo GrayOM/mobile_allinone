@@ -14,7 +14,7 @@
 - 실행할 수 없으면 `not_configured`, `unsupported`, `manual_required`, `failed`로 구분한다.
 - 상태 변경 HTTP 요청을 자동으로 재전송하지 않는다.
 - AI가 만든 Frida 스크립트는 자동 실행하지 않는다.
-- AI 스크립트는 JSON Schema 검증, JavaScript 구문 검사, 사용자 승인을 거친 뒤에만 실행한다.
+- AI 스크립트는 JSON Schema 검증, JavaScript 구문 검사, 전체 코드·대상·위험도의 명시적 사용자 검토와 현재 SHA-256 일치 승인을 거친 뒤에만 실행한다.
 - API 키와 비밀정보는 `.env`에서만 읽고 코드·`config.yaml`에 저장하지 않는다.
 - 외부 AI 전송은 프로젝트의 `ai_enabled`, `external_ai_allowed` 정책을 따른다.
 - MobSF 앱 원본 전송은 프로젝트의 `external_analyzer_allowed`와 목적지 허용목록을 모두 따른다.
@@ -30,8 +30,8 @@
 - 작업 실행: 내부 `asyncio` Task 기반 `DiagnosticOrchestrator`
 - 설정: `.env`, `config.yaml`
 - 테스트: pytest
-- Windows 실행: PowerShell/BAT
-- Docker: Mock 데모와 웹 UI 위주
+- 실행: Windows PowerShell/BAT 및 Linux/macOS `scripts/run.sh`
+- Docker: Mock 데모와 웹 UI 위주, loopback 포트 공개와 `/healthz` 상태 확인
 
 주요 디렉터리:
 
@@ -153,6 +153,7 @@ tests/               단위·API·Mock E2E 테스트
 - 생성 후보는 저장만 하고 절대 자동 실행하지 않는다.
 - Provider, 모델, 상태, 품질과 원문 경로는 `ai_invocations`에 기록한다.
 - Node.js 구문 상태가 `available`인 스크립트만 승인·실행할 수 있다.
+- 승인 요청은 검토 확인과 사용자가 화면에서 검토한 SHA-256을 요구하며, 서버가 현재 코드 SHA-256과 일치하는지 다시 확인한다.
 - 승인자·승인 시각·승인 당시 SHA-256을 보존하고 내용이 달라지면 승인을 자동 취소한다.
 - AI 응답은 여러 Finding을 생성하며, 각 Finding은 현재 Run에 속한 증적 ID만 연결한다.
 - 낮은 신뢰도 결과는 `needs_review`로 남기고 AI 원문 저장은 기본 비활성화한다.
@@ -280,12 +281,16 @@ data/
 - Frida 라이브러리
 - MASTG 통제 커버리지
 - 설정과 OSS Adapter 상태
+- 대시보드 첫 실행 안내: Mock 데모 → 결과·증적 확인 → 실제 진단 준비
+- 진단 설정의 4단계 준비도: 프로젝트·대상 앱·단말 연결·캡처 범위
+- 발견항목의 결과 해석 안내: 심각도·판정·합성 데이터 분리 및 `needs_review` 필터
 
 디자인 방향은 산업용 로컬 보안 워크벤치다.
 
 - 기존 teal/orange/ink 색상과 Bahnschrift/Cascadia 계열을 유지한다.
 - 통제 커버리지는 일반 카드 모음이 아니라 밀도 높은 “통제 신호 원장”이 핵심 시각 요소다.
 - 새 UI를 만들 때 불필요한 둥근 카드·그라데이션·과도한 애니메이션을 추가하지 않는다.
+- 초보자용 안내는 상세 제어·안전 경계를 숨기지 않고, 다음 행동·준비 상태·Mock/Live 구분을 명확히 제시한다.
 - 1440×1000과 390×844 브라우저 검증이 완료되었다.
 
 ## 7. 설치와 실행
@@ -388,6 +393,8 @@ npm audit --audit-level=high      0 vulnerabilities
 - 확장 Mock E2E에서 8개 UI 상태·14개 실행 동작·2개 승인 대기 동작, 파일 변화 3개·SQLite 1개, API Candidate 4개(3개 실행·1개 승인 대기)와 Finding 증적 연결을 확인
 - 자동 탐색·저장소·API Candidate 원장을 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건
 - Windows CI의 Mock Run 8~12초 절대 timeout과 초미세 SQLite deadline 플랫폼 차이를 수정했다. Run 대기는 30초로 보정하고 실패 시 status/stage/error를 출력하며 SQLite deadline은 파일 Hash loop부터 강제한다.
+- POSIX CI는 `scripts/run.sh` 문법·Docker Compose 구성·실제 loopback 기동과 `/healthz` 응답을 검증한다.
+- 진단 생성 API는 선택한 단말을 다시 탐색하고 `available` 상태인지 확인한 뒤에만 Run을 큐에 넣는다. UI도 준비되지 않은 단말을 사전에 차단하고 단말 상태 화면으로 안내한다.
 - destructive semantic 우회, resource 토큰 경계, interaction variant, container 한정 bounded scroll, Frida drop 품질 Gap과 Finding category exact alias 회귀 테스트를 확인했다.
 
 테스트 명령:
