@@ -21,11 +21,13 @@ class MitmProxyAdapter(ProxyAdapter):
         host: str = "127.0.0.1",
         port: int = 8080,
         allowed_client_ip: str | None = None,
+        allowed_destination_hosts: list[str] | None = None,
     ):
         self.settings = settings or get_settings()
         self.host = host
         self.port = port
         self.allowed_client_ip = allowed_client_ip
+        self.allowed_destination_hosts = list(allowed_destination_hosts or [])
         self.mitmdump = self.settings.resolved_tool("mitmdump")
         self.capture_dir = self.settings.data_dir / "proxy"
         self.capture_dir.mkdir(parents=True, exist_ok=True)
@@ -33,6 +35,21 @@ class MitmProxyAdapter(ProxyAdapter):
 
     def _path(self, run_id: str) -> Path:
         return self.capture_dir / f"{run_id}.jsonl"
+
+    def _environment(self, capture_path: Path) -> dict[str, str]:
+        env = os.environ.copy()
+        env.pop("MSW_MITM_ALLOWED_CLIENT_IP", None)
+        env.pop("MSW_MITM_ALLOWED_HOSTS", None)
+        env["MSW_MITM_OUTPUT"] = str(capture_path)
+        if self.allowed_client_ip:
+            env["MSW_MITM_ALLOWED_CLIENT_IP"] = self.allowed_client_ip
+        if self.allowed_destination_hosts:
+            env["MSW_MITM_ALLOWED_HOSTS"] = json.dumps(
+                self.allowed_destination_hosts,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        return env
 
     async def status(self) -> ProxyCapture:
         if not self.mitmdump:
@@ -68,10 +85,7 @@ class MitmProxyAdapter(ProxyAdapter):
             return await self.status()
         capture_path = self._path(run_id)
         capture_path.unlink(missing_ok=True)
-        env = os.environ.copy()
-        env["MSW_MITM_OUTPUT"] = str(capture_path)
-        if self.allowed_client_ip:
-            env["MSW_MITM_ALLOWED_CLIENT_IP"] = self.allowed_client_ip
+        env = self._environment(capture_path)
         addon = ROOT_DIR / "scripts" / "mitm_capture_addon.py"
         process = await asyncio.create_subprocess_exec(
             self.mitmdump,

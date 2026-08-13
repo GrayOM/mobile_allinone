@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -36,9 +37,17 @@ def test_healthcheck_is_minimal_and_available_without_frontend(client):
 
 
 def test_control_validation_requires_live_scope_and_full_attestation():
+    device_id = "authorized-rooted-android-01"
     requested = {
         "enabled": True,
         "authorization_reference": "TICKET-2048",
+        "approved_by": "고객사 보안책임자",
+        "authorization_expires_at": (
+            datetime.now(timezone.utc) + timedelta(hours=8)
+        ).isoformat(),
+        "authorized_device_id": device_id,
+        "test_account_reference": "QA-ACCOUNT-03",
+        "allowed_network_hosts": ["API.TEST.EXAMPLE", "*.sandbox.example"],
         "scope_description": "전용 루팅 Android 단말, 테스트 계정, 검증 서버만 사용",
         "authorized_scope_confirmed": True,
         "test_environment_confirmed": True,
@@ -46,24 +55,38 @@ def test_control_validation_requires_live_scope_and_full_attestation():
     }
     with pytest.raises(HTTPException, match="Live 진단"):
         _normalize_control_validation_options(
-            {"control_validation": requested}, RunMode.MOCK
+            {"control_validation": requested}, RunMode.MOCK, device_id
         )
 
     missing_scope = dict(requested)
     missing_scope["test_data_only_confirmed"] = False
     with pytest.raises(HTTPException, match="테스트 계정·데이터"):
         _normalize_control_validation_options(
-            {"control_validation": missing_scope}, RunMode.LIVE
+            {"control_validation": missing_scope}, RunMode.LIVE, device_id
+        )
+
+    wrong_device = dict(requested)
+    wrong_device["authorized_device_id"] = "another-device"
+    with pytest.raises(HTTPException, match="현재 선택한 단말"):
+        _normalize_control_validation_options(
+            {"control_validation": wrong_device}, RunMode.LIVE, device_id
         )
 
     normalized = _normalize_control_validation_options(
-        {"control_validation": requested}, RunMode.LIVE
+        {"control_validation": requested}, RunMode.LIVE, device_id
     )
     assert normalized is not None
     assert normalized["mode"] == "authorized_control_validation"
     assert normalized["execution_policy"] == "observation_only"
     assert normalized["automatic_control_evasion"] is False
     assert normalized["external_ai_excluded"] is True
+    assert normalized["network_scope_policy"] == "default_deny"
+    assert normalized["authorized_device_id"] == device_id
+    assert normalized["allowed_network_hosts"] == [
+        "api.test.example",
+        "*.sandbox.example",
+    ]
+    assert normalized["authorization_expires_at"].endswith("+00:00")
     assert normalized["consent_recorded_at"]
 
 

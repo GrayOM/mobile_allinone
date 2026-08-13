@@ -1982,6 +1982,124 @@ a:hover {
   gap: 14px;
 }
 
+.control-scope-ledger {
+  overflow: hidden;
+  padding: 0;
+  border-color: #2e575d;
+}
+
+.control-scope-ledger--violation {
+  border-color: var(--red);
+}
+
+.control-scope-ledger__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 15px 18px;
+  color: #e7f0ef;
+  background: var(--ink-900);
+  border-bottom: 1px solid #35545a;
+}
+
+.control-scope-ledger--violation .control-scope-ledger__head {
+  background: #4b2830;
+}
+
+.control-scope-ledger__head h3 {
+  margin: 4px 0 0;
+  font: 600 16px "Bahnschrift", sans-serif;
+}
+
+.control-scope-ledger__grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  border-bottom: 1px solid var(--line);
+}
+
+.control-scope-ledger__grid > div {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px 14px;
+  border-right: 1px solid var(--line);
+}
+
+.control-scope-ledger__grid > div:last-child {
+  border-right: 0;
+}
+
+.control-scope-ledger__grid span,
+.control-scope-ledger__hosts > span {
+  color: var(--teal-700);
+  font: 700 8px "Cascadia Mono", monospace;
+  letter-spacing: 0.09em;
+}
+
+.control-scope-ledger__grid strong {
+  overflow: hidden;
+  color: var(--ink-900);
+  font: 700 10px "Cascadia Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.control-scope-ledger__grid small {
+  overflow: hidden;
+  color: var(--slate-500);
+  font: 8px "Cascadia Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.control-scope-ledger__hosts {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #f3f7f6;
+}
+
+.control-scope-ledger__hosts > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.control-scope-ledger__hosts code {
+  max-width: 100%;
+  padding: 3px 7px;
+  color: var(--ink-800);
+  background: var(--white);
+  border: 1px solid var(--line-strong);
+  font: 8px "Cascadia Mono", monospace;
+  overflow-wrap: anywhere;
+}
+
+.control-scope-ledger__violations {
+  display: grid;
+  gap: 1px;
+  padding: 1px 0 0;
+  background: #e7b8bd;
+}
+
+.control-scope-ledger__violations > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  color: #6e252e;
+  background: var(--red-soft);
+}
+
+.control-scope-ledger__violations strong,
+.control-scope-ledger__violations small {
+  font: 9px "Cascadia Mono", monospace;
+}
+
 .live-header {
   display: grid;
   grid-template-columns: minmax(220px, 0.8fr) minmax(300px, 1fr) auto;
@@ -4275,6 +4393,18 @@ a:hover {
 }
 
 @media (max-width: 1250px) {
+  .control-scope-ledger__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .control-scope-ledger__grid > div:nth-child(3) {
+    border-right: 0;
+  }
+
+  .control-scope-ledger__grid > div:nth-child(-n + 3) {
+    border-bottom: 1px solid var(--line);
+  }
+
   .live-grid {
     grid-template-columns: minmax(230px, 0.65fr) minmax(250px, 0.75fr) minmax(310px, 1.2fr);
   }
@@ -5010,6 +5140,10 @@ a:hover {
   box-shadow: 0 24px 72px rgb(0 0 0 / 38%);
 }
 
+.consent-dialog--scope {
+  width: min(860px, 100%);
+}
+
 .consent-dialog h3 {
   margin: 7px 0 10px;
   font-family: "Bahnschrift", sans-serif;
@@ -5025,6 +5159,64 @@ a:hover {
 .consent-dialog textarea {
   width: 100%;
   resize: vertical;
+}
+
+.control-scope-sheet {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0 0 20px;
+  border: 1px solid var(--ink-800);
+  background: var(--ink-900);
+  color: #f4f8f7;
+}
+
+.control-scope-sheet > div {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+  padding: 13px 15px;
+  border-right: 1px solid rgb(255 255 255 / 14%);
+}
+
+.control-scope-sheet > div:last-child {
+  border-right: 0;
+}
+
+.control-scope-sheet span,
+.control-scope-sheet code {
+  font-family: "Cascadia Code", monospace;
+  font-size: 10px;
+}
+
+.control-scope-sheet span {
+  color: #f0a071;
+  letter-spacing: 0.1em;
+}
+
+.control-scope-sheet strong {
+  overflow: hidden;
+  font-family: "Bahnschrift", sans-serif;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.control-scope-sheet code {
+  overflow: hidden;
+  color: #a9c8c1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.consent-dialog__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px 18px;
+}
+
+.consent-dialog__grid .field--wide {
+  grid-column: 1 / -1;
 }
 
 .consent-dialog__checks {
@@ -5059,6 +5251,32 @@ a:hover {
 }
 
 @media (max-width: 620px) {
+  .control-scope-ledger__head {
+    align-items: flex-start;
+  }
+
+  .control-scope-ledger__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .control-scope-ledger__grid > div,
+  .control-scope-ledger__grid > div:nth-child(3) {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .control-scope-ledger__grid > div:last-child {
+    border-bottom: 0;
+  }
+
+  .control-scope-ledger__hosts {
+    grid-template-columns: 1fr;
+  }
+
+  .control-scope-ledger__violations > div {
+    display: grid;
+  }
+
   .consent-dialog-backdrop {
     align-items: end;
     padding: 12px;
@@ -5067,6 +5285,24 @@ a:hover {
   .consent-dialog {
     max-height: calc(100vh - 24px);
     padding: 20px;
+  }
+
+  .control-scope-sheet,
+  .consent-dialog__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .control-scope-sheet > div {
+    border-right: 0;
+    border-bottom: 1px solid rgb(255 255 255 / 14%);
+  }
+
+  .control-scope-sheet > div:last-child {
+    border-bottom: 0;
+  }
+
+  .consent-dialog__grid .field--wide {
+    grid-column: auto;
   }
 
   .consent-dialog__actions {

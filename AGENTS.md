@@ -90,6 +90,7 @@ tests/               단위·API·Mock E2E 테스트
 - WebSocket은 접근 토큰 대신 Bearer 인증으로 발급한 30초 만료·Run/IP 범위·1회용 Ticket을 사용한다. LAN 토큰은 URL이나 브라우저 저장소에 넣지 않는다.
 - 증적 이미지·원본 다운로드·HTML 보고서는 인증된 Fetch로 Blob을 받은 뒤 짧은 수명의 브라우저 Object URL로 표시한다. LAN 모드에서도 인증 없는 일반 `/api` URL을 DOM에 넣지 않는다.
 - Run 종료 상태는 `completed`, `completed_with_gaps`, `manual_required`, `failed`로 나뉜다. 앱 프로세스·화면·로그·선택 Frida·프록시 흐름/사용자 확인을 점검하고 누락된 필수 Stage를 `options.failed_required_stages`에 보존한다.
+- 승인된 통제 검증 모드는 승인 참조·승인자·만료·현재 단말 ID·테스트 계정 참조·허용 서버를 구조화한다. 실행 시작과 프록시 종료 시 범위를 재검증하며, mitmproxy는 범위 밖 호스트를 upstream 전에 HTTP 451로 차단한다. 수동 프록시를 포함해 범위 이탈이 있으면 이후 자동 네트워크 테스트·AI 판정을 수행하지 않고 `manual_required`로 종료한다. 승인·집행 증적은 외부 AI 카탈로그에서 제외한다.
 
 ### Android
 
@@ -375,7 +376,7 @@ MSW_ENABLE_API_DOCS=false
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          86 passed
+pytest -q                          92 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -404,6 +405,8 @@ npm audit --audit-level=high      0 vulnerabilities
 - AI 비활성 Mock Run에서도 선택 앱의 정적 Finding 7개가 실행 원장에 표시되고, 앱 취약점 5개와 모바일 보안통제 신호 2개가 분리되는 것을 확인했다.
 - 권한 보호가 없는 Activity와 Broadcast Receiver가 상관분석에서 과병합되지 않고 컴포넌트별 Finding으로 유지되는 회귀 테스트를 확인했다.
 - 발견항목·실시간 실행 화면을 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건이었다.
+- 승인 범위의 만료·단말 고정·정확 호스트/하위 도메인 판정, mitmproxy upstream 전 차단, 로컬 `control_scope_enforcement` 감사 증적 회귀 테스트를 확인했다.
+- 승인 범위 입력 다이얼로그와 Live 범위 원장을 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건이었다.
 
 테스트 명령:
 
@@ -425,7 +428,7 @@ npm audit --audit-level=high
 - iOS Keychain 구조화 뷰어와 Android app-specific external storage 수집
 - 실 Android Clipboard의 대상 앱 귀속 검증과 FLAG_SECURE/background snapshot 검증
 - 위험 UI 동작과 Live API Candidate의 1회 승인 후 실행 API·전용 승인 UI
-- Live API 재현 결과의 Response Comparator 실행과 허용된 테스트 계정/데이터 범위 관리
+- Live API 재현 결과의 Response Comparator 실행과 테스트 계정 실사용 여부 검증(현재는 비밀번호 없는 계정 참조와 허용 서버 범위만 구조화)
 - 사용자 승인형 딥링크·노출 컴포넌트 호출 전용 UI
 - NVIDIA/Claude UI Candidate ranking과 증적 선택 연동(현재 탐색은 로컬 결정론적 순위)
 - 프로젝트별 retention 설정과 Raw 데이터 열람 전용 UI

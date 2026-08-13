@@ -22,6 +22,19 @@ function deviceReadinessMessage(device: Device): string {
   return "선택한 단말이 현재 연결 또는 권한 문제로 준비되지 않았습니다. 단말 케이블·디버깅 승인·Adapter 상태를 확인하세요.";
 }
 
+function defaultAuthorizationExpiry(): string {
+  const expires = new Date(Date.now() + (8 * 60 * 60 * 1000));
+  const local = new Date(expires.getTime() - (expires.getTimezoneOffset() * 60 * 1000));
+  return local.toISOString().slice(0, 16);
+}
+
+function networkHostLines(value: string): string[] {
+  return value
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export default function DiagnosticSetupPage() {
   const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -39,7 +52,12 @@ export default function DiagnosticSetupPage() {
   const [autoSelectFrida, setAutoSelectFrida] = useState(false);
   const [controlValidationEnabled, setControlValidationEnabled] = useState(false);
   const [controlValidationDialogOpen, setControlValidationDialogOpen] = useState(false);
+  const [authorizedDeviceId, setAuthorizedDeviceId] = useState("");
   const [authorizationReference, setAuthorizationReference] = useState("");
+  const [approvedBy, setApprovedBy] = useState("");
+  const [authorizationExpiresAt, setAuthorizationExpiresAt] = useState(defaultAuthorizationExpiry);
+  const [testAccountReference, setTestAccountReference] = useState("");
+  const [allowedNetworkHosts, setAllowedNetworkHosts] = useState("");
   const [scopeDescription, setScopeDescription] = useState("");
   const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
   const [testEnvironmentConfirmed, setTestEnvironmentConfirmed] = useState(false);
@@ -97,6 +115,11 @@ export default function DiagnosticSetupPage() {
   useEffect(() => {
     if (!project) return;
     setProxyAdapter(project.run_mode === "mock" ? "mock" : "mitmproxy");
+    if (project.run_mode !== "live") {
+      setControlValidationEnabled(false);
+      setControlValidationDialogOpen(false);
+      setAuthorizedDeviceId("");
+    }
     const compatible = devices.filter((item) =>
       (project.run_mode === "mock" ? item.adapter === "mock" : item.adapter !== "mock")
       && matchesAppPlatform(item)
@@ -108,6 +131,17 @@ export default function DiagnosticSetupPage() {
     }
   }, [project, devices, deviceId, selectedApp?.id, selectedApp?.platform]);
 
+  useEffect(() => {
+    if (
+      controlValidationEnabled
+      && authorizedDeviceId
+      && authorizedDeviceId !== deviceId
+    ) {
+      setControlValidationEnabled(false);
+      setGuideNote("단말 선택이 변경되어 통제 검증 승인이 해제됐습니다. 현재 단말로 승인 범위를 다시 확인하세요.");
+    }
+  }, [authorizedDeviceId, controlValidationEnabled, deviceId]);
+
   function applyGuidedDefaults() {
     if (!project) return;
     setProxyAdapter(project.run_mode === "mock" ? "mock" : "mitmproxy");
@@ -115,6 +149,7 @@ export default function DiagnosticSetupPage() {
     setAutoSelectFrida(false);
     setControlValidationEnabled(false);
     setControlValidationDialogOpen(false);
+    setAuthorizedDeviceId("");
     setGuideNote(
       project.run_mode === "mock"
         ? "Mock 데모에 맞는 안전한 기본값을 적용했습니다. 단말과 앱을 확인한 뒤 진단을 시작하세요."
@@ -149,6 +184,11 @@ export default function DiagnosticSetupPage() {
             control_validation: {
               enabled: true,
               authorization_reference: authorizationReference,
+              approved_by: approvedBy,
+              authorization_expires_at: new Date(authorizationExpiresAt).toISOString(),
+              authorized_device_id: authorizedDeviceId,
+              test_account_reference: testAccountReference,
+              allowed_network_hosts: networkHostLines(allowedNetworkHosts),
               scope_description: scopeDescription,
               authorized_scope_confirmed: authorizationConfirmed,
               test_environment_confirmed: testEnvironmentConfirmed,
@@ -410,9 +450,11 @@ export default function DiagnosticSetupPage() {
                 <input
                   type="checkbox"
                   checked={controlValidationEnabled}
-                  disabled={project?.run_mode !== "live"}
+                  disabled={project?.run_mode !== "live" || !selectedDevice}
                   onChange={(event) => {
                     if (event.target.checked) {
+                      setAuthorizedDeviceId(deviceId);
+                      if (!authorizationExpiresAt) setAuthorizationExpiresAt(defaultAuthorizationExpiry());
                       setControlValidationDialogOpen(true);
                     } else {
                       setControlValidationEnabled(false);
@@ -422,7 +464,7 @@ export default function DiagnosticSetupPage() {
                 <span />
                 <div>
                   <strong>승인된 통제 검증 모드</strong>
-                  <small>{project?.run_mode !== "live" ? "Live 진단에서만 사용할 수 있습니다." : controlValidationEnabled ? "승인 범위가 기록되며 관찰·증적 수집만 수행합니다." : "사용자 동의와 승인 범위를 기록한 뒤에만 활성화합니다."}</small>
+                  <small>{project?.run_mode !== "live" ? "Live 진단에서만 사용할 수 있습니다." : !selectedDevice ? "승인 범위를 고정할 실제 단말을 먼저 선택하세요." : controlValidationEnabled ? "승인 범위가 기록되며 관찰·증적 수집만 수행합니다." : "사용자 동의와 승인 범위를 기록한 뒤에만 활성화합니다."}</small>
                 </div>
               </label>
             </div>
@@ -433,7 +475,12 @@ export default function DiagnosticSetupPage() {
         <span className="eyebrow">EXECUTION BOUNDARY</span>
         <h3>진단 시작 전 확인</h3>
         <div className="inline-alert">{project?.run_mode === "mock" ? "Mock 실행: 모든 결과가 SYNTHETIC으로 표시됩니다." : "Live 실행: Mock Adapter와 Mock AI는 차단됩니다."}</div>
-        {controlValidationEnabled && <div className="inline-alert inline-alert--ok"><strong>승인된 통제 검증</strong><br />승인 범위는 로컬 감사 증적으로만 보존됩니다. 자동 통제 무력화와 외부 AI 전송은 허용되지 않습니다.</div>}
+        {controlValidationEnabled && (
+          <div className="inline-alert inline-alert--ok">
+            <strong>승인된 통제 검증</strong><br />
+            {authorizedDeviceId} · {networkHostLines(allowedNetworkHosts).length}개 허용 서버 · {authorizationExpiresAt.replace("T", " ")} 만료
+          </div>
+        )}
         <ol>
           <li><span>1</span>소유하거나 명시적으로 진단 권한을 받은 앱·단말입니다.</li>
           <li><span>2</span>AI 생성 스크립트는 승인 전 실행되지 않습니다.</li>
@@ -446,18 +493,43 @@ export default function DiagnosticSetupPage() {
       </aside>
       {controlValidationDialogOpen && (
         <div className="consent-dialog-backdrop" role="presentation">
-          <section className="consent-dialog panel" role="dialog" aria-modal="true" aria-labelledby="control-validation-title">
+          <section className="consent-dialog consent-dialog--scope panel" role="dialog" aria-modal="true" aria-labelledby="control-validation-title">
             <span className="eyebrow">APPROVED CONTROL VALIDATION</span>
             <h3 id="control-validation-title">승인 범위를 확인하세요</h3>
-            <p>이 모드는 루팅·탈옥·후킹 탐지와 앱의 대응을 관찰하고 원본 증적을 수집하기 위한 것입니다. 보안 솔루션을 자동으로 무력화하거나, 운영 계정·실제 고객 데이터에 접근하지 않습니다.</p>
-            <div className="field">
-              <label htmlFor="authorization-reference">승인 참조</label>
-              <input id="authorization-reference" value={authorizationReference} onChange={(event) => setAuthorizationReference(event.target.value)} placeholder="예: 고객사 티켓 또는 승인 문서 번호" maxLength={200} />
-              <small>고객사 또는 앱 소유자의 명시적 승인 기록을 식별할 수 있는 참조값을 입력하세요.</small>
+            <p>승인 단말과 테스트 서버를 실행에 고정합니다. mitmproxy는 범위 밖 목적지를 upstream 전송 전에 차단하고, 수동 프록시에서 발견하면 Run을 즉시 중단합니다.</p>
+            <div className="control-scope-sheet" aria-label="실행에 고정되는 승인 경계">
+              <div><span>DEVICE LOCK</span><strong>{selectedDevice?.model ?? "단말 선택 필요"}</strong><code>{authorizedDeviceId || "—"}</code></div>
+              <div><span>NETWORK POLICY</span><strong>DEFAULT DENY</strong><code>범위 밖 → 차단·수동 검토</code></div>
+              <div><span>DATA POLICY</span><strong>TEST ONLY</strong><code>승인 기록 외부 AI 제외</code></div>
             </div>
-            <div className="field">
-              <label htmlFor="control-validation-scope">승인된 테스트 범위</label>
-              <textarea id="control-validation-scope" value={scopeDescription} onChange={(event) => setScopeDescription(event.target.value)} placeholder="테스트 단말, 대상 패키지, 테스트 계정·서버, 승인 기간을 적으세요." maxLength={1000} rows={4} />
+            <div className="consent-dialog__grid">
+              <div className="field">
+                <label htmlFor="authorization-reference">승인 참조</label>
+                <input id="authorization-reference" value={authorizationReference} onChange={(event) => setAuthorizationReference(event.target.value)} placeholder="예: SEC-TICKET-2048" maxLength={200} />
+              </div>
+              <div className="field">
+                <label htmlFor="approved-by">승인자 또는 승인 기관</label>
+                <input id="approved-by" value={approvedBy} onChange={(event) => setApprovedBy(event.target.value)} placeholder="예: 고객사 보안책임자" maxLength={120} />
+              </div>
+              <div className="field">
+                <label htmlFor="authorization-expires-at">승인 만료 시각</label>
+                <input id="authorization-expires-at" type="datetime-local" value={authorizationExpiresAt} onChange={(event) => setAuthorizationExpiresAt(event.target.value)} />
+                <small>서버가 실행 시작과 네트워크 판정 시점에 다시 확인합니다.</small>
+              </div>
+              <div className="field">
+                <label htmlFor="test-account-reference">테스트 계정 참조</label>
+                <input id="test-account-reference" value={testAccountReference} onChange={(event) => setTestAccountReference(event.target.value)} placeholder="예: QA-ACCOUNT-03 (비밀번호 입력 금지)" maxLength={200} />
+                <small>계정 식별용 참조만 입력하고 비밀번호·토큰은 입력하지 않습니다.</small>
+              </div>
+              <div className="field field--wide">
+                <label htmlFor="allowed-network-hosts">허용 테스트 서버</label>
+                <textarea id="allowed-network-hosts" value={allowedNetworkHosts} onChange={(event) => setAllowedNetworkHosts(event.target.value)} placeholder={"api.test.example\n*.sandbox.example\n192.0.2.15"} rows={4} />
+                <small>한 줄에 하나씩 호스트·IP·*.하위도메인을 입력합니다. URL 경로와 단일 *는 허용되지 않습니다.</small>
+              </div>
+              <div className="field field--wide">
+                <label htmlFor="control-validation-scope">승인된 테스트 범위</label>
+                <textarea id="control-validation-scope" value={scopeDescription} onChange={(event) => setScopeDescription(event.target.value)} placeholder="대상 패키지, 허용 기능, 테스트 데이터와 제외 범위를 적으세요." maxLength={1000} rows={4} />
+              </div>
             </div>
             <div className="consent-dialog__checks">
               <label><input type="checkbox" checked={authorizationConfirmed} onChange={(event) => setAuthorizationConfirmed(event.target.checked)} /> 앱 소유자 또는 권한자의 명시적 진단 승인을 받았습니다.</label>
@@ -466,7 +538,25 @@ export default function DiagnosticSetupPage() {
             </div>
             <div className="consent-dialog__actions">
               <button className="button button--quiet" type="button" onClick={() => setControlValidationDialogOpen(false)}>취소</button>
-              <button className="button button--signal" type="button" disabled={!authorizationConfirmed || !testEnvironmentConfirmed || !testDataOnlyConfirmed || authorizationReference.trim().length < 4 || scopeDescription.trim().length < 10} onClick={() => { setControlValidationEnabled(true); setControlValidationDialogOpen(false); }}>동의하고 검증 모드 사용</button>
+              <button
+                className="button button--signal"
+                type="button"
+                disabled={
+                  !authorizationConfirmed
+                  || !testEnvironmentConfirmed
+                  || !testDataOnlyConfirmed
+                  || authorizationReference.trim().length < 4
+                  || approvedBy.trim().length < 2
+                  || testAccountReference.trim().length < 2
+                  || networkHostLines(allowedNetworkHosts).length < 1
+                  || scopeDescription.trim().length < 10
+                  || Number.isNaN(Date.parse(authorizationExpiresAt))
+                  || Date.parse(authorizationExpiresAt) <= Date.now()
+                }
+                onClick={() => { setControlValidationEnabled(true); setControlValidationDialogOpen(false); }}
+              >
+                범위를 고정하고 검증 모드 사용
+              </button>
             </div>
           </section>
         </div>

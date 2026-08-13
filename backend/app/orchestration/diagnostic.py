@@ -22,6 +22,11 @@ from backend.app.core.targets import (
     platform_for_adapter,
     require_app_identifier,
 )
+from backend.app.control_validation import (
+    ControlScopeError,
+    active_control_scope,
+    evaluate_network_scope,
+)
 from backend.app.database.models import (
     AIInvocation,
     AppArtifact,
@@ -423,11 +428,19 @@ class DiagnosticOrchestrator:
     def _proxy(self, run: DiagnosticRun):
         adapter = run.proxy_adapter
         if adapter == "mitmproxy":
+            control_scope = run.options.get("control_validation")
+            allowed_destination_hosts = (
+                list(control_scope.get("allowed_network_hosts", []))
+                if isinstance(control_scope, dict)
+                and control_scope.get("enabled") is True
+                else []
+            )
             return MitmProxyAdapter(
                 self.settings,
                 host=str(run.options.get("proxy_listen_host") or self.settings.proxy_listen_host),
                 port=int(run.options.get("proxy_port") or 8080),
                 allowed_client_ip=str(run.options.get("proxy_allowed_client_ip") or "") or None,
+                allowed_destination_hosts=allowed_destination_hosts,
             )
         if adapter == "fiddler":
             return FiddlerProxyAdapter(
@@ -1032,6 +1045,40 @@ class DiagnosticOrchestrator:
         )
         return rows
 
+    async def _record_control_scope_enforcement(
+        self,
+        db: Session,
+        run: DiagnosticRun,
+        flows,
+        flow_rows: list[ProxyFlow],
+        control_scope: dict[str, Any],
+    ) -> tuple[dict[str, Any], Evidence]:
+        summary = evaluate_network_scope(
+            flows,
+            [row.id for row in flow_rows],
+            list(control_scope["allowed_network_hosts"]),
+        )
+        evidence = self.evidence.add_json(
+            db,
+            run_id=run.id,
+            filename="control-scope-enforcement.json",
+            title="승인 범위 네트워크 집행 결과",
+            evidence_type="control_scope_enforcement",
+            data=summary,
+            description=(
+                f"허용 서버 밖 목적지 {summary['violation_count']}건을 식별해 자동 실행을 중단했습니다."
+                if summary["violation_count"]
+                else f"프록시 흐름 {summary['evaluated_flow_count']}건이 승인된 서버 범위 안에 있습니다."
+            ),
+        )
+        summary["evidence_id"] = evidence.id
+        options = dict(run.options)
+        options["control_scope_enforcement"] = summary
+        run.options = options
+        db.commit()
+        await self._emit_evidence(run.id, evidence)
+        return summary, evidence
+
     async def _capture(
         self, db: Session, run: DiagnosticRun, device, filename: str, title: str, description: str
     ) -> Evidence | None:
@@ -1091,6 +1138,7 @@ class DiagnosticOrchestrator:
         lease_acquired = False
         frida_session_started = False
         frida_script_rows: list[FridaScript] = []
+        control_scope: dict[str, Any] | None = None
         quality_checks: dict[str, dict[str, Any]] = {}
         quality_gaps: list[dict[str, str]] = []
 
@@ -1149,6 +1197,17 @@ class DiagnosticOrchestrator:
                 else:
                     app_platform = device_platform
                     package_name = "mock.synthetic.application"
+                try:
+                    control_scope = active_control_scope(run.options, run.device_id)
+                except ControlScopeError as exc:
+                    record_check("control_scope", False, str(exc))
+                    raise DiagnosticManualRequired(str(exc)) from exc
+                if control_scope:
+                    record_check(
+                        "control_scope",
+                        True,
+                        "승인 기간·단말·허용 서버 범위를 실행 시점에 다시 확인했습니다.",
+                    )
                 run.started_at = datetime.now(timezone.utc)
                 options = dict(run.options)
                 options.update(
@@ -1179,6 +1238,17 @@ class DiagnosticOrchestrator:
                 selected_device_info = next(
                     item for item in device_list if item.id == run.device_id
                 )
+                preflight_options = {
+                    key: value
+                    for key, value in run.options.items()
+                    if key != "control_validation"
+                }
+                if control_scope:
+                    preflight_options["control_validation"] = {
+                        "enabled": True,
+                        "scope_recorded_locally": True,
+                        "external_ai_excluded": True,
+                    }
                 preflight = self.evidence.add_json(
                     db,
                     run_id=run.id,
@@ -1193,7 +1263,7 @@ class DiagnosticOrchestrator:
                             "version": app.version if app else None,
                             "sha256": app.sha256 if app else None,
                         },
-                        "options": run.options,
+                        "options": preflight_options,
                     },
                 )
                 await self._emit_evidence(run.id, preflight)
@@ -2076,6 +2146,50 @@ class DiagnosticOrchestrator:
                     if flows
                     else "프록시 흐름이 0개여서 네트워크 진단 범위를 확인할 수 없습니다.",
                 )
+                if control_scope:
+                    try:
+                        control_scope = active_control_scope(
+                            run.options,
+                            run.device_id,
+                        )
+                    except ControlScopeError as exc:
+                        record_check("control_scope_enforcement", False, str(exc))
+                        raise DiagnosticManualRequired(str(exc)) from exc
+                    await self._stage(
+                        db,
+                        run,
+                        "control_scope_enforcement",
+                        79,
+                        "캡처 목적지를 승인된 테스트 서버 범위와 대조합니다.",
+                    )
+                    scope_summary, _ = await self._record_control_scope_enforcement(
+                        db,
+                        run,
+                        flows,
+                        flow_rows,
+                        control_scope,
+                    )
+                    violation_count = int(scope_summary["violation_count"])
+                    record_check(
+                        "control_scope_enforcement",
+                        violation_count == 0,
+                        (
+                            "모든 프록시 목적지가 승인된 테스트 서버 범위 안에 있습니다."
+                            if violation_count == 0
+                            else f"승인 범위 밖 네트워크 목적지 {violation_count}건을 식별했습니다."
+                        ),
+                    )
+                    if violation_count:
+                        blocked_count = sum(
+                            1
+                            for item in scope_summary["violations"]
+                            if item["blocked_before_upstream"]
+                        )
+                        raise DiagnosticManualRequired(
+                            "승인 범위 밖 네트워크 목적지를 식별해 자동 진단을 중단했습니다. "
+                            f"총 {violation_count}건 중 upstream 전 차단 {blocked_count}건입니다. "
+                            "허용 서버 목록과 고객사 승인 범위를 검토하세요."
+                        )
                 await self._stage(
                     db,
                     run,
@@ -2176,7 +2290,13 @@ class DiagnosticOrchestrator:
                 evidence_rows = db.scalars(
                     select(Evidence).where(Evidence.run_id == run.id)
                 ).all()
-                evidence_ids = [item.id for item in evidence_rows]
+                ai_evidence_rows = [
+                    item
+                    for item in evidence_rows
+                    if item.evidence_type
+                    not in {"approval_record", "control_scope_enforcement"}
+                ]
+                evidence_ids = [item.id for item in ai_evidence_rows]
                 evidence_catalog = [
                     {
                         "id": item.id,
@@ -2184,7 +2304,7 @@ class DiagnosticOrchestrator:
                         "title": item.title,
                         "sequence": item.sequence,
                     }
-                    for item in evidence_rows
+                    for item in ai_evidence_rows
                 ]
                 db.commit()
                 proxy_summaries = [

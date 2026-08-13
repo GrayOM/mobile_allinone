@@ -30,6 +30,7 @@ const stageLabels: Record<string, string> = {
   proxy_manual_setup: "수동 프록시 준비",
   proxy_capture_import: "최종 프록시 캡처 가져오기",
   network_dynamic: "동적·네트워크",
+  control_scope_enforcement: "승인 네트워크 범위 집행",
   network_testing: "API Candidate 판정",
   ai_analysis: "AI 판정",
   finalize: "증적 정리",
@@ -40,6 +41,34 @@ const stageLabels: Record<string, string> = {
   stopped: "중지됨",
   interrupted: "중단됨",
 };
+
+interface ControlValidationScope {
+  enabled: true;
+  authorization_reference: string;
+  approved_by: string;
+  authorization_expires_at: string;
+  authorized_device_id: string;
+  test_account_reference: string;
+  allowed_network_hosts: string[];
+  scope_description: string;
+  network_scope_policy: string;
+  external_ai_excluded: boolean;
+}
+
+interface ControlScopeEnforcement {
+  status: "within_scope" | "violation" | "no_traffic";
+  evaluated_flow_count: number;
+  in_scope_count: number;
+  violation_count: number;
+  automatic_execution_stopped: boolean;
+  evidence_id?: string;
+  violations: Array<{
+    source_flow_id: string;
+    method: string;
+    origin: string;
+    blocked_before_upstream: boolean;
+  }>;
+}
 
 export default function LiveRunPage() {
   const { runId = "" } = useParams();
@@ -172,6 +201,25 @@ export default function LiveRunPage() {
     : null;
   const storage = readStorage(run.options.storage);
   const networkTesting = readNetworkTesting(run.options.network_testing);
+  const controlValidation = readControlValidation(run.options.control_validation);
+  const controlScopeEnforcement = readControlScopeEnforcement(
+    run.options.control_scope_enforcement,
+  );
+  const stageSequence = [
+    { stage: "preflight", progress: 4 },
+    { stage: "static_analysis", progress: 12 },
+    { stage: "install", progress: 22 },
+    { stage: "launch_baseline", progress: 32 },
+    { stage: "security_control_validation", progress: 44 },
+    { stage: "frida", progress: 56 },
+    { stage: "navigation", progress: 64 },
+    { stage: "dynamic_storage", progress: 68 },
+    { stage: "network_dynamic", progress: 70 },
+    ...(controlValidation ? [{ stage: "control_scope_enforcement", progress: 79 }] : []),
+    { stage: "network_testing", progress: 80 },
+    { stage: "ai_analysis", progress: 84 },
+    { stage: "finalize", progress: 96 },
+  ];
   const staticFindingCount = findings.filter((item) => item.source.startsWith("static:")).length;
   const runtimeFindingCount = findings.length - staticFindingCount;
   const controlFindingCount = findings.filter(
@@ -212,6 +260,42 @@ export default function LiveRunPage() {
 
       {run.error && <div className="inline-alert">{run.error}</div>}
       {actionError && <div className="inline-alert">{actionError}</div>}
+      {controlValidation && (
+        <section className={`control-scope-ledger panel ${controlScopeEnforcement?.status === "violation" ? "control-scope-ledger--violation" : ""}`}>
+          <div className="control-scope-ledger__head">
+            <div>
+              <span className="eyebrow">CONTROL SCOPE LEDGER</span>
+              <h3>승인 범위가 이 Run에 고정되었습니다</h3>
+            </div>
+            <StatusChip
+              value={controlScopeEnforcement?.status === "violation" ? "failed" : controlScopeEnforcement ? "available" : "pending_approval"}
+              label={controlScopeEnforcement?.status === "violation" ? "범위 이탈 · 중단" : controlScopeEnforcement ? "범위 판정 완료" : "범위 판정 대기"}
+            />
+          </div>
+          <div className="control-scope-ledger__grid">
+            <div><span>AUTHORIZATION</span><strong>{controlValidation.authorization_reference}</strong><small>{controlValidation.approved_by}</small></div>
+            <div><span>DEVICE LOCK</span><strong>{controlValidation.authorized_device_id}</strong><small>{controlValidation.test_account_reference}</small></div>
+            <div><span>VALID UNTIL</span><strong>{formatDate(controlValidation.authorization_expires_at)}</strong><small>실행·네트워크 단계 재검증</small></div>
+            <div><span>NETWORK POLICY</span><strong>{controlValidation.network_scope_policy.toUpperCase()}</strong><small>{controlValidation.allowed_network_hosts.length}개 허용 호스트</small></div>
+            <div><span>FLOW CHECK</span><strong>{controlScopeEnforcement ? `${controlScopeEnforcement.in_scope_count} / ${controlScopeEnforcement.evaluated_flow_count}` : "대기"}</strong><small>in scope / evaluated</small></div>
+            <div><span>EXTERNAL AI</span><strong>{controlValidation.external_ai_excluded ? "EXCLUDED" : "—"}</strong><small>승인 원장·집행 증적 제외</small></div>
+          </div>
+          <div className="control-scope-ledger__hosts">
+            <span>ALLOWED DESTINATIONS</span>
+            <div>{controlValidation.allowed_network_hosts.map((host) => <code key={host}>{host}</code>)}</div>
+          </div>
+          {controlScopeEnforcement?.violations.length ? (
+            <div className="control-scope-ledger__violations">
+              {controlScopeEnforcement.violations.map((item) => (
+                <div key={item.source_flow_id}>
+                  <strong>{item.method} {item.origin}</strong>
+                  <small>{item.blocked_before_upstream ? "upstream 전 차단" : "캡처 후 탐지 · 자동 중단"}</small>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      )}
       {run.current_stage === "proxy_manual_setup" && (
         <section className="panel manual-proxy-panel">
           <div>
@@ -293,22 +377,8 @@ export default function LiveRunPage() {
         <section className="console-panel stage-console">
           <div className="console-head"><span>DIAGNOSTIC SEQUENCE</span><small>{stageEvents.length} transitions</small></div>
           <div className="stage-rail">
-            {[
-              "preflight",
-              "static_analysis",
-              "install",
-              "launch_baseline",
-              "security_control_validation",
-              "frida",
-              "navigation",
-              "dynamic_storage",
-              "network_dynamic",
-              "network_testing",
-              "ai_analysis",
-              "finalize",
-            ].map((stage, index) => {
-              const stageProgress = [4, 12, 22, 32, 44, 56, 64, 68, 70, 80, 84, 96][index];
-              const done = run.progress >= stageProgress;
+            {stageSequence.map(({ stage, progress }, index) => {
+              const done = run.progress >= progress;
               const current = run.current_stage === stage;
               return (
                 <div className={`stage-node ${done ? "stage-node--done" : ""} ${current ? "stage-node--current" : ""}`} key={stage}>
@@ -653,6 +723,34 @@ function readNetworkTesting(value: unknown): NetworkTestingSummary | null {
   const item = value as Partial<NetworkTestingSummary>;
   if (!Array.isArray(item.analyses) || !Array.isArray(item.candidates) || !Array.isArray(item.executions)) return null;
   return item as NetworkTestingSummary;
+}
+
+function readControlValidation(value: unknown): ControlValidationScope | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as Partial<ControlValidationScope>;
+  if (
+    item.enabled !== true
+    || typeof item.authorization_reference !== "string"
+    || typeof item.approved_by !== "string"
+    || typeof item.authorization_expires_at !== "string"
+    || typeof item.authorized_device_id !== "string"
+    || typeof item.test_account_reference !== "string"
+    || !Array.isArray(item.allowed_network_hosts)
+  ) return null;
+  return item as ControlValidationScope;
+}
+
+function readControlScopeEnforcement(value: unknown): ControlScopeEnforcement | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as Partial<ControlScopeEnforcement>;
+  if (
+    typeof item.status !== "string"
+    || typeof item.evaluated_flow_count !== "number"
+    || typeof item.in_scope_count !== "number"
+    || typeof item.violation_count !== "number"
+    || !Array.isArray(item.violations)
+  ) return null;
+  return item as ControlScopeEnforcement;
 }
 
 const sensitiveDisplayKey = /authorization|cookie|token|secret|password|passwd|session|email|phone|address|account|card/i;

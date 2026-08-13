@@ -12,6 +12,16 @@ from mitmproxy import http
 MAX_BODY = 1024 * 1024
 OUTPUT = Path(os.environ["MSW_MITM_OUTPUT"])
 ALLOWED_CLIENT_IP = os.getenv("MSW_MITM_ALLOWED_CLIENT_IP")
+_ALLOWED_HOSTS_RAW = os.getenv("MSW_MITM_ALLOWED_HOSTS")
+try:
+    _parsed_allowed_hosts = json.loads(_ALLOWED_HOSTS_RAW) if _ALLOWED_HOSTS_RAW else None
+except json.JSONDecodeError:
+    _parsed_allowed_hosts = []
+ALLOWED_HOSTS = (
+    tuple(str(item).lower().rstrip(".") for item in _parsed_allowed_hosts)
+    if isinstance(_parsed_allowed_hosts, list)
+    else None
+)
 
 
 def _text(content: bytes | None) -> str:
@@ -20,10 +30,33 @@ def _text(content: bytes | None) -> str:
     return content[:MAX_BODY].decode("utf-8", errors="replace")
 
 
+def _host_allowed(host: str) -> bool:
+    candidate = host.lower().rstrip(".")
+    for rule in ALLOWED_HOSTS or ():
+        if rule.startswith("*."):
+            suffix = rule[1:]
+            if candidate.endswith(suffix) and candidate != rule[2:]:
+                return True
+        elif candidate == rule:
+            return True
+    return False
+
+
 def request(flow: http.HTTPFlow) -> None:
     source_ip = str(flow.client_conn.peername[0]) if flow.client_conn.peername else ""
     if ALLOWED_CLIENT_IP and source_ip != ALLOWED_CLIENT_IP:
         flow.kill()
+        return
+    if ALLOWED_HOSTS is not None and not _host_allowed(flow.request.host):
+        flow.response = http.Response.make(
+            451,
+            b'{"error":"outside_approved_control_scope"}',
+            {
+                "Content-Type": "application/json",
+                "X-MSW-Control-Scope": "blocked",
+                "Cache-Control": "no-store",
+            },
+        )
 
 
 def response(flow: http.HTTPFlow) -> None:

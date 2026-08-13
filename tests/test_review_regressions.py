@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -779,6 +780,102 @@ def test_burp_run_waits_for_nonempty_har_and_links_flows(
     evidence = client.get(f"/api/runs/{run_id}/evidence").json()
     assert {"manual_proxy_import", "network_capture"} <= {
         item["evidence_type"] for item in evidence
+    }
+
+
+def test_control_validation_stops_after_out_of_scope_manual_proxy_flow(
+    client, monkeypatch: pytest.MonkeyPatch
+):
+    project, artifact = _live_artifact_from_demo(client)
+    monkeypatch.setattr(
+        client.app.state.orchestrator,
+        "_device",
+        lambda _adapter: MockDeviceAdapter(),
+    )
+    started = client.post(
+        "/api/runs",
+        json={
+            "project_id": project.id,
+            "app_id": artifact.id,
+            "device_id": "mock-android-01",
+            "device_adapter": "android_adb",
+            "proxy_adapter": "burp",
+            "options": {
+                "proxy_listen_host": "192.0.2.10",
+                "proxy_port": 8080,
+                "control_validation": {
+                    "enabled": True,
+                    "authorization_reference": "CUSTOMER-TICKET-2048",
+                    "approved_by": "Customer Security Owner",
+                    "authorization_expires_at": (
+                        datetime.now(timezone.utc) + timedelta(hours=8)
+                    ).isoformat(),
+                    "authorized_device_id": "mock-android-01",
+                    "test_account_reference": "QA-ACCOUNT-03",
+                    "allowed_network_hosts": ["api.allowed.test"],
+                    "scope_description": "승인된 테스트 단말과 허용 테스트 서버만 검증",
+                    "authorized_scope_confirmed": True,
+                    "test_environment_confirmed": True,
+                    "test_data_only_confirmed": True,
+                },
+            },
+        },
+    )
+    assert started.status_code == 201, started.text
+    run_id = started.json()["id"]
+    paused = _wait_for_status(client, run_id, {"safely_paused", "failed"})
+    assert paused["current_stage"] == "proxy_manual_setup"
+    assert client.post(f"/api/runs/{run_id}/proxy/confirm-setup").status_code == 200
+    assert client.post(f"/api/runs/{run_id}/resume").status_code == 200
+    paused = _wait_for_status(client, run_id, {"safely_paused", "failed"})
+    assert paused["current_stage"] == "proxy_capture_import"
+
+    har = {
+        "log": {
+            "entries": [
+                {
+                    "request": {
+                        "method": "GET",
+                        "url": "https://outside.example/v1/profile",
+                        "headers": [],
+                    },
+                    "response": {
+                        "status": 200,
+                        "headers": [],
+                        "content": {"text": '{"ok":true}'},
+                    },
+                }
+            ]
+        }
+    }
+    imported = client.post(
+        f"/api/runs/{run_id}/proxy/import",
+        files={"file": ("outside.har", json.dumps(har), "application/json")},
+    )
+    assert imported.status_code == 200, imported.text
+    assert client.post(f"/api/runs/{run_id}/resume").status_code == 200
+
+    finished = _wait_for_status(
+        client,
+        run_id,
+        {"manual_required", "failed", "completed", "completed_with_gaps"},
+    )
+    assert finished["status"] == "manual_required", finished.get("error")
+    assert "범위 밖 네트워크 목적지" in finished["error"]
+    enforcement = finished["options"]["control_scope_enforcement"]
+    assert enforcement["violation_count"] == 1
+    assert enforcement["automatic_execution_stopped"] is True
+    assert "network_testing" not in finished["options"]
+    evidence = client.get(f"/api/runs/{run_id}/evidence").json()
+    assert {"approval_record", "control_scope_enforcement"} <= {
+        item["evidence_type"] for item in evidence
+    }
+    preflight = next(item for item in evidence if item["evidence_type"] == "device_state")
+    assert "CUSTOMER-TICKET-2048" not in json.dumps(preflight["inline_data"])
+    assert preflight["inline_data"]["options"]["control_validation"] == {
+        "enabled": True,
+        "scope_recorded_locally": True,
+        "external_ai_excluded": True,
     }
 
 

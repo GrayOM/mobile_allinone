@@ -149,6 +149,17 @@ Mock device, proxy and AI adapters; unknown adapter names return an error instea
 of falling back to Mock. Synthetic apps, runs, findings, evidence, flows, tool
 results and AI invocations carry a persistent marker.
 
+Approved control validation binds the authorization reference, approver, expiry,
+selected device ID, test-account reference and a normalized destination-host
+allowlist to the Run. The scope is checked when execution starts and again after
+the final proxy drain. An expired authorization or device mismatch ends as
+`manual_required`. In mitmproxy mode the addon applies the destination allowlist
+before upstream forwarding and returns a local HTTP 451 response for a denied
+host. Imported Burp/Fiddler flows are evaluated after capture; any out-of-scope
+origin stops later automatic network testing and AI classification. Both the
+approval record and scope-enforcement audit evidence remain local and are
+excluded from the external AI evidence catalog.
+
 mitmproxy binds to a user-selected Windows LAN IP, uses a dynamically allocated
 port and requires an allowed client IP. The addon rejects other source addresses.
 The orchestrator stops the complete proxy process tree on completion, stop,
