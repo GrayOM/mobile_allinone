@@ -10,6 +10,7 @@ from backend.app.core.status import CapabilityStatus
 from backend.app.devices.base import DeviceOperation
 
 from .base import UIDriver
+from .approval import normalized_navigation_candidate
 from .models import (
     NavigationAction,
     NavigationCandidate,
@@ -109,10 +110,11 @@ class NavigationEngine:
         self._states[state.fingerprint] = state
         return True
 
-    def _queue_risky(self, state: UIState, candidate: NavigationCandidate) -> None:
+    async def _queue_risky(
+        self, state: UIState, candidate: NavigationCandidate
+    ) -> None:
         key = (state.fingerprint, candidate.element_id)
-        self._pending.setdefault(
-            key,
+        pending = normalized_navigation_candidate(
             {
                 **candidate.to_dict(),
                 "state_fingerprint": state.fingerprint,
@@ -120,7 +122,15 @@ class NavigationEngine:
                 "activity": state.activity,
                 "status": "pending_approval",
                 "queued_at": self._now(),
-            },
+            }
+        )
+        if key in self._pending:
+            return
+        self._pending[key] = pending
+        await self._update(
+            "pending",
+            candidate=pending,
+            state=state.to_dict(include_elements=False),
         )
 
     async def _execute(
@@ -151,7 +161,7 @@ class NavigationEngine:
                     "실행 직전 위험 정책 재검증에서 자동 동작을 차단했습니다.",
                     synthetic=self.synthetic,
                 )
-                self._queue_risky(live_state, rechecked)
+                await self._queue_risky(live_state, rechecked)
             else:
                 x, y = live_element.bounds.center
                 try:
@@ -373,7 +383,7 @@ class NavigationEngine:
         candidates = self.policy.candidates(state, self.target_package)
         for candidate in candidates:
             if candidate.requires_approval or candidate.risk != "low":
-                self._queue_risky(state, candidate)
+                await self._queue_risky(state, candidate)
         safe = [
             item
             for item in candidates

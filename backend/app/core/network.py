@@ -152,6 +152,119 @@ def pinned_http_transport(snapshot: DestinationSnapshot) -> httpx.AsyncHTTPTrans
     return PinnedAsyncHTTPTransport(snapshot)
 
 
+class _ResolvedNetworkStream(httpcore.AsyncNetworkStream):
+    """TLS stream wrapper that preserves the approved hostname as SNI."""
+
+    def __init__(self, stream: httpcore.AsyncNetworkStream, *, hostname: str):
+        self._stream = stream
+        self._hostname = hostname
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return await self._stream.read(max_bytes, timeout)
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        await self._stream.write(buffer, timeout)
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+    async def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        if (server_hostname or "").rstrip(".").lower() != self._hostname:
+            await self.aclose()
+            raise httpcore.ConnectError(
+                "승인된 읽기 전용 목적지와 TLS SNI가 다릅니다."
+            )
+        secured = await self._stream.start_tls(
+            ssl_context,
+            server_hostname=server_hostname,
+            timeout=timeout,
+        )
+        return _ResolvedNetworkStream(secured, hostname=self._hostname)
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._stream.get_extra_info(info)
+
+
+class ResolvedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Connect only to addresses resolved and approved before a single request."""
+
+    def __init__(self, hostname: str, addresses: Iterable[str]):
+        if AutoBackend is None:
+            raise RuntimeError(
+                "설치된 httpcore가 승인 목적지 고정 연결과 호환되지 않습니다."
+            )
+        self.hostname = hostname.rstrip(".").lower()
+        self.addresses = tuple(
+            sorted({str(ipaddress.ip_address(item)) for item in addresses})
+        )
+        if not self.hostname or not self.addresses:
+            raise ValueError("승인 목적지 hostname과 연결 IP가 필요합니다.")
+        self._backend = AutoBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[tuple[int, int, int | bytes]] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        if host.rstrip(".").lower() != self.hostname:
+            raise httpcore.ConnectError(
+                "HTTP 요청 hostname이 승인된 읽기 전용 목적지와 다릅니다."
+            )
+        failures: list[str] = []
+        for address in self.addresses:
+            try:
+                stream = await self._backend.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+                peer = stream.get_extra_info("server_addr")
+                peer_address = str(ipaddress.ip_address(peer[0])) if peer else ""
+                if peer_address != address:
+                    await stream.aclose()
+                    raise httpcore.ConnectError(
+                        "실제 peer IP가 승인 직전 해석한 IP와 다릅니다."
+                    )
+                return _ResolvedNetworkStream(stream, hostname=self.hostname)
+            except Exception as exc:
+                failures.append(f"{address}: {type(exc).__name__}: {exc}")
+        raise httpcore.ConnectError(
+            "승인 직전 확인한 목적지 IP로 연결하지 못했습니다: "
+            + "; ".join(failures)
+        )
+
+    async def connect_unix_socket(self, *args: Any, **kwargs: Any):
+        raise httpcore.ConnectError("읽기 전용 재현은 Unix socket을 사용하지 않습니다.")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._backend.sleep(seconds)
+
+
+class ResolvedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
+    def __init__(self, hostname: str, addresses: Iterable[str]):
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            retries=0,
+            network_backend=ResolvedNetworkBackend(hostname, addresses),
+        )
+
+
+def resolved_http_transport(
+    hostname: str, addresses: Iterable[str]
+) -> httpx.AsyncHTTPTransport:
+    return ResolvedAsyncHTTPTransport(hostname, addresses)
+
+
 def _version_tuple(value: str) -> tuple[int, int, int]:
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)", value)
     if not match:

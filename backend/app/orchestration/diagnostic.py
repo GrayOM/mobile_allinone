@@ -58,6 +58,7 @@ from backend.app.navigation import (
     NavigationHooks,
     NavigationLimits,
     NavigationResult,
+    approval_eligible,
 )
 from backend.app.network_testing import (
     MockNetworkTestExecutor,
@@ -129,6 +130,7 @@ class DiagnosticOrchestrator:
         self._pause_events: dict[str, asyncio.Event] = {}
         self._stop_requested: set[str] = set()
         self._proxy_adapters: dict[str, Any] = {}
+        self._ui_drivers: dict[str, Any] = {}
         self._leases = ResourceLeaseManager()
         self._proxy_start_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
@@ -391,20 +393,27 @@ class DiagnosticOrchestrator:
     def ui_driver_for_run(
         self, run: DiagnosticRun, device, package_name: str
     ):
+        current = self._ui_drivers.get(run.id)
+        if current is not None:
+            return current
         if run.device_adapter == "mock" and "ios" not in run.device_id.lower():
-            return MockAndroidUIDriver(
+            driver = MockAndroidUIDriver(
                 run.device_id,
                 package_name=package_name,
                 device_adapter=device,
             )
+            self._ui_drivers[run.id] = driver
+            return driver
         if run.device_adapter == "android_adb":
-            return AndroidADBUIDriver(
+            driver = AndroidADBUIDriver(
                 run.device_id,
                 settings=self.settings,
                 device_adapter=(
                     device if isinstance(device, AndroidDeviceAdapter) else None
                 ),
             )
+            self._ui_drivers[run.id] = driver
+            return driver
         return None
 
     def storage_collector_for_run(
@@ -640,6 +649,66 @@ class DiagnosticOrchestrator:
             return evidence_ids
 
         async def navigation_update(data: dict[str, object]) -> None:
+            candidate = data.get("candidate")
+            state = data.get("state")
+            if (
+                data.get("event") == "pending"
+                and isinstance(candidate, dict)
+                and isinstance(state, dict)
+            ):
+                options = dict(run.options)
+                navigation = dict(options.get("navigation") or {})
+                pending = [
+                    item
+                    for item in navigation.get("pending_approval", [])
+                    if isinstance(item, dict)
+                ]
+                if not any(item.get("id") == candidate.get("id") for item in pending):
+                    pending.append(candidate)
+                states = [
+                    item
+                    for item in navigation.get("states", [])
+                    if isinstance(item, dict)
+                ]
+                if not any(
+                    item.get("fingerprint") == state.get("fingerprint")
+                    for item in states
+                ):
+                    states.append(state)
+                actions = [
+                    item
+                    for item in navigation.get("actions", [])
+                    if isinstance(item, dict)
+                ]
+                navigation.update(
+                    {
+                        "status": CapabilityStatus.AVAILABLE.value,
+                        "message": "승인 대기 UI 후보를 현재 화면에 고정했습니다.",
+                        "termination_reason": "approval_checkpoint",
+                        "states": states,
+                        "actions": actions,
+                        "pending_approval": pending,
+                        "state_count": int(data.get("state_count") or len(states)),
+                        "action_count": int(data.get("action_count") or len(actions)),
+                        "synthetic": run.synthetic,
+                    }
+                )
+                options["navigation"] = navigation
+                options["pending_navigation_actions"] = pending
+                run.options = options
+                db.commit()
+                if (
+                    run.options.get("pause_for_approval_candidates")
+                    and approval_eligible(candidate)
+                ):
+                    await self.events.publish(run.id, "navigation", data)
+                    await self.pause(
+                        run.id,
+                        "현재 화면의 중위험 UI 후보가 1회 승인 검토를 기다립니다.",
+                    )
+                    await self._checkpoint(run.id)
+                    db.refresh(run)
+                    return
             await self.events.publish(run.id, "navigation", data)
 
         engine = NavigationEngine(
@@ -1875,10 +1944,27 @@ class DiagnosticOrchestrator:
                     )
                     navigation_summary = navigation_result.to_dict()
                     navigation_summary["graph_evidence_id"] = navigation_graph.id
+                    previous_navigation = run.options.get("navigation")
+                    approved_actions = (
+                        list(previous_navigation.get("approved_actions") or [])
+                        if isinstance(previous_navigation, dict)
+                        else []
+                    )
+                    approved_ids = {
+                        str(item.get("id") or "")
+                        for item in approved_actions
+                        if isinstance(item, dict)
+                    }
+                    navigation_summary["pending_approval"] = [
+                        item
+                        for item in navigation_summary["pending_approval"]
+                        if str(item.get("id") or "") not in approved_ids
+                    ]
+                    navigation_summary["approved_actions"] = approved_actions
                     options = dict(run.options)
                     options["navigation"] = navigation_summary
                     options["pending_navigation_actions"] = (
-                        navigation_result.pending_approval
+                        navigation_summary["pending_approval"]
                     )
                     run.options = options
                     db.commit()
@@ -2208,6 +2294,21 @@ class DiagnosticOrchestrator:
                 options["network_testing_evidence_id"] = network_evidence.id
                 run.options = options
                 db.commit()
+                if (
+                    run.options.get("pause_for_approval_candidates")
+                    and any(
+                        isinstance(item, dict)
+                        and item.get("test_type") == "read_only_replay"
+                        and item.get("method") in {"GET", "HEAD"}
+                        for item in network_summary["pending_approval"]
+                    )
+                ):
+                    await self.pause(
+                        run.id,
+                        "승인 가능한 GET/HEAD API Candidate가 있어 1회 승인 검토를 기다립니다.",
+                    )
+                    await self._checkpoint(run.id)
+                    db.refresh(run)
                 record_check(
                     "network_testing",
                     bool(network_summary["flow_count"]),
@@ -2294,7 +2395,12 @@ class DiagnosticOrchestrator:
                     item
                     for item in evidence_rows
                     if item.evidence_type
-                    not in {"approval_record", "control_scope_enforcement"}
+                    not in {
+                        "approval_record",
+                        "control_scope_enforcement",
+                        "approved_ui_action_scope",
+                        "approved_network_replay_scope",
+                    }
                 ]
                 evidence_ids = [item.id for item in ai_evidence_rows]
                 evidence_catalog = [
@@ -2624,4 +2730,5 @@ class DiagnosticOrchestrator:
                     self._manual_active.discard(run_id)
             self._pause_events.pop(run_id, None)
             self._proxy_adapters.pop(run_id, None)
+            self._ui_drivers.pop(run_id, None)
             self._tasks.pop(run_id, None)

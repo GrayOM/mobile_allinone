@@ -11,6 +11,7 @@ import ipaddress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from fastapi import (
@@ -43,6 +44,7 @@ from backend.app.catalog import CATALOG_SOURCE, MASTG_CONTROLS
 from backend.app.control_validation import (
     ControlScopeError,
     active_control_scope,
+    network_host_allowed,
     normalize_control_validation_request,
 )
 from backend.app.component_validation import (
@@ -81,13 +83,31 @@ from backend.app.database.models import (
 )
 from backend.app.database.session import get_db
 from backend.app.demo import create_demo_apk
-from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDeviceAdapter
+from backend.app.devices import (
+    AndroidDeviceAdapter,
+    DeviceOperation,
+    IOSDeviceAdapter,
+    MockDeviceAdapter,
+)
 from backend.app.evidence.report import EvidenceReportRenderer
 from backend.app.evidence.service import EvidenceService
 from backend.app.frida import FridaManager, FridaSessionScript
 from backend.app.frida.policy import is_safe_automatic_script, script_applies_to_app
 from backend.app.orchestration import DiagnosticOrchestrator, ManualActionInProgress
-from backend.app.navigation import NavigationLimits
+from backend.app.navigation import (
+    NavigationApprovalError,
+    NavigationLimits,
+    NavigationRiskPolicy,
+    normalized_navigation_candidate,
+    pending_navigation_candidates,
+    resolve_navigation_candidate,
+)
+from backend.app.network_testing import (
+    LiveNetworkExecutionError,
+    LiveReadOnlyNetworkExecutor,
+    NetworkApprovalError,
+    resolve_network_candidate,
+)
 from backend.app.orchestration.approvals import (
     ApprovalError,
     consume_approval,
@@ -100,6 +120,7 @@ from backend.app.proxy import (
     FiddlerProxyAdapter,
     MitmProxyAdapter,
     MockProxyAdapter,
+    ProxyFlowData,
 )
 from backend.app.proxy.manual import ManualProxyAdapter
 from backend.app.runtime import DrozerRuntimeAdapter, ObjectionRuntimeAdapter
@@ -1012,10 +1033,76 @@ class DeviceAction(BaseModel):
 class ApprovalIssueRequest(BaseModel):
     project_id: str
     run_id: str
-    resource_type: str = Field(pattern="^(device|runtime|frida|component)$")
+    resource_type: str = Field(
+        pattern="^(device|runtime|frida|component|ui_action|network_candidate)$"
+    )
     action: str = Field(min_length=1, max_length=100)
     approved_by: str = Field(default="local_user", min_length=1, max_length=100)
     candidate_id: str | None = Field(default=None, pattern="^[a-f0-9]{24}$")
+
+
+def _proxy_flow_data(row: ProxyFlow) -> ProxyFlowData:
+    return ProxyFlowData(
+        method=row.method,
+        url=row.url,
+        request_headers={
+            str(key): str(value) for key, value in (row.request_headers or {}).items()
+        },
+        request_body=row.request_body or "",
+        status_code=row.status_code,
+        response_headers={
+            str(key): str(value) for key, value in (row.response_headers or {}).items()
+        },
+        response_body=row.response_body or "",
+        captured_at=row.captured_at,
+        sensitive_candidates=list(row.sensitive_candidates or []),
+        source_ip=row.source_ip,
+        synthetic=row.synthetic,
+    )
+
+
+def _network_candidate_for_run(
+    db: Session, run: DiagnosticRun, candidate_id: str
+):
+    summary = run.options.get("network_testing")
+    stored = (
+        next(
+            (
+                item
+                for item in summary.get("candidates", [])
+                if isinstance(item, dict) and item.get("id") == candidate_id
+            ),
+            None,
+        )
+        if isinstance(summary, dict)
+        else None
+    )
+    if not stored:
+        raise NetworkApprovalError(
+            "현재 Run의 API Candidate 원장에서 후보를 찾을 수 없습니다."
+        )
+    source_flow_id = str(stored.get("source_flow_id") or "")
+    row = db.get(ProxyFlow, source_flow_id)
+    if not row or row.run_id != run.id:
+        raise NetworkApprovalError(
+            "API Candidate의 원본 Flow가 현재 Run에 속하지 않습니다."
+        )
+    source = _proxy_flow_data(row)
+    candidate = resolve_network_candidate(
+        run.options,
+        candidate_id,
+        source,
+        source_flow_id=row.id,
+    )
+    executions = summary.get("executions", []) if isinstance(summary, dict) else []
+    if any(
+        isinstance(item, dict) and item.get("candidate_id") == candidate_id
+        for item in executions
+    ):
+        raise NetworkApprovalError(
+            "이 API Candidate는 이미 실행되어 반복 재전송할 수 없습니다."
+        )
+    return candidate, row, source
 
 
 @router.post("/approvals", status_code=201)
@@ -1040,9 +1127,62 @@ def create_operation_approval(
         if candidate["execution_status"] != "approval_required":
             raise HTTPException(409, "이 후보는 자동 호출 대상이 아니며 수동 재검증이 필요합니다.")
         target = candidate["id"]
+    elif payload.resource_type == "ui_action":
+        if payload.action != "tap" or not payload.candidate_id or not app:
+            raise HTTPException(422, "UI 동작 승인에는 후보 ID와 tap 작업이 필요합니다.")
+        if run.status != RunStatus.SAFELY_PAUSED.value:
+            raise HTTPException(409, "UI 동작 승인은 Run이 안전 일시정지 상태일 때만 발급합니다.")
+        try:
+            candidate = resolve_navigation_candidate(
+                run.options, payload.candidate_id
+            )
+        except NavigationApprovalError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        target_package = _target_for_app(
+            app, live=run.run_mode == RunMode.LIVE.value
+        )
+        if candidate.get("package") != target_package:
+            raise HTTPException(409, "UI 후보의 package가 현재 진단 대상과 다릅니다.")
+        if run.run_mode == RunMode.LIVE.value:
+            try:
+                if active_control_scope(run.options, run.device_id) is None:
+                    raise ControlScopeError(
+                        "Live UI 동작에는 활성화된 승인 통제 검증 범위가 필요합니다."
+                    )
+            except ControlScopeError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        target = candidate["id"]
+    elif payload.resource_type == "network_candidate":
+        if payload.action != "replay_read_only" or not payload.candidate_id:
+            raise HTTPException(
+                422, "API Candidate 승인에는 후보 ID와 replay_read_only 작업이 필요합니다."
+            )
+        if run.run_mode != RunMode.LIVE.value:
+            raise HTTPException(409, "승인형 API 재현은 실제 Live Run에서만 수행합니다.")
+        if run.status != RunStatus.SAFELY_PAUSED.value:
+            raise HTTPException(409, "API 재현 승인은 Run이 안전 일시정지 상태일 때만 발급합니다.")
+        try:
+            candidate, _, source = _network_candidate_for_run(
+                db, run, payload.candidate_id
+            )
+            scope = active_control_scope(run.options, run.device_id)
+            if scope is None:
+                raise ControlScopeError(
+                    "Live API 재현에는 활성화된 승인 통제 검증 범위가 필요합니다."
+                )
+            if not network_host_allowed(
+                source.url and urlsplit(source.url).hostname,
+                list(scope["allowed_network_hosts"]),
+            ):
+                raise ControlScopeError(
+                    "API Candidate 목적지가 현재 승인된 테스트 서버 범위 밖입니다."
+                )
+        except (NetworkApprovalError, ControlScopeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        target = candidate.id
     else:
         if payload.candidate_id is not None:
-            raise HTTPException(422, "정적 후보 ID는 컴포넌트 승인에서만 사용할 수 있습니다.")
+            raise HTTPException(422, "이 작업 유형에는 Candidate ID를 사용할 수 없습니다.")
         target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
     approval, token = issue_approval(
         db,
@@ -1346,6 +1486,540 @@ async def verify_component_candidate(
                 after_evidence.id,
                 log_evidence.id,
             ],
+        }
+    finally:
+        if lease_acquired:
+            await orchestrator.leases.release(run.id)
+        if manual_claimed:
+            await orchestrator.end_manual_action(run.id)
+
+
+@router.get("/runs/{run_id}/ui-action-candidates")
+def list_ui_action_candidates(run_id: str, db: Session = Depends(get_db)):
+    run = _run_or_404(db, run_id)
+    app = db.get(AppArtifact, run.app_id) if run.app_id else None
+    if not app:
+        raise HTTPException(422, "UI 동작 검증에는 대상 앱이 연결된 진단이 필요합니다.")
+    target_package = _target_for_app(
+        app, live=run.run_mode == RunMode.LIVE.value
+    )
+    candidates = pending_navigation_candidates(run.options)
+    for candidate in candidates:
+        candidate["approval_eligible"] = (
+            candidate.get("risk") == "medium"
+            and candidate.get("action_type") == "tap"
+            and candidate.get("package") == target_package
+        )
+    navigation = run.options.get("navigation")
+    history = (
+        navigation.get("approved_actions", [])
+        if isinstance(navigation, dict)
+        else []
+    )
+    return {
+        "run_id": run.id,
+        "requires_safe_pause": True,
+        "candidates": candidates,
+        "history": history if isinstance(history, list) else [],
+    }
+
+
+class ApprovedCandidateExecutionRequest(BaseModel):
+    approval_token: str = Field(min_length=32, max_length=200)
+
+
+@router.post("/runs/{run_id}/ui-action-candidates/{candidate_id}/execute")
+async def execute_ui_action_candidate(
+    request: Request,
+    run_id: str,
+    candidate_id: str,
+    payload: ApprovedCandidateExecutionRequest,
+    db: Session = Depends(get_db),
+):
+    run = _run_or_404(db, run_id)
+    project, run, app = _scoped_run(
+        db, project_id=run.project_id, run_id=run.id
+    )
+    if not app:
+        raise HTTPException(422, "UI 동작 검증에는 대상 앱이 연결된 진단이 필요합니다.")
+    package_name = _target_for_app(
+        app, live=run.run_mode == RunMode.LIVE.value
+    )
+    try:
+        candidate = resolve_navigation_candidate(run.options, candidate_id)
+    except NavigationApprovalError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if candidate.get("package") != package_name:
+        raise HTTPException(409, "UI 후보의 package가 현재 진단 대상과 다릅니다.")
+    if run.run_mode == RunMode.LIVE.value:
+        try:
+            if active_control_scope(run.options, run.device_id) is None:
+                raise ControlScopeError(
+                    "Live UI 동작에는 활성화된 승인 통제 검증 범위가 필요합니다."
+                )
+        except ControlScopeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    orchestrator = _orchestrator(request)
+    if not await orchestrator.begin_manual_action(run.id):
+        raise HTTPException(
+            409, "자동 Task가 안전하게 대기 중이거나 다른 수동 작업이 끝난 뒤 실행하세요."
+        )
+    manual_claimed = True
+    lease_acquired = False
+    try:
+        try:
+            approval = consume_approval(
+                db,
+                payload.approval_token,
+                project_id=project.id,
+                run_id=run.id,
+                resource_type="ui_action",
+                action="tap",
+                device_id=run.device_id,
+                target=candidate["id"],
+            )
+            lease_acquired = await orchestrator.leases.acquire(
+                run.id, run.device_id, None
+            )
+        except ApprovalError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        try:
+            device = orchestrator.device_for_run(db, run)
+            driver = orchestrator.ui_driver_for_run(
+                run, device, package_name
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if driver is None:
+            raise HTTPException(409, "현재 단말에는 승인형 UI 실행 Driver가 없습니다.")
+
+        limits = NavigationLimits.from_options(
+            run.options.get("navigation_limits")
+        )
+        try:
+            before_state = await asyncio.wait_for(
+                driver.dump_ui(), timeout=limits.action_timeout
+            )
+        except (asyncio.TimeoutError, RuntimeError, ValueError) as exc:
+            raise HTTPException(409, f"실행 전 UI Tree 확인 실패: {exc}") from exc
+        element = before_state.element(str(candidate["element_id"]))
+        if (
+            before_state.fingerprint != candidate["state_fingerprint"]
+            or before_state.package != package_name
+            or element is None
+        ):
+            raise HTTPException(
+                409, "현재 화면이 승인 후보 생성 시점과 달라 stale UI 동작을 차단했습니다."
+            )
+        rechecked = NavigationRiskPolicy().classify(element, package_name)
+        current_candidate = normalized_navigation_candidate(
+            {
+                **rechecked.to_dict(),
+                "state_fingerprint": before_state.fingerprint,
+                "package": before_state.package,
+                "activity": before_state.activity,
+                "status": "pending_approval",
+                "queued_at": candidate.get("queued_at"),
+            }
+        )
+        if (
+            current_candidate["id"] != candidate["id"]
+            or current_candidate["risk"] != "medium"
+            or current_candidate["action_type"] != "tap"
+        ):
+            raise HTTPException(
+                409, "실행 직전 위험 정책 결과가 승인 내용과 달라 UI 동작을 차단했습니다."
+            )
+
+        evidence_service = EvidenceService(_settings(request))
+        action_dir = (
+            evidence_service.run_dir(run.id)
+            / "approved-ui-actions"
+            / candidate["id"]
+        )
+        action_dir.mkdir(parents=True, exist_ok=True)
+        before_screen = await driver.screenshot(
+            action_dir / f"{uuid.uuid4()}-before.png"
+        )
+        before_screen_evidence = evidence_service.add(
+            db,
+            run_id=run.id,
+            evidence_type="approved_ui_action_before",
+            title=f"승인 UI 동작 전 화면 · {candidate['label']}",
+            description=before_screen.message,
+            command=before_screen.command,
+            file_path=before_screen.file_path,
+            inline_data={
+                "candidate_id": candidate["id"],
+                "operation": before_screen.to_dict(),
+            },
+        )
+        before_tree_evidence = evidence_service.add_json(
+            db,
+            run_id=run.id,
+            filename=f"approved-ui-actions/{candidate['id']}/{uuid.uuid4()}-before-ui.json",
+            evidence_type="approved_ui_action_before_tree",
+            title=f"승인 UI 동작 전 Tree · {candidate['label']}",
+            data={
+                "candidate_id": candidate["id"],
+                "state": before_state.to_dict(),
+                "raw_xml": before_state.raw_xml,
+            },
+        )
+        scope_evidence = evidence_service.add_json(
+            db,
+            run_id=run.id,
+            filename=f"approved-ui-actions/{candidate['id']}/{uuid.uuid4()}-scope.json",
+            evidence_type="approved_ui_action_scope",
+            title=f"승인 UI 동작 범위 · {candidate['label']}",
+            data={
+                "candidate": candidate,
+                "approval_id": approval.id,
+                "approved_by": approval.approved_by,
+                "approved_at": approval.approved_at.isoformat(),
+                "execution_policy": "one_time_medium_risk_tap",
+            },
+        )
+
+        if before_screen.status != CapabilityStatus.AVAILABLE:
+            operation = DeviceOperation(
+                CapabilityStatus.MANUAL_REQUIRED,
+                "동작 전 화면을 확보하지 못해 승인 UI 동작을 실행하지 않았습니다.",
+                synthetic=run.synthetic,
+            )
+            after_state = before_state
+        else:
+            x, y = element.bounds.center
+            try:
+                operation = await asyncio.wait_for(
+                    driver.tap(x, y), timeout=limits.action_timeout
+                )
+                after_state = (
+                    await asyncio.wait_for(
+                        driver.wait_for_idle(limits.action_timeout),
+                        timeout=limits.action_timeout + 0.5,
+                    )
+                    if operation.status == CapabilityStatus.AVAILABLE
+                    else await driver.dump_ui()
+                )
+            except (asyncio.TimeoutError, RuntimeError, ValueError) as exc:
+                operation = DeviceOperation(
+                    CapabilityStatus.FAILED,
+                    f"승인 UI 동작 실행 실패: {type(exc).__name__}: {exc}",
+                    synthetic=run.synthetic,
+                )
+                after_state = before_state
+
+        action_evidence = evidence_service.add(
+            db,
+            run_id=run.id,
+            evidence_type="approved_ui_action",
+            title=f"승인 UI 동작 · {candidate['label']}",
+            description=operation.message,
+            command=operation.command,
+            inline_data={
+                "candidate_id": candidate["id"],
+                "operation": operation.to_dict(),
+            },
+        )
+        after_screen = await driver.screenshot(
+            action_dir / f"{uuid.uuid4()}-after.png"
+        )
+        after_screen_evidence = evidence_service.add(
+            db,
+            run_id=run.id,
+            evidence_type="approved_ui_action_after",
+            title=f"승인 UI 동작 후 화면 · {candidate['label']}",
+            description=after_screen.message,
+            command=after_screen.command,
+            file_path=after_screen.file_path,
+            inline_data={
+                "candidate_id": candidate["id"],
+                "operation": after_screen.to_dict(),
+            },
+        )
+        after_tree_evidence = evidence_service.add_json(
+            db,
+            run_id=run.id,
+            filename=f"approved-ui-actions/{candidate['id']}/{uuid.uuid4()}-after-ui.json",
+            evidence_type="approved_ui_action_after_tree",
+            title=f"승인 UI 동작 후 Tree · {candidate['label']}",
+            data={
+                "candidate_id": candidate["id"],
+                "state": after_state.to_dict(),
+                "raw_xml": after_state.raw_xml,
+            },
+        )
+        evidence_ids = [
+            before_screen_evidence.id,
+            before_tree_evidence.id,
+            scope_evidence.id,
+            action_evidence.id,
+            after_screen_evidence.id,
+            after_tree_evidence.id,
+        ]
+        result_evidence = evidence_service.add_json(
+            db,
+            run_id=run.id,
+            filename=f"approved-ui-actions/{candidate['id']}/{uuid.uuid4()}-result.json",
+            evidence_type="approved_ui_action_result",
+            title=f"승인 UI 동작 결과 · {candidate['label']}",
+            description=operation.message,
+            data={
+                "candidate_id": candidate["id"],
+                "status": operation.status.value,
+                "source_state": before_state.fingerprint,
+                "destination_state": after_state.fingerprint,
+                "evidence_ids": evidence_ids,
+                "synthetic": run.synthetic,
+            },
+        )
+        evidence_ids.append(result_evidence.id)
+
+        db.refresh(run)
+        options = dict(run.options)
+        navigation = dict(options.get("navigation") or {})
+        pending = [
+            item
+            for item in pending_navigation_candidates(options)
+            if item["id"] != candidate["id"]
+        ]
+        actions = list(navigation.get("actions") or [])
+        action_record = {
+            "sequence": len(actions) + 1,
+            "action_type": "approved_tap",
+            "element_id": candidate["element_id"],
+            "label": candidate["label"],
+            "risk": candidate["risk"],
+            "source_state": before_state.fingerprint,
+            "destination_state": after_state.fingerprint,
+            "result": operation.status.value,
+            "message": operation.message,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "evidence_ids": evidence_ids,
+            "synthetic": run.synthetic,
+        }
+        actions.append(action_record)
+        states = list(navigation.get("states") or [])
+        if not any(
+            isinstance(item, dict)
+            and item.get("fingerprint") == after_state.fingerprint
+            for item in states
+        ):
+            states.append(after_state.to_dict(include_elements=False))
+        history = list(navigation.get("approved_actions") or [])
+        history.append(
+            {
+                **candidate,
+                "status": operation.status.value,
+                "result_evidence_id": result_evidence.id,
+                "executed_at": action_record["timestamp"],
+            }
+        )
+        navigation.update(
+            {
+                "pending_approval": pending,
+                "approved_actions": history[-100:],
+                "actions": actions,
+                "action_count": len(actions),
+                "states": states,
+                "state_count": len(states),
+            }
+        )
+        options["navigation"] = navigation
+        options["pending_navigation_actions"] = pending
+        run.options = options
+        db.commit()
+        await event_bus.publish(
+            run.id,
+            "evidence",
+            {
+                "id": result_evidence.id,
+                "type": result_evidence.evidence_type,
+                "title": result_evidence.title,
+                "sequence": result_evidence.sequence,
+                "captured_at": result_evidence.captured_at.isoformat(),
+            },
+        )
+        return {
+            "status": operation.status.value,
+            "candidate_id": candidate["id"],
+            "result_evidence_id": result_evidence.id,
+            "evidence_ids": evidence_ids,
+        }
+    finally:
+        if lease_acquired:
+            await orchestrator.leases.release(run.id)
+        if manual_claimed:
+            await orchestrator.end_manual_action(run.id)
+
+
+@router.post("/runs/{run_id}/network-candidates/{candidate_id}/execute")
+async def execute_network_candidate(
+    request: Request,
+    run_id: str,
+    candidate_id: str,
+    payload: ApprovedCandidateExecutionRequest,
+    db: Session = Depends(get_db),
+):
+    run = _run_or_404(db, run_id)
+    project, run, _ = _scoped_run(
+        db, project_id=run.project_id, run_id=run.id
+    )
+    if run.run_mode != RunMode.LIVE.value:
+        raise HTTPException(409, "승인형 API 재현은 실제 Live Run에서만 수행합니다.")
+    try:
+        candidate, row, source = _network_candidate_for_run(
+            db, run, candidate_id
+        )
+        scope = active_control_scope(run.options, run.device_id)
+        if scope is None:
+            raise ControlScopeError(
+                "Live API 재현에는 활성화된 승인 통제 검증 범위가 필요합니다."
+            )
+    except (NetworkApprovalError, ControlScopeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    orchestrator = _orchestrator(request)
+    if not await orchestrator.begin_manual_action(run.id):
+        raise HTTPException(
+            409, "자동 Task가 안전하게 대기 중이거나 다른 수동 작업이 끝난 뒤 실행하세요."
+        )
+    manual_claimed = True
+    lease_acquired = False
+    try:
+        try:
+            approval = consume_approval(
+                db,
+                payload.approval_token,
+                project_id=project.id,
+                run_id=run.id,
+                resource_type="network_candidate",
+                action="replay_read_only",
+                device_id=run.device_id,
+                target=candidate.id,
+            )
+            lease_acquired = await orchestrator.leases.acquire(
+                run.id, run.device_id, None
+            )
+        except ApprovalError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        executor = LiveReadOnlyNetworkExecutor()
+        try:
+            execution, response_data = await executor.execute(
+                candidate,
+                source,
+                allowed_hosts=list(scope["allowed_network_hosts"]),
+            )
+        except LiveNetworkExecutionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        evidence_service = EvidenceService(_settings(request))
+        scope_evidence = evidence_service.add_json(
+            db,
+            run_id=run.id,
+            filename=f"approved-network-replay/{candidate.id}/{uuid.uuid4()}-scope.json",
+            evidence_type="approved_network_replay_scope",
+            title=f"승인 API 재현 범위 · {candidate.method} {candidate.endpoint}",
+            data={
+                "candidate_id": candidate.id,
+                "source_flow_id": row.id,
+                "approval_id": approval.id,
+                "approved_by": approval.approved_by,
+                "approved_at": approval.approved_at.isoformat(),
+                "method_policy": "GET_HEAD_ONLY",
+                "redirect_policy": "disabled",
+                "allowed_network_hosts": list(scope["allowed_network_hosts"]),
+            },
+        )
+        result_evidence = evidence_service.add_json(
+            db,
+            run_id=run.id,
+            filename=f"approved-network-replay/{candidate.id}/{uuid.uuid4()}-result.json",
+            evidence_type="approved_network_replay_result",
+            title=f"승인 API 재현 결과 · {candidate.method} {candidate.endpoint}",
+            description=execution.message,
+            data={
+                "candidate_id": candidate.id,
+                "source_flow_id": row.id,
+                "request": {
+                    "method": candidate.method,
+                    "url": source.url,
+                    "body_sent": False,
+                },
+                "response": response_data,
+                "comparison": (
+                    execution.comparison.to_dict()
+                    if execution.comparison
+                    else None
+                ),
+                "status": execution.status,
+                "synthetic": False,
+            },
+        )
+        execution.evidence_ids.extend([scope_evidence.id, result_evidence.id])
+
+        db.refresh(run)
+        options = dict(run.options)
+        summary = dict(options.get("network_testing") or {})
+        candidates = []
+        for item in summary.get("candidates", []):
+            if not isinstance(item, dict) or item.get("id") != candidate.id:
+                candidates.append(item)
+                continue
+            candidates.append(
+                {
+                    **item,
+                    "status": execution.status,
+                    "last_result": {
+                        "status": execution.status,
+                        "evidence_id": result_evidence.id,
+                        "executed_at": execution.executed_at,
+                    },
+                }
+            )
+        executions = list(summary.get("executions") or [])
+        executions.append(execution.to_dict())
+        pending = [
+            item
+            for item in summary.get("pending_approval", [])
+            if isinstance(item, dict) and item.get("id") != candidate.id
+        ]
+        summary.update(
+            {
+                "candidates": candidates,
+                "executions": executions,
+                "executed_count": len(executions),
+                "pending_approval": pending,
+                "pending_count": len(pending),
+            }
+        )
+        options["network_testing"] = summary
+        options["pending_network_tests"] = pending
+        run.options = options
+        db.commit()
+        await event_bus.publish(
+            run.id,
+            "evidence",
+            {
+                "id": result_evidence.id,
+                "type": result_evidence.evidence_type,
+                "title": result_evidence.title,
+                "sequence": result_evidence.sequence,
+                "captured_at": result_evidence.captured_at.isoformat(),
+            },
+        )
+        return {
+            "status": execution.status,
+            "candidate_id": candidate.id,
+            "comparison": (
+                execution.comparison.to_dict() if execution.comparison else None
+            ),
+            "result_evidence_id": result_evidence.id,
+            "evidence_ids": execution.evidence_ids,
         }
     finally:
         if lease_acquired:
@@ -1692,6 +2366,13 @@ async def create_run(
         raise HTTPException(422, "dynamic_storage는 boolean이어야 합니다.")
     if dynamic_storage and app_platform != "android":
         raise HTTPException(422, "동적 저장소 수집은 현재 Android에서만 지원합니다.")
+    pause_for_approval_candidates = options.get(
+        "pause_for_approval_candidates", False
+    )
+    if not isinstance(pause_for_approval_candidates, bool):
+        raise HTTPException(
+            422, "pause_for_approval_candidates는 boolean이어야 합니다."
+        )
     navigation_options = options.get("navigation_limits", {})
     if not isinstance(navigation_options, dict):
         raise HTTPException(422, "navigation_limits는 객체여야 합니다.")
@@ -1703,6 +2384,7 @@ async def create_run(
             "frida_mode": frida_mode,
             "auto_navigation": auto_navigation,
             "dynamic_storage": dynamic_storage,
+            "pause_for_approval_candidates": pause_for_approval_candidates,
             "navigation_limits": NavigationLimits.from_options(
                 navigation_options
             ).to_dict(),

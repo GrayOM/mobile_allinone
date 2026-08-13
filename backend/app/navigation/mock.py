@@ -141,6 +141,7 @@ class MockAndroidUIDriver(UIDriver):
             "help_list": "settings",
             "profile_details": "profile",
             "security": "security",
+            "logout": "home",
             "about": "about",
             "certificate": "certificate",
             "help": "help",

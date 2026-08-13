@@ -184,11 +184,11 @@ tests/               단위·API·Mock E2E 테스트
 
 ### Android 자동 탐색·동적 저장소·API Candidate
 
-- `backend/app/navigation/`은 ADB UIAutomator XML 기반 `UIDriver`, 제한형 DFS, default-deny 위험 정책과 결정론적 Mock 화면 그래프를 제공한다. TextView/ViewGroup/탭 계열과 명확한 목록·상세·정보 의미가 모두 있는 요소만 low이며 Button·Switch·CheckBox·확인/저장 계열·무라벨·unknown clickable·외부 Intent 가능 요소는 `pending_approval`로만 남긴다. 삭제·제거·초기화·해제·비활성화·revoke/disconnect 등 파괴적 의미는 safe hint보다 먼저 high로 분류하고 resource allowlist는 토큰 경계로만 일치시킨다.
+- `backend/app/navigation/`은 ADB UIAutomator XML 기반 `UIDriver`, 제한형 DFS, default-deny 위험 정책과 결정론적 Mock 화면 그래프를 제공한다. TextView/ViewGroup/탭 계열과 명확한 목록·상세·정보 의미가 모두 있는 요소만 low이며 Button·Switch·CheckBox·확인/저장 계열·무라벨·unknown clickable·외부 Intent 가능 요소는 `pending_approval`로만 남긴다. `pause_for_approval_candidates=true`이면 현재 화면의 medium tap 후보에서 안전 일시정지하며, 서버가 package·UI fingerprint·element ID·위험도를 재검증한 뒤 후보에 묶인 5분 만료 1회 토큰으로만 실행한다. high·blocked·파괴적 동작과 임의 좌표·텍스트 입력은 실행하지 않는다. 삭제·제거·초기화·해제·비활성화·revoke/disconnect 등 파괴적 의미는 safe hint보다 먼저 high로 분류하고 resource allowlist는 토큰 경계로만 일치시킨다.
 - UI 상태는 activity/resource-id/class/tree shape의 `structural_fingerprint`, clickable path/resource/class와 숫자를 정규화한 의미 label의 `interaction_fingerprint`, 전체 Text/content-desc/bounds/checked의 `content_fingerprint`를 분리한다. 그래프 방문은 interaction identity를 사용하되 동일 구조의 variant 수를 제한해 동적 화면 폭증과 동일 layout 과병합을 함께 막는다. Element ID는 bounds/content-desc 변화에 의존하지 않는다.
 - 허용 UI 동작은 Before Screenshot/UI Tree → Action → After Screenshot/UI Tree 순서와 Edge 증적 ID를 보존한다. 상태·깊이·동작·화면별 동작·반복·동작 시간·전체 시간 제한에는 서버 hard cap이 있다. 스크롤은 대상 앱의 `scrollable=true` container 내부에서만 `max_scrolls_per_state`까지 실행하고 동일 content 반복 시 중단한다.
 - `backend/app/storage/`은 Root Android의 검증된 `/data/data/<package>`만 제한형 tar로 수집한다. ADB stdout은 RAM bytes가 아니라 제한형 임시 파일로 streaming하고 성공 시 원자 교체한다. Archive hash와 SQLite 검사는 worker thread에서 실행하며 SQLite progress handler 시간 제한을 둔다. Before/After 파일 diff와 table/column/row count 및 기본 마스킹 Preview를 제공한다.
-- `backend/app/network_testing/`은 ProxyFlow를 로컬 구조화한 뒤 실행 전 Candidate를 만든다. Live 재전송은 현재 승인 대기로 남고, Mock의 읽기 전용 합성 재현만 자동 실행한다. POST/PUT/PATCH/DELETE·업로드·Object 경계 후보는 자동 실행하지 않는다.
+- `backend/app/network_testing/`은 ProxyFlow를 로컬 구조화한 뒤 실행 전 Candidate를 만든다. Mock의 읽기 전용 합성 재현은 자동 실행한다. Live는 현재 Run의 원본 Flow에서 다시 계산한 본문 없는 GET/HEAD만 승인된 host·DNS/peer IP 고정·redirect 차단·1 MiB 응답 제한 아래 후보별 1회 실행하고 Response Comparator 증적을 보존한다. POST/PUT/PATCH/DELETE·업로드·Object 경계 후보는 승인 후에도 자동 실행하지 않는다.
 - Finding 증적 정책은 AI 자유 문자열을 exact alias 기반 `CanonicalFindingCategory`로 먼저 정규화한 뒤 범주별 required evidence group을 검사한다. `local_storage` confirmed에는 반드시 `storage_snapshot` 또는 `storage_diff`가 필요하며 network/runtime 노출과 분리한다. 출처가 모호한 `sensitive_data_exposure`는 `needs_review`로 제한한다.
 - 기본 `/api/runs/{id}/flows`와 Frida WebSocket은 마스킹한다. 인증된 `/api/runs/{id}/flows/raw`와 원본 Frida JSONL은 명시적 Raw 접근이다.
 
@@ -409,6 +409,7 @@ npm audit --audit-level=high      0 vulnerabilities
 - 승인 범위의 만료·단말 고정·정확 호스트/하위 도메인 판정, mitmproxy upstream 전 차단, 로컬 `control_scope_enforcement` 감사 증적 회귀 테스트를 확인했다.
 - 승인 범위 입력 다이얼로그와 Live 범위 원장을 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건이었다.
 - 승인형 외부 진입 원장과 후보별 동의 다이얼로그를 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건이었다. Mock 회귀 테스트에서 후보 고정, 수동 전용 컴포넌트 차단, 1회 토큰 소비, Before/After·로그·Finding 연결을 확인했다.
+- 승인 후보 자동 일시정지와 중위험 UI 후보의 현재 화면 고정, 고위험 차단, 1회 토큰 소비, Before/After 화면·UI Tree·결과 증적 회귀 테스트를 확인했다. Live API는 본문 없는 GET/HEAD만 실행 경계를 통과하고 상태 변경 요청은 DNS·socket 전에 거절하는 회귀 테스트를 확인했다.
 
 테스트 명령:
 
@@ -429,8 +430,8 @@ npm audit --audit-level=high
 - 모든 iOS 버전/단말 조합의 파일·화면 수집 보장
 - iOS Keychain 구조화 뷰어와 Android app-specific external storage 수집
 - 실 Android Clipboard의 대상 앱 귀속 검증과 FLAG_SECURE/background snapshot 검증
-- 위험 UI 동작과 Live API Candidate의 1회 승인 후 실행 API·전용 승인 UI
-- Live API 재현 결과의 Response Comparator 실행과 테스트 계정 실사용 여부 검증(현재는 비밀번호 없는 계정 참조와 허용 서버 범위만 구조화)
+- high·blocked UI 동작의 자동 실행(의도적으로 `manual_required`)과 Live 상태 변경 API 재전송(의도적으로 금지)
+- Live API 테스트 계정의 실제 귀속 검증(현재는 비밀번호 없는 계정 참조와 허용 서버 범위만 구조화)
 - NVIDIA/Claude UI Candidate ranking과 증적 선택 연동(현재 탐색은 로컬 결정론적 순위)
 - 프로젝트별 retention 설정과 Raw 데이터 열람 전용 UI
 - 장시간 Logcat·화면 녹화 스트리밍 제어 UI
@@ -455,13 +456,12 @@ npm audit --audit-level=high
 
 사용자가 별도 우선순위를 주지 않으면 다음 순서가 합리적이다.
 
-1. 위험 UI 동작·Live API Candidate의 1회 승인 실행과 허용 테스트 범위 UI
-2. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
-3. NVIDIA/Claude UI 순위·증적 선택과 로컬 정책 실행기의 연동
-4. 프로젝트 retention·Raw 열람 UX와 저장 데이터 보호 확장
-5. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
-6. Burp/Fiddler 세션 연동과 장시간 수집의 취소·재연결 제어
-7. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
+1. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
+2. NVIDIA/Claude UI 순위·증적 선택과 로컬 정책 실행기의 연동
+3. 프로젝트 retention·Raw 열람 UX와 저장 데이터 보호 확장
+4. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
+5. Burp/Fiddler 세션 연동과 장시간 수집의 취소·재연결 제어
+6. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
 
 ## 13. 참고 문서
 

@@ -77,7 +77,10 @@ class NetworkCandidateEngine:
                     risk="high",
                     requires_approval=True,
                     auto_executable=False,
-                    rationale="POST·PUT·PATCH·DELETE 및 업로드는 항상 1회 승인이 필요합니다.",
+                    rationale=(
+                        "POST·PUT·PATCH·DELETE 및 업로드는 자동 재전송하지 않고 "
+                        "승인된 수동 검증으로만 남깁니다."
+                    ),
                     synthetic=analysis.synthetic,
                 )
             )

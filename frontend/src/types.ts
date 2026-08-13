@@ -325,6 +325,7 @@ export interface NavigationActionSummary {
 }
 
 export interface PendingNavigationAction {
+  id: string;
   action_type: string;
   element_id: string;
   label: string;
@@ -334,8 +335,11 @@ export interface PendingNavigationAction {
   state_fingerprint: string;
   package: string;
   activity: string;
-  status: "pending_approval";
+  status: string;
   queued_at: string;
+  approval_eligible?: boolean;
+  result_evidence_id?: string;
+  executed_at?: string;
 }
 
 export interface NavigationSummary {
@@ -345,6 +349,7 @@ export interface NavigationSummary {
   states: NavigationStateSummary[];
   actions: NavigationActionSummary[];
   pending_approval: PendingNavigationAction[];
+  approved_actions?: PendingNavigationAction[];
   state_count: number;
   action_count: number;
   graph_evidence_id?: string;
@@ -406,6 +411,11 @@ export interface NetworkTestCandidateSummary {
   rationale: string;
   status: string;
   synthetic: boolean;
+  last_result?: {
+    status: string;
+    evidence_id: string;
+    executed_at: string;
+  };
 }
 
 export interface NetworkTestingSummary {

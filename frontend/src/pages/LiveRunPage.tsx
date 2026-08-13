@@ -8,8 +8,10 @@ import type {
   FridaHealth,
   LiveEvent,
   ComponentValidationCandidate,
+  NetworkTestCandidateSummary,
   NetworkTestingSummary,
   NavigationSummary,
+  PendingNavigationAction,
   ProxyFlow,
   StorageSummary,
 } from "../types";
@@ -71,6 +73,10 @@ interface ControlScopeEnforcement {
   }>;
 }
 
+type ApprovedCandidateReview =
+  | { kind: "ui"; candidate: PendingNavigationAction }
+  | { kind: "network"; candidate: NetworkTestCandidateSummary };
+
 export default function LiveRunPage() {
   const { runId = "" } = useParams();
   const [run, setRun] = useState<DiagnosticRun | null>(null);
@@ -85,6 +91,10 @@ export default function LiveRunPage() {
   const [componentApprover, setComponentApprover] = useState("");
   const [componentChecks, setComponentChecks] = useState([false, false, false]);
   const [componentResult, setComponentResult] = useState("");
+  const [candidateReview, setCandidateReview] = useState<ApprovedCandidateReview | null>(null);
+  const [candidateApprover, setCandidateApprover] = useState("");
+  const [candidateChecks, setCandidateChecks] = useState([false, false, false]);
+  const [candidateResult, setCandidateResult] = useState("");
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [fridaHealth, setFridaHealth] = useState<FridaHealth | null>(null);
   const [connected, setConnected] = useState(false);
@@ -229,6 +239,48 @@ export default function LiveRunPage() {
     }
   }
 
+  function openApprovedCandidateReview(review: ApprovedCandidateReview) {
+    setCandidateResult("");
+    setCandidateApprover("");
+    setCandidateChecks([false, false, false]);
+    setCandidateReview(review);
+  }
+
+  async function executeApprovedCandidate() {
+    if (!candidateReview || !run) return;
+    const { candidate, kind } = candidateReview;
+    setActionBusy(`${kind}:${candidate.id}`);
+    setActionError("");
+    setCandidateResult("");
+    try {
+      const approval = await post<{ token: string }>("/approvals", {
+        project_id: run.project_id,
+        run_id: run.id,
+        resource_type: kind === "ui" ? "ui_action" : "network_candidate",
+        action: kind === "ui" ? "tap" : "replay_read_only",
+        candidate_id: candidate.id,
+        approved_by: candidateApprover.trim(),
+      });
+      const path = kind === "ui"
+        ? `/runs/${run.id}/ui-action-candidates/${candidate.id}/execute`
+        : `/runs/${run.id}/network-candidates/${candidate.id}/execute`;
+      const result = await post<{ status: string; comparison?: Record<string, unknown> }>(path, {
+        approval_token: approval.token,
+      });
+      setCandidateResult(
+        kind === "ui"
+          ? `승인 UI 동작 결과: ${result.status}. 전·후 화면과 UI Tree를 보존했습니다.`
+          : `읽기 전용 API 1회 재현 결과: ${result.status}. 원본 응답과 비교 증적을 보존했습니다.`,
+      );
+      setCandidateReview(null);
+      await refresh();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "승인 Candidate 실행 실패");
+    } finally {
+      setActionBusy("");
+    }
+  }
+
   const screenshot = useMemo(
     () => [...evidence].reverse().find((item) => item.evidence_type === "screenshot"),
     [evidence],
@@ -309,6 +361,7 @@ export default function LiveRunPage() {
 
       {run.error && <div className="inline-alert">{run.error}</div>}
       {actionError && <div className="inline-alert">{actionError}</div>}
+      {candidateResult && <div className="inline-alert inline-alert--ok">{candidateResult}</div>}
       {controlValidation && (
         <section className={`control-scope-ledger panel ${controlScopeEnforcement?.status === "violation" ? "control-scope-ledger--violation" : ""}`}>
           <div className="control-scope-ledger__head">
@@ -584,11 +637,28 @@ export default function LiveRunPage() {
                 <h4>POLICY BLOCKS / APPROVAL</h4>
                 <div className="navigation-approval-list">
                   {navigation?.pending_approval.length ? navigation.pending_approval.slice(0, 8).map((item) => (
-                    <div key={`${item.state_fingerprint}-${item.element_id}`}>
+                    <div key={item.id || `${item.state_fingerprint}-${item.element_id}`}>
                       <StatusChip value={item.risk} />
                       <span><strong>{item.label || "이름 없는 동작"}</strong><small>{item.rationale}</small></span>
+                      {item.id && item.risk === "medium" && item.action_type === "tap" ? (
+                        <button
+                          type="button"
+                          className="button button--signal button--small candidate-inline-action"
+                          disabled={run.status !== "safely_paused" || Boolean(actionBusy)}
+                          onClick={() => openApprovedCandidateReview({ kind: "ui", candidate: item })}
+                        >
+                          {run.status === "safely_paused" ? "1회 승인" : "일시정지 필요"}
+                        </button>
+                      ) : <em>자동 실행 금지</em>}
                     </div>
                   )) : <div className="console-empty">위험 정책에 의해 보류된 UI 동작이 없습니다.</div>}
+                  {navigation?.approved_actions?.slice(-4).reverse().map((item) => (
+                    <div className="navigation-approval-list__executed" key={`approved-${item.id}-${item.executed_at}`}>
+                      <StatusChip value={item.status} />
+                      <span><strong>{item.label}</strong><small>1회 승인 실행 · {formatDate(item.executed_at)}</small></span>
+                      <em>증적 기록됨</em>
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>
@@ -677,6 +747,23 @@ export default function LiveRunPage() {
                     </summary>
                     <p>{candidate.rationale}</p>
                     {candidate.modified_fields.length > 0 && <pre>{JSON.stringify(candidate.modified_fields, null, 2)}</pre>}
+                    {candidate.test_type === "read_only_replay" && candidate.method.match(/^(GET|HEAD)$/) ? (
+                      <div className="candidate-execution-gate">
+                        <span>GET/HEAD · 본문 없음 · redirect 차단 · 응답 1 MiB 제한</span>
+                        <button
+                          type="button"
+                          className="button button--signal button--small"
+                          disabled={run.run_mode !== "live" || run.status !== "safely_paused" || candidate.status !== "pending_approval" || Boolean(actionBusy)}
+                          onClick={() => openApprovedCandidateReview({ kind: "network", candidate })}
+                        >
+                          {candidate.last_result ? "실행 기록 있음" : run.status === "safely_paused" ? "읽기 1회 승인" : "일시정지 필요"}
+                        </button>
+                      </div>
+                    ) : candidate.requires_approval ? (
+                      <div className="candidate-execution-gate candidate-execution-gate--blocked">
+                        <span>POST/PUT/PATCH/DELETE 및 Object 경계 후보는 승인 후에도 자동 재전송하지 않습니다.</span>
+                      </div>
+                    ) : null}
                   </details>
                 )) : <div className="console-empty">아직 생성된 API 검증 Candidate가 없습니다.</div>}
               </div>
@@ -768,6 +855,40 @@ export default function LiveRunPage() {
           </div>
         </section>
       </div>
+      {candidateReview && (
+        <div className="consent-dialog-backdrop" role="presentation">
+          <section className="consent-dialog component-review-dialog panel" role="dialog" aria-modal="true" aria-labelledby="candidate-review-title">
+            <span className="eyebrow">ONE-TIME SCOPED EXECUTION</span>
+            <h3 id="candidate-review-title">현재 후보와 실행 경계를 확인하세요</h3>
+            <p>{candidateReview.kind === "ui"
+              ? "서버가 현재 UI Tree·package·요소 ID·위험도를 다시 계산합니다. 중위험 tap만 1회 실행합니다."
+              : "원본 Flow와 허용 서버를 다시 확인한 뒤 GET/HEAD 1회만 전송합니다. Redirect와 상태 변경 요청은 차단합니다."}</p>
+            <div className="component-review-target">
+              <span>{candidateReview.kind === "ui" ? "CURRENT UI CANDIDATE" : "READ-ONLY API CANDIDATE"}</span>
+              <strong>{candidateReview.kind === "ui" ? candidateReview.candidate.label : candidateReview.candidate.test_type}</strong>
+              <code>{candidateReview.kind === "ui"
+                ? `${candidateReview.candidate.activity} · ${candidateReview.candidate.element_id}`
+                : `${candidateReview.candidate.method} ${candidateReview.candidate.endpoint}`}</code>
+              <small>ID {candidateReview.candidate.id} · {candidateReview.candidate.risk.toUpperCase()} RISK</small>
+            </div>
+            <div className="field">
+              <label htmlFor="candidate-approver">이번 실행 승인자</label>
+              <input id="candidate-approver" value={candidateApprover} onChange={(event) => setCandidateApprover(event.target.value)} maxLength={100} placeholder="예: 고객사 테스트 책임자" />
+            </div>
+            <div className="consent-dialog__checks">
+              <label><input type="checkbox" checked={candidateChecks[0]} onChange={(event) => setCandidateChecks((items) => [event.target.checked, items[1], items[2]])} /> 현재 후보 1건의 실행 권한과 테스트 범위를 확인했습니다.</label>
+              <label><input type="checkbox" checked={candidateChecks[1]} onChange={(event) => setCandidateChecks((items) => [items[0], event.target.checked, items[2]])} /> 테스트 계정·데이터만 사용하며 범위 밖 동작은 수행하지 않습니다.</label>
+              <label><input type="checkbox" checked={candidateChecks[2]} onChange={(event) => setCandidateChecks((items) => [items[0], items[1], event.target.checked])} /> 원본 증적 보존과 외부 AI 전송 시 마스킹 정책을 확인했습니다.</label>
+            </div>
+            <div className="consent-dialog__actions">
+              <button type="button" className="button button--quiet" onClick={() => setCandidateReview(null)} disabled={Boolean(actionBusy)}>취소</button>
+              <button type="button" className="button button--signal" onClick={() => void executeApprovedCandidate()} disabled={candidateApprover.trim().length < 1 || candidateChecks.some((item) => !item) || Boolean(actionBusy)}>
+                {actionBusy ? "증적 수집 중…" : "이 후보만 1회 실행"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       {componentReview && (
         <div className="consent-dialog-backdrop" role="presentation">
           <section className="consent-dialog component-review-dialog panel" role="dialog" aria-modal="true" aria-labelledby="component-review-title">

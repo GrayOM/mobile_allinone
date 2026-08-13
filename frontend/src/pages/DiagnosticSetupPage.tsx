@@ -180,6 +180,8 @@ export default function DiagnosticSetupPage() {
           runtime_tool: data.get("runtime_tool"),
           auto_navigation: data.get("auto_navigation") === "on",
           dynamic_storage: data.get("dynamic_storage") === "on",
+          pause_for_approval_candidates:
+            data.get("pause_for_approval_candidates") === "on",
           ...(controlValidationEnabled ? {
             control_validation: {
               enabled: true,
@@ -435,6 +437,11 @@ export default function DiagnosticSetupPage() {
                 <input type="checkbox" name="pause_for_login" />
                 <span />
                 <div><strong>로그인 전 자동 일시정지</strong><small>사용자가 로그인한 뒤 재개합니다.</small></div>
+              </label>
+              <label className="toggle-line">
+                <input type="checkbox" name="pause_for_approval_candidates" />
+                <span />
+                <div><strong>승인 후보에서 자동 일시정지</strong><small>중위험 UI 동작 또는 Live GET/HEAD 후보가 만들어지면 현재 화면·Flow를 고정해 1회 승인 검토를 기다립니다.</small></div>
               </label>
               <label className="toggle-line">
                 <input type="checkbox" name="simulate_nvidia_failure" />

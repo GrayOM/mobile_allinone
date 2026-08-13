@@ -178,6 +178,14 @@ Android의 Manifest 딥링크와 외부 노출 Activity/Activity Alias만 승인
 
 Live 실행에는 승인된 통제 검증 범위가 활성 상태여야 한다. Mock에서는 같은 승인·증적 흐름을 `synthetic=true`로만 재현한다.
 
+## 승인형 UI 동작·읽기 전용 API 재현
+
+진단 설정에서 **승인 후보에서 자동 일시정지**를 선택하면 자동 탐색 중 현재 화면의 중위험 `tap` 후보 또는 네트워크 분석 후 Live `GET/HEAD` 후보가 생성된 안전 지점에서 Run을 멈춘다. 승인 토큰은 프로젝트·Run·단말·후보 ID에 묶여 5분 안에 한 번만 사용할 수 있다.
+
+- UI 동작은 서버가 실행 직전 현재 package, UI fingerprint, element ID와 위험도를 다시 계산한다. `medium` tap만 실행하며 high·blocked·파괴적 동작, 임의 좌표·텍스트 입력은 계속 `manual_required`다. 전·후 화면과 UI Tree, 명령 결과를 원본 증적으로 보존한다.
+- Live API 재현은 현재 Run의 원본 ProxyFlow에서 다시 계산한 **본문 없는 GET/HEAD**만 허용한다. 승인된 서버 host를 재검증하고 DNS 주소와 실제 peer IP를 고정하며, 환경 프록시와 redirect를 사용하지 않고 응답을 1 MiB로 제한한다. 원본·재현 응답 구조는 Response Comparator로 비교한다.
+- POST·PUT·PATCH·DELETE, 업로드, Object 경계 변경은 승인 후에도 자동 재전송하지 않는다. 승인 범위 증적은 외부 AI 컨텍스트에서 제외하고, 결과 증적을 외부 AI에 사용할 때는 기존 구조적 마스킹 정책을 적용한다.
+
 
 ## 실제 Android 연결
 
@@ -262,7 +270,7 @@ scripts/frida/
 4. 승인된 스크립트만 Spawn·Attach 또는 Mock 실행
 5. 실행 명령, 전체 스크립트, 메시지와 오류를 증적으로 저장
 
-스크립트 화면의 AI 후보 생성기는 관련 코드·실패 로그만 입력받는다. 프로젝트의 외부 전송 정책과 마스킹을 적용하고 NVIDIA 실패 시 Claude로 fallback한다. Mock Provider로 외부 전송 없는 승인 흐름도 검증할 수 있다.
+스크립트 화면의 AI 후보 생성기는 관련 코드·실패 로그만 입력받는다. 프로젝트의 외부 전송 정책과 마스킹을 적용하고 NVIDIA 실패 시 Claude로 fallback한다. Mock Provider로 외부 전송 없는 승인 흐름도 검증할 수 있다. AI는 통제의 탐지·차단 신호와 수동 재검증 절차를 제안할 수 있지만 통제 무력화 코드를 자동 생성·실행하는 경로로 사용하지 않는다.
 
 ## 정적 분석 범위
 
@@ -320,8 +328,8 @@ data/
 기본 캡처 시점:
 
 - 앱 실행 직후
-- 우회 적용 전
-- 우회 적용 후
+- 승인 통제 검증 전
+- 승인 통제 검증 후
 - 로그인 완료 후(로그인 일시정지 사용 시)
 - 동적 테스트 후
 
@@ -420,11 +428,10 @@ docs/
 
 ## 남은 확장 영역
 
-- 제조사 보안통제별 실제 우회 내성 스크립트(현재 내장 스크립트는 동작을 바꾸지 않는 관찰용)
+- 제조사 보안통제별 탐지·차단 관찰 규칙과 공식 테스트 정책 Adapter
 - 실제 제조사별 Android 보안 솔루션/키패드 전용 Adapter
 - 장시간 Logcat·화면 녹화의 스트리밍 제어 UI
 - Fiddler/Burp 프로세스 API 자동 연동
 - DB/SharedPreferences/Keychain 구조화 뷰어
-- 위험 UI 동작과 Live API Candidate의 범위 제한형 1회 승인 실행
-- 앱 동작 전후 파일 시스템 diff
+- Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
 - 조직용 사용자 인증·권한·감사 로그(현재는 loopback 단일 사용자)

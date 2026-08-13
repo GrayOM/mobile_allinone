@@ -4,10 +4,14 @@ import pytest
 
 from backend.app.core.status import CapabilityStatus
 from backend.app.network_testing import (
+    LiveNetworkExecutionError,
+    LiveReadOnlyNetworkExecutor,
     MockNetworkTestExecutor,
+    NetworkApprovalError,
     NetworkCandidateEngine,
     classify_proxy_flow,
     compare_responses,
+    resolve_network_candidate,
 )
 from backend.app.proxy.base import ProxyFlowData
 
@@ -99,3 +103,53 @@ async def test_mock_safe_candidate_executes_without_network_and_dangerous_waits(
     assert execution.synthetic is True
     assert execution.comparison is not None
     assert execution.comparison.json_structure_changed is False
+
+
+def test_only_bodyless_get_head_candidates_cross_the_approved_execution_boundary():
+    get_flow = _flow("GET", "https://api.example.test/v1/profile")
+    get_flow.request_body = ""
+    analysis = classify_proxy_flow(get_flow, source_flow_id="live-get")
+    replay = next(
+        item
+        for item in NetworkCandidateEngine().generate(analysis)
+        if item.test_type == "read_only_replay"
+    )
+    options = {
+        "network_testing": {
+            "candidates": [replay.to_dict()],
+            "executions": [],
+        }
+    }
+    resolved = resolve_network_candidate(
+        options,
+        replay.id,
+        get_flow,
+        source_flow_id="live-get",
+    )
+    assert resolved.method == "GET"
+
+    get_flow.request_body = '{"unexpected":"body"}'
+    with pytest.raises(NetworkApprovalError, match="무본문 읽기 전용"):
+        resolve_network_candidate(
+            options,
+            replay.id,
+            get_flow,
+            source_flow_id="live-get",
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_executor_rejects_state_changing_request_before_dns_or_socket():
+    flow = _flow("POST", "https://api.example.test/v1/profile")
+    analysis = classify_proxy_flow(flow, source_flow_id="live-post")
+    mutation = next(
+        item
+        for item in NetworkCandidateEngine().generate(analysis)
+        if item.test_type == "state_changing_replay"
+    )
+    with pytest.raises(LiveNetworkExecutionError, match="상태 변경"):
+        await LiveReadOnlyNetworkExecutor().execute(
+            mutation,
+            flow,
+            allowed_hosts=["api.example.test"],
+        )
