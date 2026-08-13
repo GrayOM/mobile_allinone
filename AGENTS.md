@@ -377,7 +377,7 @@ MSW_ENABLE_API_DOCS=false
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          95 passed
+pytest -q                          98 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
