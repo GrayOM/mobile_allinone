@@ -4,6 +4,17 @@
 > 작업 위치: `/mnt/c/Users/PSM/Desktop/project/mobile_allinone`
 > 새 세션에서는 이 파일을 먼저 읽고, 완료된 기능을 처음부터 다시 만들지 않는다.
 
+## 0. 현재 Git·인수인계 상태
+
+- 기본 브랜치: `main` (`origin/main` = `b82be7d`)
+- 개발·검증 브랜치: `test/approved-control-validation`
+- 최신 기능 기준점: `c1033a3` (`219244c` 승인형 Candidate 실행 + 후속 검증 문서)
+- Draft PR: [#1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1), base `main`, head `test/approved-control-validation`
+- `c1033a3` 기준 GitHub Actions의 backend, frontend, portable-startup 중복 실행이 모두 통과했다. Backend는 98 tests, frontend audit은 high 취약점 0건이다.
+- 이 인수인계 갱신 외 추가 코드 변경은 없으며, 실제 Android/iOS Live 단말 검증 결과도 아직 추가되지 않았다.
+
+마지막 기능 변경은 승인 가능한 Candidate를 현재 화면·Flow에 고정한 뒤 5분 만료 1회 토큰으로 실행하는 흐름이다. UI는 현재 package·fingerprint·element ID를 재검증한 medium tap만 실행하고, Live API는 승인 host의 본문 없는 GET/HEAD만 DNS·peer IP 고정 상태에서 1회 실행한다. high·blocked UI와 상태 변경 API, 보안통제 무력화 코드는 승인 후에도 자동 실행하지 않는다.
+
 ## 1. 프로젝트 목적과 절대 원칙
 
 이 프로젝트는 Windows 10/11에서 브라우저로 사용하는 로컬 모바일 앱 보안 진단·증적 수집 플랫폼이다. 사용자가 소유하거나 명시적으로 진단 권한을 받은 앱과 단말만 대상으로 한다.
@@ -436,6 +447,8 @@ npm audit --audit-level=high
 - 프로젝트별 retention 설정과 Raw 데이터 열람 전용 UI
 - 장시간 Logcat·화면 녹화 스트리밍 제어 UI
 - 조직용 인증·역할·감사 로그
+
+실제 Live 검증을 재개하려면 고객사 승인 범위가 적용된 Android/iOS 단말, 테스트 계정 참조, 허용 테스트 서버 목록과 유효한 승인 만료 시각이 필요하다. Android 우선 검증에서는 ADB 연결·루팅 권한·Frida/프록시 준비 상태를 확인한 뒤 실제 화면·Logcat·프로세스·프록시·저장소 증적을 수집한다. 보안 솔루션이 차단하면 차단 화면과 로그 자체를 통제 검증 증적으로 남기며 자동 우회 코드를 추가하지 않는다.
 
 ## 11. 새 세션 시작 체크리스트
 
