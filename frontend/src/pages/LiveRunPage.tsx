@@ -14,6 +14,7 @@ import type {
 } from "../types";
 import { EmptyState, StatusChip, formatDate } from "../components/UI";
 import { AuthenticatedImage } from "../components/AuthenticatedFile";
+import { findingEvidenceLabel, findingLane, findingLaneLabel } from "../findingPresentation";
 
 const stageLabels: Record<string, string> = {
   preflight: "사전 확인",
@@ -171,6 +172,11 @@ export default function LiveRunPage() {
     : null;
   const storage = readStorage(run.options.storage);
   const networkTesting = readNetworkTesting(run.options.network_testing);
+  const staticFindingCount = findings.filter((item) => item.source.startsWith("static:")).length;
+  const runtimeFindingCount = findings.length - staticFindingCount;
+  const controlFindingCount = findings.filter(
+    (item) => findingLane(item) === "security_control",
+  ).length;
 
   return (
     <div className="live-workbench">
@@ -558,7 +564,12 @@ export default function LiveRunPage() {
                 </div>
                 <StatusChip value={String(event.data.status ?? "unknown")} />
               </div>
-            )) : (
+            )) : ["completed", "completed_with_gaps", "manual_required", "failed", "stopped"].includes(run.status) ? (
+              <div className="ai-wait">
+                <strong>AI 판정 기록 없음</strong>
+                <small>정적 Finding과 로컬 동적 증적은 AI 없이도 결과 원장에 유지됩니다.</small>
+              </div>
+            ) : (
               <div className="ai-wait">
                 <div className="ai-wait__orbit"><i /><i /><i /></div>
                 <strong>증적 범위를 구성하는 중</strong>
@@ -569,13 +580,13 @@ export default function LiveRunPage() {
         </section>
 
         <section className="console-panel finding-console">
-          <div className="console-head"><span>FINDINGS</span><small>{findings.length} classified</small></div>
+          <div className="console-head"><span>FINDINGS</span><small>{staticFindingCount} static · {runtimeFindingCount} runtime · {controlFindingCount} controls</small></div>
           {findings.length ? (
             <div className="live-findings">
               {findings.map((finding) => (
                 <Link to={`/findings/${finding.id}`} key={finding.id}>
                   <span className={`severity-pip severity-pip--${finding.severity}`} />
-                  <div><strong>{finding.title}</strong><small>{finding.category} · {Math.round(finding.confidence * 100)}%</small></div>
+                  <div><strong>{finding.title}</strong><small>{findingLaneLabel(finding)} · {findingEvidenceLabel(finding)} · {Math.round(finding.confidence * 100)}%</small></div>
                   <span>→</span>
                 </Link>
               ))}

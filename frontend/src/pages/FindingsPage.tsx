@@ -3,6 +3,7 @@ import { Link } from "../router";
 import { api } from "../api";
 import type { Finding, Project } from "../types";
 import { EmptyState, SectionHeading, StatusChip, formatDate } from "../components/UI";
+import { findingEvidenceLabel, findingLane, findingLaneLabel } from "../findingPresentation";
 
 export default function FindingsPage() {
   const [findings, setFindings] = useState<Finding[]>([]);
@@ -10,6 +11,7 @@ export default function FindingsPage() {
   const [projectId, setProjectId] = useState("");
   const [severity, setSeverity] = useState("");
   const [verdict, setVerdict] = useState("");
+  const [lane, setLane] = useState("");
 
   useEffect(() => {
     void Promise.all([api<Finding[]>("/findings"), api<Project[]>("/projects")]).then(
@@ -26,31 +28,32 @@ export default function FindingsPage() {
         (item) =>
           (!projectId || item.project_id === projectId) &&
           (!severity || item.severity === severity) &&
-          (!verdict || item.verdict === verdict),
+          (!verdict || item.verdict === verdict) &&
+          (!lane || findingLane(item) === lane),
       ),
-    [findings, projectId, severity, verdict],
+    [findings, projectId, severity, verdict, lane],
   );
   const highCount = filtered.filter((item) => item.severity === "high").length;
   const reviewCount = filtered.filter((item) => item.verdict === "needs_review").length;
-  const syntheticCount = filtered.filter((item) => item.synthetic).length;
+  const controlCount = filtered.filter((item) => findingLane(item) === "security_control").length;
 
   return (
     <div className="stack stack--lg">
       <SectionHeading
         eyebrow="FINDING REGISTER"
         title="신호와 판정을 분리해서 봅니다"
-        description="정적 시그니처는 런타임 증적 없이 확정하지 않으며, 자동 판정의 근거와 오탐 가능성을 함께 표시합니다."
+        description="앱 취약점과 모바일 보안통제 신호를 분리하고, 정적 후보부터 실제 단말 재현까지 같은 원장에서 추적합니다."
       />
       <section className="result-guide panel" aria-labelledby="result-guide-title">
         <div>
           <span className="eyebrow">HOW TO READ RESULTS</span>
           <h2 id="result-guide-title">결과는 우선순위와 근거를 함께 보세요</h2>
-          <p>심각도는 먼저 확인할 순서이고, 판정은 현재 증거가 얼마나 충분한지를 뜻합니다. 자동 분류만으로 확정하지 말고 상세 화면의 증적과 재현 조건을 확인하세요.</p>
+          <p>심각도는 먼저 확인할 순서이고, 증적 상태는 현재 결론의 범위를 뜻합니다. 보안통제 문자열은 취약점으로 세지 않고 실제 단말에서 탐지·차단 동작을 별도로 검증합니다.</p>
         </div>
         <div className="result-guide__metrics">
           <div><span>우선 확인</span><strong>{highCount}</strong><small>High 심각도</small></div>
           <div><span>사람 검토</span><strong>{reviewCount}</strong><small>증거 보강 필요</small></div>
-          <div><span>합성 데이터</span><strong>{syntheticCount}</strong><small>Mock 결과 표기</small></div>
+          <div><span>솔루션 분석</span><strong>{controlCount}</strong><small>보안통제 신호</small></div>
         </div>
         <div className="button-row">
           <button className="button button--quiet" type="button" onClick={() => setVerdict("needs_review")}>검토 필요한 항목만 보기</button>
@@ -76,6 +79,14 @@ export default function FindingsPage() {
           </select>
         </div>
         <div className="field field--compact">
+          <label htmlFor="finding-lane">분석 구분</label>
+          <select id="finding-lane" value={lane} onChange={(event) => setLane(event.target.value)}>
+            <option value="">전체 구분</option>
+            <option value="vulnerability">앱 취약점</option>
+            <option value="security_control">모바일 보안통제</option>
+          </select>
+        </div>
+        <div className="field field--compact">
           <label htmlFor="finding-verdict">판정 상태</label>
           <select id="finding-verdict" value={verdict} onChange={(event) => setVerdict(event.target.value)}>
             <option value="">전체 판정</option>
@@ -97,9 +108,9 @@ export default function FindingsPage() {
               <span className={`severity-label severity-label--${finding.severity}`}>{finding.severity}</span>
               <div>
                 <strong>{finding.title}</strong>
-                <small>{finding.category.replaceAll("_", " ")} · {finding.platform}{finding.synthetic ? " · SYNTHETIC" : ""}</small>
+                <small>{findingLaneLabel(finding)} · {finding.category.replaceAll("_", " ")} · {finding.platform}{finding.synthetic ? " · SYNTHETIC" : ""}</small>
               </div>
-              <StatusChip value={finding.verdict} />
+              <div title={findingEvidenceLabel(finding)}><StatusChip value={finding.verdict} /><small>{findingEvidenceLabel(finding)}</small></div>
               <div className="confidence">
                 <span><i style={{ width: `${finding.confidence * 100}%` }} /></span>
                 <strong>{Math.round(finding.confidence * 100)}%</strong>

@@ -4,6 +4,8 @@ import pytest
 
 from backend.app.catalog.mastg import evaluate_controls
 from backend.app.core.config import AppSettings, ToolPaths
+from backend.app.database.models import DiagnosticRun
+from backend.app.database.session import SessionLocal
 from backend.app.runtime import ObjectionRuntimeAdapter
 
 
@@ -30,10 +32,44 @@ def test_analysis_provenance_and_control_ledger_api(client):
 
     findings = client.get(f"/api/findings?project_id={project_id}").json()
     static = next(item for item in findings if item["source"].startswith("static:"))
+    assert len(
+        [item for item in findings if item["category"] == "exposed_component"]
+    ) == 2
     sources = client.get(f"/api/findings/{static['id']}/sources").json()
     assert sources
     assert all(item["source_tool"] for item in sources)
     assert all(len(item["fingerprint"]) == 64 for item in sources)
+
+
+def test_run_finding_register_includes_selected_apps_static_findings_without_ai(client):
+    demo = client.post("/api/demo/bootstrap").json()
+    with SessionLocal() as db:
+        run = DiagnosticRun(
+            project_id=demo["project"]["id"],
+            app_id=demo["app"]["id"],
+            device_id="mock-android-01",
+            device_adapter="mock",
+            proxy_adapter="mock",
+            run_mode="mock",
+            synthetic=True,
+            status="completed",
+        )
+        db.add(run)
+        db.commit()
+        run_id = run.id
+
+    response = client.get(f"/api/findings?run_id={run_id}")
+
+    assert response.status_code == 200
+    findings = response.json()
+    assert findings
+    assert all(item["run_id"] is None for item in findings)
+    assert all(item["source"].startswith("static:") for item in findings)
+    assert any(item["category"] == "exposed_component" for item in findings)
+    assert {
+        "certificate_pinning",
+        "root_detection",
+    } <= {item["category"] for item in findings}
 
 
 def test_mock_ai_frida_candidate_is_never_auto_approved(client):

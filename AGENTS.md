@@ -1,6 +1,6 @@
 # Mobile Security Workbench — 세션 인수인계
 
-> 최종 갱신: 2026-08-10
+> 최종 갱신: 2026-08-13
 > 작업 위치: `/mnt/c/Users/PSM/Desktop/project/mobile_allinone`
 > 새 세션에서는 이 파일을 먼저 읽고, 완료된 기능을 처음부터 다시 만들지 않는다.
 
@@ -125,6 +125,10 @@ tests/               단위·API·Mock E2E 테스트
 - MobSF: 별도 서버 REST API 연동
 
 각 도구 실행은 `tool_runs`에 버전, 상태, 인자 배열, 오류, 원문 경로와 SHA-256을 저장한다. 원시 탐지는 `raw_findings`, 정규화된 발견항목의 출처는 `finding_sources`에 저장한다. 도구 하나가 실패해도 나머지 분석은 계속한다.
+
+- 권한 보호가 없는 Android 외부 노출 컴포넌트는 컴포넌트별 Finding으로 만들고, Intent Filter 수·재현 절차·오탐 가능성·추가 확인 항목을 함께 보존한다.
+- 인증서 고정, 루팅·탈옥, Frida·후킹, 디버거 탐지 문자열은 일반 취약점과 분리된 모바일 보안통제 신호로 저장한다. 정적 문자열만으로 통제 동작이나 우회 가능성을 확정하지 않는다.
+- `/api/findings?run_id=<run>`은 해당 Run에서 생성된 판정뿐 아니라 선택 앱의 정적 Finding도 함께 반환한다. AI가 비활성화되어도 실제 정적 후보가 실행 화면에서 사라지지 않아야 한다.
 
 동일 앱 재분석은 앱 ID별 Lease로 직렬화한다. 실행마다 `analysis/<uploaded-file-stem>/runs/<analysis-run-id>/`와 `analysis_runs` 레코드를 사용한다. 출력 검증과 `latest.json` 교체가 성공한 뒤 하나의 DB transaction에서 `active_analysis_run_id`, 앱 메타데이터, Raw Finding, Tool Run, Control Test를 활성화한다. 실패하면 기존 Active Run과 포인터를 유지하며, 이미 분석 중이면 409 `analysis_in_progress`를 반환한다.
 
@@ -284,6 +288,7 @@ data/
 - 대시보드 첫 실행 안내: Mock 데모 → 결과·증적 확인 → 실제 진단 준비
 - 진단 설정의 4단계 준비도: 프로젝트·대상 앱·단말 연결·캡처 범위
 - 발견항목의 결과 해석 안내: 심각도·판정·합성 데이터 분리 및 `needs_review` 필터
+- 발견항목 원장은 앱 취약점과 모바일 보안통제 신호를 분리하며, 정적 확인·동적 재검증 필요·실행 증적 확인 상태를 표시한다.
 
 디자인 방향은 산업용 로컬 보안 워크벤치다.
 
@@ -366,11 +371,11 @@ MSW_ENABLE_API_DOCS=false
 
 ## 9. 현재 검증 결과
 
-마지막 검증(2026-08-10):
+마지막 검증(2026-08-13):
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          81 passed
+pytest -q                          86 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -396,6 +401,9 @@ npm audit --audit-level=high      0 vulnerabilities
 - POSIX CI는 `scripts/run.sh` 문법·Docker Compose 구성·실제 loopback 기동과 `/healthz` 응답을 검증한다.
 - 진단 생성 API는 선택한 단말을 다시 탐색하고 `available` 상태인지 확인한 뒤에만 Run을 큐에 넣는다. UI도 준비되지 않은 단말을 사전에 차단하고 단말 상태 화면으로 안내한다.
 - destructive semantic 우회, resource 토큰 경계, interaction variant, container 한정 bounded scroll, Frida drop 품질 Gap과 Finding category exact alias 회귀 테스트를 확인했다.
+- AI 비활성 Mock Run에서도 선택 앱의 정적 Finding 7개가 실행 원장에 표시되고, 앱 취약점 5개와 모바일 보안통제 신호 2개가 분리되는 것을 확인했다.
+- 권한 보호가 없는 Activity와 Broadcast Receiver가 상관분석에서 과병합되지 않고 컴포넌트별 Finding으로 유지되는 회귀 테스트를 확인했다.
+- 발견항목·실시간 실행 화면을 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건이었다.
 
 테스트 명령:
 

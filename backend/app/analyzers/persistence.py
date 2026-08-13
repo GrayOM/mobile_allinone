@@ -122,6 +122,30 @@ def replace_analysis_records(
         primary = group.primary
         strongest = max(group.members, key=lambda item: _severity_rank(item.severity))
         source_names = sorted({item.source_tool for item in group.members})
+        reproduction = next(
+            (item.reproduction for item in group.members if item.reproduction), []
+        )
+        false_positive_risk = next(
+            (
+                item.false_positive_risk
+                for item in group.members
+                if item.false_positive_risk
+            ),
+            (
+                "자동 분석 도구의 정적 신호입니다. 서로 다른 출처가 일치할수록 "
+                "신뢰도가 높지만 런타임 재현이 필요합니다."
+            ),
+        )
+        additional_checks = list(
+            dict.fromkeys(
+                check
+                for item in group.members
+                for check in item.additional_checks
+            )
+        ) or [
+            "관련 코드 위치를 확인하세요.",
+            "MASTG 테스트 상태와 동적 증적을 연결하세요.",
+        ]
         finding = Finding(
             project_id=project.id,
             run_id=None,
@@ -133,15 +157,9 @@ def replace_analysis_records(
             verdict=primary.verdict,
             confidence=max(item.confidence for item in group.members),
             rationale=primary.rationale,
-            reproduction=[],
-            false_positive_risk=(
-                "자동 분석 도구의 정적 신호입니다. 서로 다른 출처가 일치할수록 "
-                "신뢰도가 높지만 런타임 재현이 필요합니다."
-            ),
-            additional_checks=[
-                "관련 코드 위치를 확인하세요.",
-                "MASTG 테스트 상태와 동적 증적을 연결하세요.",
-            ],
+            reproduction=reproduction,
+            false_positive_risk=false_positive_risk,
+            additional_checks=additional_checks,
             source="static:" + "+".join(source_names),
             synthetic=artifact.synthetic,
         )

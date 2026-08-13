@@ -26,7 +26,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from backend.app.ai import AIProviderChain, MockAIProvider
@@ -1819,7 +1819,24 @@ def list_findings(
     if project_id:
         query = query.where(Finding.project_id == project_id)
     if run_id:
-        query = query.where(Finding.run_id == run_id)
+        run = _run_or_404(db, run_id)
+        run_scope = [Finding.run_id == run_id]
+        if run.app_id:
+            static_finding_ids = (
+                select(FindingSource.finding_id)
+                .join(
+                    RawFinding,
+                    FindingSource.raw_finding_id == RawFinding.id,
+                )
+                .where(RawFinding.app_id == run.app_id)
+            )
+            run_scope.append(
+                and_(
+                    Finding.run_id.is_(None),
+                    Finding.id.in_(static_finding_ids),
+                )
+            )
+        query = query.where(or_(*run_scope))
     return db.scalars(query.order_by(Finding.created_at.desc())).all()
 
 

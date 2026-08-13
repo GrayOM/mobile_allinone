@@ -4,6 +4,7 @@ import { api, openAuthenticatedFile, post } from "../api";
 import type { Evidence, Finding, FindingSource } from "../types";
 import { EmptyState, StatusChip, formatDate } from "../components/UI";
 import { AuthenticatedDownload, AuthenticatedImage } from "../components/AuthenticatedFile";
+import { findingEvidenceLabel, findingLaneLabel } from "../findingPresentation";
 
 export default function FindingDetailPage() {
   const { findingId = "" } = useParams();
@@ -49,10 +50,11 @@ export default function FindingDetailPage() {
           <span>{finding.severity}</span>
         </div>
         <div>
-          <span className="eyebrow">{finding.category.replaceAll("_", " ")} · {finding.platform}</span>
+          <span className="eyebrow">{findingLaneLabel(finding)} · {finding.category.replaceAll("_", " ")} · {finding.platform}</span>
           <h2>{finding.title}</h2>
           <div className="chip-row">
             <StatusChip value={finding.verdict} />
+            <span className="plain-chip">{findingEvidenceLabel(finding)}</span>
             <span className="plain-chip">{finding.source}</span>
             {finding.synthetic && <span className="plain-chip">SYNTHETIC MOCK</span>}
             <span className="plain-chip">{formatDate(finding.created_at)}</span>
@@ -66,11 +68,11 @@ export default function FindingDetailPage() {
 
       <div className="finding-facts">
         <section>
-          <span className="eyebrow">AUTOMATED VERDICT</span>
+          <span className="eyebrow">EVIDENCE STATE</span>
           <div className="confidence-dial" style={{ "--score": `${finding.confidence * 360}deg` } as React.CSSProperties}>
             <div><strong>{Math.round(finding.confidence * 100)}</strong><small>%</small></div>
           </div>
-          <p>{finding.verdict}</p>
+          <p>{findingEvidenceLabel(finding)}</p>
         </section>
         <section>
           <span className="eyebrow">RATIONALE</span>
@@ -89,6 +91,16 @@ export default function FindingDetailPage() {
               <li key={item}><span>{index + 1}</span>{item}</li>
             )) : <li><span>!</span>런타임 재현 순서가 아직 없습니다.</li>}
           </ol>
+          {finding.additional_checks.length > 0 && (
+            <>
+              <h3>추가 확인</h3>
+              <ol className="reproduction-list">
+                {finding.additional_checks.map((item) => (
+                  <li key={item}><span>+</span>{item}</li>
+                ))}
+              </ol>
+            </>
+          )}
         </section>
       </div>
 

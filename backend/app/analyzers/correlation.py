@@ -40,6 +40,10 @@ def _similar(left, right) -> bool:
     right_location = _location_key(right.location)
     if left_location and right_location and left_location == right_location:
         return True
+    if left.category == "exposed_component":
+        # Different exported components require independent authorization and
+        # impact checks even when their generated titles are structurally alike.
+        return False
     left_tokens = _tokens(f"{left.title} {left.rationale}")
     right_tokens = _tokens(f"{right.title} {right.rationale}")
     if not left_tokens or not right_tokens:

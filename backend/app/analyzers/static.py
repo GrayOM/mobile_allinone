@@ -70,6 +70,9 @@ class StaticFinding:
     rule_id: str = "heuristic"
     references: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+    reproduction: list[str] = field(default_factory=list)
+    false_positive_risk: str = ""
+    additional_checks: list[str] = field(default_factory=list)
 
     @property
     def fingerprint(self) -> str:
@@ -770,17 +773,53 @@ class StaticAnalyzer:
                     )
                 )
             exported = [
-                item for item in result.components if item["exported"] and not item["permission"]
+                item
+                for item in result.components
+                if item.get("exported") and not item.get("permission")
             ]
-            if exported:
+            component_labels = {
+                "activity": "Activity",
+                "activity-alias": "Activity Alias",
+                "service": "Service",
+                "receiver": "Broadcast Receiver",
+                "provider": "Content Provider",
+            }
+            for component in exported:
+                component_type = str(component.get("type") or "component")
+                component_name = str(component.get("name") or "unknown")[:180]
+                intent_filter_count = int(component.get("intent_filters") or 0)
                 result.findings.append(
                     StaticFinding(
-                        "권한 보호가 없는 외부 노출 컴포넌트",
+                        f"권한 보호가 없는 외부 노출 {component_labels.get(component_type, '컴포넌트')}: {component_name}",
                         "exposed_component",
                         "medium",
-                        ", ".join(item["name"] for item in exported[:8]),
-                        f"외부 호출 가능 컴포넌트 {len(exported)}개가 권한으로 보호되지 않은 것으로 보입니다.",
+                        component_name,
+                        (
+                            f"{component_type}가 외부에 노출되어 있고 permission 보호가 없습니다. "
+                            f"Intent Filter {intent_filter_count}개와 앱 내부 인증·입력 검증을 동적으로 확인해야 합니다."
+                        ),
                         0.78,
+                        rule_id=f"android.exported_component.{component_type}",
+                        raw={
+                            "assessment_type": "vulnerability_candidate",
+                            "verification_status": "dynamic_verification_required",
+                            "component": dict(component),
+                        },
+                        reproduction=[
+                            "Manifest에서 컴포넌트의 exported·permission·Intent Filter 설정을 확인합니다.",
+                            "승인된 테스트 단말에서 외부 호출 가능 여부를 비파괴 방식으로 확인합니다.",
+                            "테스트 계정·데이터로 내부 인증과 입력 검증이 적용되는지 확인합니다.",
+                            "호출 전후 화면·로그·프로세스 상태를 원본 증적으로 연결합니다.",
+                        ],
+                        false_positive_risk=(
+                            "외부 노출이 앱의 정상 진입점일 수 있고, 런타임 내부 인증이나 입력 검증이 "
+                            "민감 동작을 차단할 수 있습니다."
+                        ),
+                        additional_checks=[
+                            "컴포넌트별 호출 권한과 앱 내부 권한 검사를 확인하세요.",
+                            "상태 변경 동작은 별도 승인 없이 실행하지 마세요.",
+                            "Intent 입력값 변조와 민감정보 반환 여부를 확인하세요.",
+                        ],
                     )
                 )
         elif result.manifest.get("ats", {}).get("NSAllowsArbitraryLoads") is True:
@@ -823,27 +862,77 @@ class StaticAnalyzer:
                     0.74,
                 )
             )
-        if result.signals.get("certificate_pinning"):
-            result.findings.append(
-                StaticFinding(
-                    "인증서 고정 구현 후보",
-                    "security_control",
-                    "info",
-                    result.signals["certificate_pinning"][0]["location"],
-                    "인증서 고정 또는 사용자 정의 신뢰 검증 코드가 탐지되었습니다. 동적 검증 대상으로 연결합니다.",
-                    0.68,
-                    "informational",
-                )
+        control_signals = (
+            (
+                "certificate_pinning",
+                "인증서 고정 구현 후보",
+                "certificate_pinning",
+                "인증서 고정 또는 사용자 정의 신뢰 검증",
+                0.68,
+            ),
+            (
+                "root_jailbreak_detection",
+                "루팅·탈옥 탐지 코드 후보",
+                "root_detection",
+                "루팅·탈옥 단말 탐지",
+                0.70,
+            ),
+            (
+                "frida_hook_detection",
+                "Frida·후킹 탐지 코드 후보",
+                "frida_detection",
+                "Frida·후킹 프레임워크 탐지",
+                0.70,
+            ),
+            (
+                "debugger_detection",
+                "안티 디버깅 코드 후보",
+                "debugger_detection",
+                "디버거 연결·TracerPid 탐지",
+                0.72,
+            ),
+        )
+        for signal_key, title, category, description, confidence in control_signals:
+            signal_items = result.signals.get(signal_key) or []
+            if not signal_items:
+                continue
+            locations = list(
+                dict.fromkeys(str(item.get("location") or "unknown") for item in signal_items)
             )
-        if result.signals.get("root_jailbreak_detection"):
             result.findings.append(
                 StaticFinding(
-                    "루팅·탈옥 탐지 코드 후보",
-                    "security_control",
+                    title,
+                    category,
                     "info",
-                    result.signals["root_jailbreak_detection"][0]["location"],
-                    "특권 단말 탐지에 사용되는 경로 또는 프레임워크 신호가 있습니다.",
-                    0.7,
+                    ", ".join(locations[:6]),
+                    (
+                        f"{description}에 사용될 수 있는 정적 신호 {len(signal_items)}개를 "
+                        "식별했습니다. 이는 취약점 확정이 아니라 실제 단말 통제 검증 대상입니다."
+                    ),
+                    confidence,
                     "informational",
+                    rule_id=f"signal.{signal_key}",
+                    raw={
+                        "assessment_type": "security_control",
+                        "verification_status": "dynamic_verification_required",
+                        "signal_key": signal_key,
+                        "signal_count": len(signal_items),
+                        "signals": signal_items,
+                    },
+                    reproduction=[
+                        "정적 신호의 파일·ABI·코드 위치와 중복 여부를 확인합니다.",
+                        "승인된 실제 단말에서 정상 실행 기준 화면·로그·프로세스 상태를 수집합니다.",
+                        "해당 통제 조건에서 앱의 탐지·차단·기능 제한 동작을 관찰합니다.",
+                        "정적 신호와 실행 전후 원본 증적을 같은 통제 검증 항목에 연결합니다.",
+                    ],
+                    false_positive_risk=(
+                        "문자열이나 라이브러리 포함만으로 해당 통제가 실제 실행된다고 단정할 수 없습니다. "
+                        "미사용 코드나 제3자 라이브러리 신호일 수 있습니다."
+                    ),
+                    additional_checks=[
+                        "실제 단말에서 탐지 조건과 앱 반응을 확인하세요.",
+                        "보안 솔루션 이름·버전과 정책 설정을 고객 승인 범위에서 확인하세요.",
+                        "통제 검증 결과를 일반 취약점과 분리해 보고하세요.",
+                    ],
                 )
             )

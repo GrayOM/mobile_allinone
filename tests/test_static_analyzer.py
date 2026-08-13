@@ -16,7 +16,10 @@ async def test_analyzes_plaintext_apk_without_external_tools(tmp_path: Path):
     with zipfile.ZipFile(apk, "w") as archive:
         archive.writestr("AndroidManifest.xml", DEMO_MANIFEST)
         archive.writestr("sources/SecurityControls.java", DEMO_CODE)
-        archive.writestr("classes.dex", b"CertificatePinner /system/xbin/su frida")
+        archive.writestr(
+            "classes.dex",
+            b"CertificatePinner /system/xbin/su frida TracerPid",
+        )
     settings = AppSettings(
         data_dir=tmp_path / "data",
         database_url=f"sqlite:///{tmp_path / 'test.db'}",
@@ -46,6 +49,25 @@ async def test_analyzes_plaintext_apk_without_external_tools(tmp_path: Path):
     assert "root_jailbreak_detection" in result.signals
     assert result.tools["apktool"]["status"] == "not_configured"
     assert any(item.category == "build_configuration" for item in result.findings)
+    exposed = [item for item in result.findings if item.category == "exposed_component"]
+    assert len(exposed) == 2
+    assert {item.location for item in exposed} == {".MainActivity", ".DebugReceiver"}
+    assert all(item.reproduction for item in exposed)
+    assert all(
+        item.raw["verification_status"] == "dynamic_verification_required"
+        for item in exposed
+    )
+    control_categories = {
+        item.category
+        for item in result.findings
+        if item.raw.get("assessment_type") == "security_control"
+    }
+    assert {
+        "certificate_pinning",
+        "root_detection",
+        "frida_detection",
+        "debugger_detection",
+    } <= control_categories
 
 
 def test_rejects_unknown_artifact(tmp_path: Path):
