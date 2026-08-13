@@ -71,13 +71,22 @@ def inspect_sqlite_database(
     preview_rows: int = 5,
     max_seconds: float = 5.0,
 ) -> DatabaseArtifact:
-    if max_seconds <= 0:
+    if not math.isfinite(max_seconds) or max_seconds <= 0:
         raise ValueError("max_seconds must be positive")
-    deadline = time.monotonic() + max_seconds
+    started_at = time.monotonic()
+    deadline = started_at + max_seconds
+    minimum_measurable_budget = max(
+        time.get_clock_info("monotonic").resolution,
+        math.ulp(started_at),
+    )
     size = path.stat().st_size
     digest_builder = hashlib.sha256()
     header = b""
-    hash_timed_out = time.monotonic() >= deadline
+    # A budget below the platform clock resolution cannot be enforced reliably.
+    # Treat it as expired instead of allowing a fast file to pass on coarse clocks.
+    hash_timed_out = (
+        max_seconds <= minimum_measurable_budget or time.monotonic() >= deadline
+    )
     if not hash_timed_out:
         with path.open("rb") as stream:
             while True:
