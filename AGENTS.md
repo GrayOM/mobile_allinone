@@ -128,6 +128,7 @@ tests/               단위·API·Mock E2E 테스트
 각 도구 실행은 `tool_runs`에 버전, 상태, 인자 배열, 오류, 원문 경로와 SHA-256을 저장한다. 원시 탐지는 `raw_findings`, 정규화된 발견항목의 출처는 `finding_sources`에 저장한다. 도구 하나가 실패해도 나머지 분석은 계속한다.
 
 - 권한 보호가 없는 Android 외부 노출 컴포넌트는 컴포넌트별 Finding으로 만들고, Intent Filter 수·재현 절차·오탐 가능성·추가 확인 항목을 함께 보존한다.
+- Live Run의 승인형 외부 진입 검증 원장은 현재 활성 정적 분석에서 만든 후보만 표시한다. 후보 ID는 서버가 재계산하고 프로젝트·Run·단말·후보에 묶인 5분 만료 1회 토큰을 소비한다. Android 딥링크는 대상 패키지로 한정하고 Activity/Activity Alias만 직접 호출한다. Service·Receiver·Provider와 iOS는 `manual_required`다. 호출 전 화면이 없으면 실행하지 않으며 전·후 화면·로그·결과를 정적 Finding에 연결한다. Live 호출에는 유효한 승인 통제 검증 범위가 추가로 필요하다.
 - 인증서 고정, 루팅·탈옥, Frida·후킹, 디버거 탐지 문자열은 일반 취약점과 분리된 모바일 보안통제 신호로 저장한다. 정적 문자열만으로 통제 동작이나 우회 가능성을 확정하지 않는다.
 - `/api/findings?run_id=<run>`은 해당 Run에서 생성된 판정뿐 아니라 선택 앱의 정적 Finding도 함께 반환한다. AI가 비활성화되어도 실제 정적 후보가 실행 화면에서 사라지지 않아야 한다.
 
@@ -407,6 +408,7 @@ npm audit --audit-level=high      0 vulnerabilities
 - 발견항목·실시간 실행 화면을 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건이었다.
 - 승인 범위의 만료·단말 고정·정확 호스트/하위 도메인 판정, mitmproxy upstream 전 차단, 로컬 `control_scope_enforcement` 감사 증적 회귀 테스트를 확인했다.
 - 승인 범위 입력 다이얼로그와 Live 범위 원장을 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건이었다.
+- 승인형 외부 진입 원장과 후보별 동의 다이얼로그를 1440×1000·390×844에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건이었다. Mock 회귀 테스트에서 후보 고정, 수동 전용 컴포넌트 차단, 1회 토큰 소비, Before/After·로그·Finding 연결을 확인했다.
 
 테스트 명령:
 
@@ -429,7 +431,6 @@ npm audit --audit-level=high
 - 실 Android Clipboard의 대상 앱 귀속 검증과 FLAG_SECURE/background snapshot 검증
 - 위험 UI 동작과 Live API Candidate의 1회 승인 후 실행 API·전용 승인 UI
 - Live API 재현 결과의 Response Comparator 실행과 테스트 계정 실사용 여부 검증(현재는 비밀번호 없는 계정 참조와 허용 서버 범위만 구조화)
-- 사용자 승인형 딥링크·노출 컴포넌트 호출 전용 UI
 - NVIDIA/Claude UI Candidate ranking과 증적 선택 연동(현재 탐색은 로컬 결정론적 순위)
 - 프로젝트별 retention 설정과 Raw 데이터 열람 전용 UI
 - 장시간 Logcat·화면 녹화 스트리밍 제어 UI
@@ -455,13 +456,12 @@ npm audit --audit-level=high
 사용자가 별도 우선순위를 주지 않으면 다음 순서가 합리적이다.
 
 1. 위험 UI 동작·Live API Candidate의 1회 승인 실행과 허용 테스트 범위 UI
-2. 사용자 승인형 딥링크·노출 컴포넌트 호출 및 Before/After 증적
-3. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
-4. NVIDIA/Claude UI 순위·증적 선택과 로컬 정책 실행기의 연동
-5. 프로젝트 retention·Raw 열람 UX와 저장 데이터 보호 확장
-6. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
-7. Burp/Fiddler 세션 연동과 장시간 수집의 취소·재연결 제어
-8. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
+2. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
+3. NVIDIA/Claude UI 순위·증적 선택과 로컬 정책 실행기의 연동
+4. 프로젝트 retention·Raw 열람 UX와 저장 데이터 보호 확장
+5. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
+6. Burp/Fiddler 세션 연동과 장시간 수집의 취소·재연결 제어
+7. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
 
 ## 13. 참고 문서
 

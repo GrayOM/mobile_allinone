@@ -120,6 +120,28 @@ export interface Evidence {
   captured_at: string;
 }
 
+export interface ComponentValidationCandidate {
+  id: string;
+  kind: "deep_link" | "exported_component";
+  package_name: string;
+  component_type: string;
+  component_name: string | null;
+  uri?: string;
+  label: string;
+  target: string;
+  location: string;
+  risk: string;
+  execution_status: "approval_required" | "manual_required";
+  rationale: string;
+  finding_id: string | null;
+  last_result: {
+    status: string;
+    reachable: boolean;
+    evidence_id: string;
+    captured_at: string;
+  } | null;
+}
+
 export interface ProxyFlow {
   id: string;
   run_id: string;

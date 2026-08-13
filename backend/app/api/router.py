@@ -42,7 +42,13 @@ from backend.app.analyzers import (
 from backend.app.catalog import CATALOG_SOURCE, MASTG_CONTROLS
 from backend.app.control_validation import (
     ControlScopeError,
+    active_control_scope,
     normalize_control_validation_request,
+)
+from backend.app.component_validation import (
+    ComponentCandidateError,
+    build_component_candidates,
+    resolve_component_candidate,
 )
 from backend.app.core.config import ROOT_DIR, AppSettings, get_settings
 from backend.app.core.events import event_bus
@@ -1006,9 +1012,10 @@ class DeviceAction(BaseModel):
 class ApprovalIssueRequest(BaseModel):
     project_id: str
     run_id: str
-    resource_type: str = Field(pattern="^(device|runtime|frida)$")
+    resource_type: str = Field(pattern="^(device|runtime|frida|component)$")
     action: str = Field(min_length=1, max_length=100)
     approved_by: str = Field(default="local_user", min_length=1, max_length=100)
+    candidate_id: str | None = Field(default=None, pattern="^[a-f0-9]{24}$")
 
 
 @router.post("/approvals", status_code=201)
@@ -1018,7 +1025,25 @@ def create_operation_approval(
     _, run, app = _scoped_run(
         db, project_id=payload.project_id, run_id=payload.run_id
     )
-    target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
+    if payload.resource_type == "component":
+        if payload.action != "verify" or not payload.candidate_id or not app:
+            raise HTTPException(422, "컴포넌트 승인에는 정적 후보 ID와 verify 작업이 필요합니다.")
+        try:
+            candidate = resolve_component_candidate(
+                payload.candidate_id,
+                platform=normalize_platform(app.platform),
+                package_name=app.package_name,
+                analysis_result=app.analysis_result,
+            )
+        except ComponentCandidateError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if candidate["execution_status"] != "approval_required":
+            raise HTTPException(409, "이 후보는 자동 호출 대상이 아니며 수동 재검증이 필요합니다.")
+        target = candidate["id"]
+    else:
+        if payload.candidate_id is not None:
+            raise HTTPException(422, "정적 후보 ID는 컴포넌트 승인에서만 사용할 수 있습니다.")
+        target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
     approval, token = issue_approval(
         db,
         project_id=payload.project_id,
@@ -1042,6 +1067,291 @@ def create_operation_approval(
             "target": approval.target,
         },
     }
+
+
+def _component_candidates_for_run(
+    db: Session, run: DiagnosticRun, app: AppArtifact
+) -> list[dict[str, Any]]:
+    candidates = build_component_candidates(
+        platform=normalize_platform(app.platform),
+        package_name=app.package_name,
+        analysis_result=app.analysis_result,
+    )
+    finding_ids = (
+        select(FindingSource.finding_id)
+        .join(RawFinding, FindingSource.raw_finding_id == RawFinding.id)
+        .where(RawFinding.app_id == app.id)
+    )
+    findings = db.scalars(
+        select(Finding).where(
+            Finding.id.in_(finding_ids),
+            Finding.category == "exposed_component",
+        )
+    ).all()
+    finding_by_location = {item.location: item.id for item in findings}
+    result_evidence = db.scalars(
+        select(Evidence)
+        .where(
+            Evidence.run_id == run.id,
+            Evidence.evidence_type == "component_validation_result",
+        )
+        .order_by(Evidence.sequence.desc())
+    ).all()
+    latest_by_candidate: dict[str, Evidence] = {}
+    for evidence in result_evidence:
+        data = evidence.inline_data if isinstance(evidence.inline_data, dict) else {}
+        candidate_id = str(data.get("candidate_id") or "")
+        if candidate_id and candidate_id not in latest_by_candidate:
+            latest_by_candidate[candidate_id] = evidence
+    for candidate in candidates:
+        candidate["finding_id"] = finding_by_location.get(candidate["location"])
+        latest = latest_by_candidate.get(candidate["id"])
+        if latest:
+            data = latest.inline_data if isinstance(latest.inline_data, dict) else {}
+            candidate["last_result"] = {
+                "status": data.get("status"),
+                "reachable": data.get("reachable"),
+                "evidence_id": latest.id,
+                "captured_at": latest.captured_at.isoformat(),
+            }
+        else:
+            candidate["last_result"] = None
+    return candidates
+
+
+@router.get("/runs/{run_id}/component-candidates")
+def list_component_candidates(run_id: str, db: Session = Depends(get_db)):
+    run = _run_or_404(db, run_id)
+    app = db.get(AppArtifact, run.app_id) if run.app_id else None
+    if not app:
+        raise HTTPException(422, "컴포넌트 검증에는 대상 앱이 연결된 진단이 필요합니다.")
+    _validate_app_device_platform(
+        app, device_adapter=run.device_adapter, device_id=run.device_id
+    )
+    return {
+        "run_id": run.id,
+        "requires_safe_pause": True,
+        "candidates": _component_candidates_for_run(db, run, app),
+    }
+
+
+class ComponentVerifyRequest(BaseModel):
+    approval_token: str = Field(min_length=32, max_length=200)
+
+
+@router.post("/runs/{run_id}/component-candidates/{candidate_id}/verify")
+async def verify_component_candidate(
+    request: Request,
+    run_id: str,
+    candidate_id: str,
+    payload: ComponentVerifyRequest,
+    db: Session = Depends(get_db),
+):
+    run = _run_or_404(db, run_id)
+    project, run, app = _scoped_run(
+        db, project_id=run.project_id, run_id=run.id
+    )
+    if not app:
+        raise HTTPException(422, "컴포넌트 검증에는 대상 앱이 연결된 진단이 필요합니다.")
+    app_platform = _validate_app_device_platform(
+        app, device_adapter=run.device_adapter, device_id=run.device_id
+    )
+    package_name = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
+    try:
+        candidate = resolve_component_candidate(
+            candidate_id,
+            platform=app_platform,
+            package_name=package_name,
+            analysis_result=app.analysis_result,
+        )
+    except ComponentCandidateError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if candidate["execution_status"] != "approval_required":
+        raise HTTPException(409, "이 후보는 자동 호출 대상이 아니며 수동 재검증이 필요합니다.")
+    if run.run_mode == RunMode.LIVE.value:
+        try:
+            if active_control_scope(run.options, run.device_id) is None:
+                raise ControlScopeError(
+                    "Live 컴포넌트 검증에는 활성화된 승인 통제 검증 범위가 필요합니다."
+                )
+        except ControlScopeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    orchestrator = _orchestrator(request)
+    if not await orchestrator.begin_manual_action(run.id):
+        raise HTTPException(409, "자동 Task가 안전하게 대기 중이거나 다른 수동 작업이 끝난 뒤 실행하세요.")
+    manual_claimed = True
+    lease_acquired = False
+    try:
+        try:
+            approval = consume_approval(
+                db,
+                payload.approval_token,
+                project_id=project.id,
+                run_id=run.id,
+                resource_type="component",
+                action="verify",
+                device_id=run.device_id,
+                target=candidate["id"],
+            )
+            lease_acquired = await orchestrator.leases.acquire(
+                run.id, run.device_id, None
+            )
+        except ApprovalError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        try:
+            device = orchestrator.device_for_run(db, run)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        settings = _settings(request)
+        evidence_service = EvidenceService(settings)
+        action_dir = evidence_service.run_dir(run.id) / "component-validation" / candidate["id"]
+        action_dir.mkdir(parents=True, exist_ok=True)
+        finding_id = next(
+            (
+                item.get("finding_id")
+                for item in _component_candidates_for_run(db, run, app)
+                if item["id"] == candidate["id"]
+            ),
+            None,
+        )
+
+        before = await device.screenshot(run.device_id, action_dir / f"{uuid.uuid4()}-before.png")
+        before_evidence = evidence_service.add(
+            db,
+            run_id=run.id,
+            finding_id=finding_id,
+            evidence_type="component_validation_before",
+            title=f"컴포넌트 검증 전 화면 · {candidate['label']}",
+            description=before.message,
+            command=before.command,
+            file_path=before.file_path,
+            inline_data={"candidate_id": candidate["id"], "operation": before.to_dict()},
+        )
+        if before.status != CapabilityStatus.AVAILABLE:
+            operation = before
+            operation.status = CapabilityStatus.MANUAL_REQUIRED
+            operation.message = "검증 전 화면을 확보하지 못해 컴포넌트 호출을 실행하지 않았습니다."
+        else:
+            operation = await device.validate_component_candidate(
+                run.device_id, package_name, candidate
+            )
+        action_evidence = evidence_service.add(
+            db,
+            run_id=run.id,
+            finding_id=finding_id,
+            evidence_type="component_validation_action",
+            title=f"승인형 컴포넌트 호출 · {candidate['label']}",
+            description=operation.message,
+            command=operation.command,
+            inline_data={
+                "candidate": candidate,
+                "operation": operation.to_dict(),
+                "approval_id": approval.id,
+                "approved_by": approval.approved_by,
+                "approved_at": approval.approved_at.isoformat(),
+            },
+        )
+        after = await device.screenshot(run.device_id, action_dir / f"{uuid.uuid4()}-after.png")
+        after_evidence = evidence_service.add(
+            db,
+            run_id=run.id,
+            finding_id=finding_id,
+            evidence_type="component_validation_after",
+            title=f"컴포넌트 검증 후 화면 · {candidate['label']}",
+            description=after.message,
+            command=after.command,
+            file_path=after.file_path,
+            inline_data={"candidate_id": candidate["id"], "operation": after.to_dict()},
+        )
+        logs = await device.collect_logs(
+            run.device_id, action_dir / f"{uuid.uuid4()}-log.txt"
+        )
+        log_evidence = evidence_service.add(
+            db,
+            run_id=run.id,
+            finding_id=finding_id,
+            evidence_type="component_validation_log",
+            title=f"컴포넌트 검증 로그 · {candidate['label']}",
+            description=logs.message,
+            command=logs.command,
+            file_path=logs.file_path,
+            inline_data={"candidate_id": candidate["id"], "operation": logs.to_dict()},
+        )
+        reachable = operation.status == CapabilityStatus.AVAILABLE
+        result_evidence = evidence_service.add_json(
+            db,
+            run_id=run.id,
+            finding_id=finding_id,
+            filename=f"component-validation/{candidate['id']}/{uuid.uuid4()}-result.json",
+            evidence_type="component_validation_result",
+            title=f"컴포넌트 검증 결과 · {candidate['label']}",
+            description=(
+                "외부 진입 성공 신호를 확인했습니다. 민감 기능 영향은 별도로 판정해야 합니다."
+                if reachable
+                else operation.message
+            ),
+            data={
+                "candidate_id": candidate["id"],
+                "kind": candidate["kind"],
+                "target": candidate["target"],
+                "status": operation.status.value,
+                "reachable": reachable,
+                "impact_confirmed": False,
+                "approval_id": approval.id,
+                "evidence_ids": [
+                    before_evidence.id,
+                    action_evidence.id,
+                    after_evidence.id,
+                    log_evidence.id,
+                ],
+            },
+        )
+        options = dict(run.options)
+        history = list(options.get("component_validations") or [])
+        history.append(
+            {
+                "candidate_id": candidate["id"],
+                "status": operation.status.value,
+                "reachable": reachable,
+                "impact_confirmed": False,
+                "result_evidence_id": result_evidence.id,
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        options["component_validations"] = history[-100:]
+        run.options = options
+        db.commit()
+        await event_bus.publish(
+            run.id,
+            "evidence",
+            {
+                "id": result_evidence.id,
+                "type": result_evidence.evidence_type,
+                "title": result_evidence.title,
+                "sequence": result_evidence.sequence,
+                "captured_at": result_evidence.captured_at.isoformat(),
+            },
+        )
+        return {
+            "status": operation.status.value,
+            "reachable": reachable,
+            "impact_confirmed": False,
+            "candidate": candidate,
+            "result_evidence_id": result_evidence.id,
+            "evidence_ids": [
+                before_evidence.id,
+                action_evidence.id,
+                after_evidence.id,
+                log_evidence.id,
+            ],
+        }
+    finally:
+        if lease_acquired:
+            await orchestrator.leases.release(run.id)
+        if manual_claimed:
+            await orchestrator.end_manual_action(run.id)
 
 
 @router.post("/devices/action")

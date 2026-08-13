@@ -58,6 +58,15 @@ scope, issue time and consume time. AI-generated Frida code is always stored as
 `pending_approval`; it is never executed in the generation request or automatic
 repair step.
 
+Deep-link and exported-component verification never accepts a free-form Intent
+from the browser. The server rebuilds candidates from the active static-analysis
+record and binds the one-time token to the candidate fingerprint. Android VIEW
+intents are package-restricted and only activities/activity aliases are invoked;
+services, receivers, providers and iOS candidates remain `manual_required`.
+Before/after screenshots, command output and logs are attached to the matching
+static Finding. Live execution additionally requires a still-valid approved
+control-validation scope.
+
 Manual-operation tasks are tracked per run. Normal stop and resume requests are
 rejected while one is active, so the device lease cannot be released to another
 run while a pull, runtime command or Frida load still owns it. Server shutdown

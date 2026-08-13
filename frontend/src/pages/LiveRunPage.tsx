@@ -7,6 +7,7 @@ import type {
   Finding,
   FridaHealth,
   LiveEvent,
+  ComponentValidationCandidate,
   NetworkTestingSummary,
   NavigationSummary,
   ProxyFlow,
@@ -79,6 +80,11 @@ export default function LiveRunPage() {
     () => localStorage.getItem("msw.evidenceView") === "masked" ? "masked" : "raw",
   );
   const [findings, setFindings] = useState<Finding[]>([]);
+  const [componentCandidates, setComponentCandidates] = useState<ComponentValidationCandidate[]>([]);
+  const [componentReview, setComponentReview] = useState<ComponentValidationCandidate | null>(null);
+  const [componentApprover, setComponentApprover] = useState("");
+  const [componentChecks, setComponentChecks] = useState([false, false, false]);
+  const [componentResult, setComponentResult] = useState("");
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [fridaHealth, setFridaHealth] = useState<FridaHealth | null>(null);
   const [connected, setConnected] = useState(false);
@@ -95,16 +101,20 @@ export default function LiveRunPage() {
   async function refresh() {
     const current = await api<DiagnosticRun>(`/runs/${runId}`);
     setRun(current);
-    const [evidenceItems, flowItems, findingItems, health] = await Promise.all([
+    const [evidenceItems, flowItems, findingItems, health, componentRegister] = await Promise.all([
       api<Evidence[]>(`/runs/${runId}/evidence`),
       api<ProxyFlow[]>(`/runs/${runId}/flows${evidenceView === "raw" ? "/raw" : ""}`),
       api<Finding[]>(`/findings?run_id=${runId}`),
       api<FridaHealth>(`/runs/${runId}/frida/health`),
+      current.app_id
+        ? api<{ candidates: ComponentValidationCandidate[] }>(`/runs/${runId}/component-candidates`)
+        : Promise.resolve({ candidates: [] }),
     ]);
     setEvidence(evidenceItems);
     setFlows(flowItems);
     setFindings(findingItems);
     setFridaHealth(health);
+    setComponentCandidates(componentRegister.candidates);
   }
 
   useEffect(() => {
@@ -175,6 +185,45 @@ export default function LiveRunPage() {
       await refresh();
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : "프록시 설정 확인 실패");
+    } finally {
+      setActionBusy("");
+    }
+  }
+
+  function openComponentReview(candidate: ComponentValidationCandidate) {
+    setComponentResult("");
+    setComponentApprover("");
+    setComponentChecks([false, false, false]);
+    setComponentReview(candidate);
+  }
+
+  async function verifyComponentCandidate() {
+    if (!componentReview || !run) return;
+    setActionBusy(`component:${componentReview.id}`);
+    setActionError("");
+    setComponentResult("");
+    try {
+      const approval = await post<{ token: string }>("/approvals", {
+        project_id: run.project_id,
+        run_id: run.id,
+        resource_type: "component",
+        action: "verify",
+        candidate_id: componentReview.id,
+        approved_by: componentApprover.trim(),
+      });
+      const result = await post<{ status: string; reachable: boolean }>(
+        `/runs/${run.id}/component-candidates/${componentReview.id}/verify`,
+        { approval_token: approval.token },
+      );
+      setComponentResult(
+        result.reachable
+          ? "외부 진입 성공 신호를 기록했습니다. 민감 기능 영향은 별도 판정이 필요합니다."
+          : `검증 결과: ${result.status}`,
+      );
+      setComponentReview(null);
+      await refresh();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "컴포넌트 검증 실패");
     } finally {
       setActionBusy("");
     }
@@ -296,6 +345,55 @@ export default function LiveRunPage() {
           ) : null}
         </section>
       )}
+      <section className="component-gate panel">
+        <div className="component-gate__head">
+          <div>
+            <span className="eyebrow">STATIC TARGET → APPROVAL → EVIDENCE</span>
+            <h3>외부 진입 검증 원장</h3>
+            <p>활성 정적 분석에 선언된 대상만 1회 승인 후 호출하며, 전·후 화면과 로그를 같은 Finding에 연결합니다.</p>
+          </div>
+          <div className="component-gate__counts">
+            <span><strong>{componentCandidates.length}</strong> 정적 후보</span>
+            <span><strong>{componentCandidates.filter((item) => item.last_result).length}</strong> 검증 기록</span>
+            <span><strong>{componentCandidates.filter((item) => item.execution_status === "manual_required").length}</strong> 수동 전용</span>
+          </div>
+        </div>
+        {componentResult && <div className="inline-alert inline-alert--ok">{componentResult}</div>}
+        <div className="component-gate__list">
+          {componentCandidates.length ? componentCandidates.map((candidate) => (
+            <article className="component-gate__row" key={candidate.id}>
+              <div className="component-gate__identity">
+                <span>{candidate.kind === "deep_link" ? "DEEPLINK" : candidate.component_type.toUpperCase()}</span>
+                <strong>{candidate.label}</strong>
+                <code>{candidate.target}</code>
+              </div>
+              <div className="component-gate__policy">
+                <StatusChip
+                  value={candidate.last_result?.status ?? candidate.execution_status}
+                  label={candidate.last_result
+                    ? candidate.last_result.reachable ? "진입 신호 확인" : "검증 기록 있음"
+                    : candidate.execution_status === "approval_required" ? "1회 승인 필요" : "수동 재검증"}
+                />
+                <small>{candidate.rationale}</small>
+                {candidate.finding_id && <Link to={`/findings/${candidate.finding_id}`}>연결 Finding 보기 →</Link>}
+              </div>
+              <div className="component-gate__action">
+                {candidate.execution_status === "approval_required" ? (
+                  <button
+                    type="button"
+                    className="button button--signal button--small"
+                    disabled={run.status !== "safely_paused" || Boolean(actionBusy)}
+                    onClick={() => openComponentReview(candidate)}
+                  >
+                    {run.status === "safely_paused" ? "범위 검토 후 실행" : "안전 일시정지 필요"}
+                  </button>
+                ) : <span>자동 호출 안 함</span>}
+                <small>{candidate.last_result ? formatDate(candidate.last_result.captured_at) : candidate.id}</small>
+              </div>
+            </article>
+          )) : <div className="console-empty">정적 분석에서 검증할 딥링크·외부 노출 컴포넌트가 없습니다.</div>}
+        </div>
+      </section>
       {run.current_stage === "proxy_manual_setup" && (
         <section className="panel manual-proxy-panel">
           <div>
@@ -670,6 +768,36 @@ export default function LiveRunPage() {
           </div>
         </section>
       </div>
+      {componentReview && (
+        <div className="consent-dialog-backdrop" role="presentation">
+          <section className="consent-dialog component-review-dialog panel" role="dialog" aria-modal="true" aria-labelledby="component-review-title">
+            <span className="eyebrow">ONE-TIME COMPONENT APPROVAL</span>
+            <h3 id="component-review-title">정적 대상과 증적 범위를 확인하세요</h3>
+            <p>임의 Intent 값은 입력할 수 없습니다. 아래 대상은 현재 활성 정적 분석에서 서버가 다시 확인하고 승인 토큰은 이 후보에만 묶입니다.</p>
+            <div className="component-review-target">
+              <span>{componentReview.kind === "deep_link" ? "DECLARED URI" : "DECLARED COMPONENT"}</span>
+              <strong>{componentReview.label}</strong>
+              <code>{componentReview.target}</code>
+              <small>ID {componentReview.id} · {componentReview.risk.toUpperCase()} RISK</small>
+            </div>
+            <div className="field">
+              <label htmlFor="component-approver">이번 실행 승인자</label>
+              <input id="component-approver" value={componentApprover} onChange={(event) => setComponentApprover(event.target.value)} maxLength={100} placeholder="예: 고객사 테스트 책임자" />
+            </div>
+            <div className="consent-dialog__checks">
+              <label><input type="checkbox" checked={componentChecks[0]} onChange={(event) => setComponentChecks((items) => [event.target.checked, items[1], items[2]])} /> 이 정적 대상의 외부 호출을 승인받았습니다.</label>
+              <label><input type="checkbox" checked={componentChecks[1]} onChange={(event) => setComponentChecks((items) => [items[0], event.target.checked, items[2]])} /> 테스트 계정·데이터만 사용하고 상태 변경 기능은 직접 조작하지 않습니다.</label>
+              <label><input type="checkbox" checked={componentChecks[2]} onChange={(event) => setComponentChecks((items) => [items[0], items[1], event.target.checked])} /> 호출 전·후 화면과 로그를 원본 증적으로 보존합니다.</label>
+            </div>
+            <div className="consent-dialog__actions">
+              <button type="button" className="button button--quiet" onClick={() => setComponentReview(null)} disabled={Boolean(actionBusy)}>취소</button>
+              <button type="button" className="button button--signal" onClick={() => void verifyComponentCandidate()} disabled={componentApprover.trim().length < 1 || componentChecks.some((item) => !item) || Boolean(actionBusy)}>
+                {actionBusy ? "증적 수집 중…" : "1회 승인하고 검증 실행"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

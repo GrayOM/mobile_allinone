@@ -243,3 +243,25 @@ class MockDeviceAdapter(DeviceAdapter):
             CapabilityStatus.AVAILABLE,
             f"Mock 포트 포워딩 {local_port} → {remote_port}을 설정했습니다.",
         )
+
+    async def validate_component_candidate(
+        self,
+        device_id: str,
+        package_name: str,
+        candidate: dict[str, object],
+    ) -> DeviceOperation:
+        await self._delay()
+        if candidate.get("execution_status") != "approval_required":
+            return self._result(
+                CapabilityStatus.MANUAL_REQUIRED,
+                "Mock에서도 수동 전용 컴포넌트는 실행하지 않습니다.",
+            )
+        self.started_packages.add(package_name)
+        target = str(candidate.get("target") or "static candidate")
+        return self._result(
+            CapabilityStatus.AVAILABLE,
+            "정적 후보의 외부 진입을 Mock으로 재현했습니다.",
+            command=f"mock component-verify {target}",
+            output=f"ActivityTaskManager: START {target}",
+            data={"reachable": True, "candidate_id": candidate.get("id")},
+        )

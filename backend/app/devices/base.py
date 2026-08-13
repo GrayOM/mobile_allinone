@@ -112,3 +112,14 @@ class DeviceAdapter(ABC):
         self, device_id: str, local_port: int, remote_port: int
     ) -> DeviceOperation:
         raise NotImplementedError
+
+    async def validate_component_candidate(
+        self,
+        device_id: str,
+        package_name: str,
+        candidate: dict[str, Any],
+    ) -> DeviceOperation:
+        return DeviceOperation(
+            CapabilityStatus.MANUAL_REQUIRED,
+            "이 단말 Adapter는 컴포넌트 직접 검증을 지원하지 않습니다.",
+        )

@@ -11,6 +11,9 @@ from backend.app.core.targets import is_valid_app_identifier
 from backend.app.devices.base import DeviceAdapter, DeviceInfo, DeviceOperation
 
 
+_COMPONENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.]{1,220}$")
+
+
 class AndroidDeviceAdapter(DeviceAdapter):
     name = "android_adb"
 
@@ -272,3 +275,55 @@ class AndroidDeviceAdapter(DeviceAdapter):
             device_id, "forward", f"tcp:{local_port}", f"tcp:{remote_port}"
         )
         return self._operation(result, f"tcp:{local_port} → tcp:{remote_port} 포워딩을 설정했습니다.")
+
+    async def validate_component_candidate(
+        self,
+        device_id: str,
+        package_name: str,
+        candidate: dict[str, object],
+    ) -> DeviceOperation:
+        invalid = self._invalid_package(package_name)
+        if invalid:
+            return invalid
+        if not self.adb:
+            return self._missing()
+        kind = str(candidate.get("kind") or "")
+        if kind == "deep_link":
+            uri = str(candidate.get("uri") or "")
+            result = await self._adb(
+                device_id,
+                "shell",
+                "am",
+                "start",
+                "-W",
+                "-a",
+                "android.intent.action.VIEW",
+                "-c",
+                "android.intent.category.BROWSABLE",
+                "-d",
+                uri,
+                package_name,
+            )
+            return self._operation(result, "승인된 딥링크 외부 진입을 검증했습니다.")
+        component_type = str(candidate.get("component_type") or "")
+        component_name = str(candidate.get("component_name") or "")
+        if component_type not in {"activity", "activity-alias"}:
+            return DeviceOperation(
+                CapabilityStatus.MANUAL_REQUIRED,
+                "Activity 이외 컴포넌트는 상태 변경 가능성이 있어 자동 호출하지 않습니다.",
+            )
+        if not _COMPONENT_NAME_PATTERN.fullmatch(component_name):
+            return DeviceOperation(
+                CapabilityStatus.FAILED,
+                "정적 분석의 Android 컴포넌트 이름이 안전 형식과 일치하지 않습니다.",
+            )
+        result = await self._adb(
+            device_id,
+            "shell",
+            "am",
+            "start",
+            "-W",
+            "-n",
+            f"{package_name}/{component_name}",
+        )
+        return self._operation(result, "승인된 외부 노출 Activity 진입을 검증했습니다.")

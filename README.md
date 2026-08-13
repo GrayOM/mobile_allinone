@@ -170,6 +170,14 @@ NVIDIA 연동은 OpenAI 호환 `POST /v1/chat/completions`, Claude 연동은 Mes
 
 > 이 모드는 관찰·증적 수집 전용이다. 보안 통제를 자동으로 무력화하지 않고, 운영 계정·실제 고객 데이터에 접근하지 않으며, 승인 정보는 외부 AI 컨텍스트에 포함하지 않는다. 승인 만료·단말 불일치·범위 밖 목적지는 `manual_required`로 전환해 고객사와 솔루션 공급사의 별도 절차를 따른다.
 
+## 승인형 딥링크·외부 노출 컴포넌트 검증
+
+Live Run을 `safely_paused` 상태로 만든 뒤 **외부 진입 검증 원장**에서 정적 분석 후보를 검토할 수 있다. 클라이언트는 임의 Intent, URI, 컴포넌트 이름을 입력하지 않으며 서버가 현재 활성 분석 결과에서 후보 ID를 다시 계산한다. 승인 토큰은 프로젝트·Run·단말·후보 ID에 묶여 5분 안에 한 번만 사용할 수 있다.
+
+Android의 Manifest 딥링크와 외부 노출 Activity/Activity Alias만 승인형 호출을 지원한다. 딥링크는 대상 패키지로 한정한다. Service, Receiver, Provider와 iOS 후보는 상태 변경·임의 데이터 접근 가능성 때문에 `manual_required`로 유지한다. 호출 전 화면을 확보하지 못하면 실행하지 않으며, 성공 여부와 관계없이 호출 전·후 화면, 명령 결과와 로그를 로컬 원본 증적으로 저장해 기존 정적 Finding에 연결한다. 외부 진입 성공은 취약점 영향 확정이 아니라 접근 가능 신호이므로 민감 기능·인증 우회 영향은 별도로 판정한다.
+
+Live 실행에는 승인된 통제 검증 범위가 활성 상태여야 한다. Mock에서는 같은 승인·증적 흐름을 `synthetic=true`로만 재현한다.
+
 
 ## 실제 Android 연결
 
@@ -339,6 +347,7 @@ data/
 - `/api/apps/{id}/reanalyze`, `/api/apps/{id}/analysis/overview`
 - `/api/devices`, `/api/devices/action`, `/api/devices/ios/profiles`
 - `/api/runs`, `/api/runs/{id}/pause|resume|stop`
+- `/api/runs/{id}/component-candidates`, `/api/runs/{id}/component-candidates/{candidate-id}/verify`
 - `/api/runs/{id}/ws`
 - `/api/frida/scripts`, `/api/frida/scripts/generate`, `/api/frida/scripts/{id}/approve|execute`
 - `/api/analysis/tools`, `/api/runtime/adapters`, `/api/runtime/execute`
@@ -416,6 +425,6 @@ docs/
 - 장시간 Logcat·화면 녹화의 스트리밍 제어 UI
 - Fiddler/Burp 프로세스 API 자동 연동
 - DB/SharedPreferences/Keychain 구조화 뷰어
-- 사용자 승인 기반 딥링크·노출 컴포넌트 호출 UI
+- 위험 UI 동작과 Live API Candidate의 범위 제한형 1회 승인 실행
 - 앱 동작 전후 파일 시스템 diff
 - 조직용 사용자 인증·권한·감사 로그(현재는 loopback 단일 사용자)
