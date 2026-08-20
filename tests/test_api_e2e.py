@@ -9,6 +9,8 @@ from fastapi import HTTPException
 
 from backend.app.api.router import _normalize_control_validation_options
 from backend.app.core.status import RunMode
+from backend.app.database.models import AIInvocation
+from backend.app.database.session import SessionLocal
 
 
 def _wait_for_run(client, run_id: str, timeout: float = 30):
@@ -77,7 +79,7 @@ def test_control_validation_requires_live_scope_and_full_attestation():
     )
     assert normalized is not None
     assert normalized["mode"] == "authorized_control_validation"
-    assert normalized["execution_policy"] == "observation_only"
+    assert normalized["execution_policy"] == "observation_plus_approved_manual_bypass"
     assert normalized["automatic_control_evasion"] is False
     assert normalized["external_ai_excluded"] is True
     assert normalized["network_scope_policy"] == "default_deny"
@@ -142,10 +144,24 @@ def test_mock_demo_runs_end_to_end(client):
     assert flows[0]["response_headers"]["Set-Cookie"] == "[MASKED_FIELD]"
     assert raw_flows_response.headers["Cache-Control"] == "no-store"
     assert raw_flows[0]["request_headers"]["Authorization"].startswith("Bearer mock-")
-    assert findings and findings[0]["source"] == "ai:mock"
-    assert findings[0]["synthetic"] is True
-    sources = client.get(f"/api/findings/{findings[0]['id']}/sources").json()
+    ai_finding = next(item for item in findings if item["source"] == "ai:mock")
+    assert ai_finding["synthetic"] is True
+    sources = client.get(f"/api/findings/{ai_finding['id']}/sources").json()
     assert sources[0]["evidence_ids"]
+    recommendations = run["options"]["ai_assessment_recommendations"]
+    mapped = next(
+        item for item in recommendations if item["finding_id"] == ai_finding["id"]
+    )
+    assert "CII-MA-05" in mapped["control_ids"]
+    coverage = client.get(
+        f"/api/coverage?run_id={run['id']}&scope=run&standard=critical_infrastructure"
+    ).json()
+    ai_control = next(
+        item for item in coverage["tests"] if item["control_id"] == "CII-MA-05"
+    )
+    assert ai_control["result"] == "needs_review"
+    assert ai_finding["id"] in ai_control["finding_ids"]
+    assert "AI 추론만으로는 취약점을 확정하지 않으며" in ai_control["summary"]
 
     report = client.post(f"/api/findings/{findings[0]['id']}/report")
     assert report.status_code == 200
@@ -274,6 +290,144 @@ def test_custom_frida_script_requires_approval(client):
         if item["id"] == script["id"]
     )
     assert refreshed["success_count"] == script["success_count"]
+
+
+def test_high_risk_root_bypass_requires_prelaunch_pause_and_one_time_approval(client):
+    demo = client.post("/api/demo/bootstrap").json()
+    script = next(
+        item
+        for item in client.get("/api/frida/scripts?platform=android").json()
+        if item["category"] == "Root Detection Bypass"
+    )
+    assert script["risk"] == "high"
+    assert script["syntax_status"] == "available"
+
+    automatic = client.post(
+        "/api/runs",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "device_id": "mock-android-01",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+            "frida_script_ids": [script["id"]],
+        },
+    )
+    assert automatic.status_code == 422
+    assert "builtin·low" in automatic.json()["detail"]
+
+    approved = client.post(
+        f"/api/frida/scripts/{script['id']}/approve",
+        json={
+            "approver": "authorized-reviewer",
+            "review_acknowledged": True,
+            "reviewed_sha256": hashlib.sha256(
+                script["content"].encode("utf-8")
+            ).hexdigest(),
+        },
+    )
+    assert approved.status_code == 200
+
+    started = client.post(
+        "/api/runs",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "device_id": "mock-android-01",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+            "options": {
+                "pause_for_security_bypass": True,
+                "auto_navigation": False,
+                "dynamic_storage": False,
+            },
+        },
+    )
+    assert started.status_code == 201
+    run_id = started.json()["id"]
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        paused = client.get(f"/api/runs/{run_id}").json()
+        if paused["status"] == "safely_paused":
+            break
+        time.sleep(0.05)
+    assert paused["status"] == "safely_paused"
+    assert paused["current_stage"] == "security_bypass_preparation"
+
+    generated = client.post(
+        "/api/frida/scripts/generate",
+        json={
+            "project_id": demo["project"]["id"],
+            "run_id": run_id,
+            "purpose": "security_bypass",
+            "platform": "android",
+            "category": "untrusted client category",
+            "use_mock": True,
+        },
+    )
+    assert generated.status_code == 200
+    generated_payload = generated.json()
+    assert generated_payload["purpose"] == "security_bypass"
+    assert generated_payload["run_id"] == run_id
+    assert generated_payload["analyzed_evidence_ids"]
+    assert generated_payload["script"]["risk"] == "high"
+    assert generated_payload["script"]["category"] == "Root Detection Bypass"
+    assert generated_payload["script"]["target_app_id"] == demo["app"]["id"]
+    assert generated_payload["script"]["approval_status"] == "pending_approval"
+    with SessionLocal() as db:
+        invocation = db.query(AIInvocation).filter_by(
+            run_id=run_id,
+            task="security_bypass_script_generation",
+        ).one()
+        assert invocation.provider == "mock"
+        assert invocation.masked is True
+
+    approval = client.post(
+        "/api/approvals",
+        json={
+            "project_id": demo["project"]["id"],
+            "run_id": run_id,
+            "resource_type": "frida",
+            "action": f"execute:{script['id']}",
+            "approved_by": "authorized-reviewer",
+        },
+    )
+    assert approval.status_code == 201
+    executed = client.post(
+        f"/api/frida/scripts/{script['id']}/execute",
+        json={
+            "project_id": demo["project"]["id"],
+            "run_id": run_id,
+            "mode": "spawn",
+            "approval_token": approval.json()["token"],
+        },
+    )
+    assert executed.status_code == 200
+    assert executed.json()["status"] == "available"
+    reused = client.post(
+        f"/api/frida/scripts/{script['id']}/execute",
+        json={
+            "project_id": demo["project"]["id"],
+            "run_id": run_id,
+            "mode": "spawn",
+            "approval_token": approval.json()["token"],
+        },
+    )
+    assert reused.status_code == 409
+
+    resumed = client.post(f"/api/runs/{run_id}/resume")
+    assert resumed.status_code == 200
+    completed = _wait_for_run(client, run_id)
+    assert completed["status"] == "completed", completed.get("error")
+    assert completed["options"]["manual_frida_scripts"][0]["risk"] == "high"
+    evidence = client.get(f"/api/runs/{run_id}/evidence").json()
+    bypass = next(
+        item
+        for item in evidence
+        if item["evidence_type"] == "frida_script"
+        and item["inline_data"].get("category") == "Root Detection Bypass"
+    )
+    assert bypass["inline_data"]["content_sha256"]
 
 
 def test_login_pause_and_resume(client):

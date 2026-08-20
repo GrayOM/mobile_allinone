@@ -41,6 +41,11 @@ class RunMode(StringEnum):
     LIVE = "live"
 
 
+class AssessmentProfile(StringEnum):
+    CRITICAL_INFRASTRUCTURE = "critical_infrastructure"
+    ELECTRONIC_FINANCIAL = "electronic_financial"
+
+
 class FindingVerdict(StringEnum):
     CANDIDATE = "candidate"
     CONFIRMED = "confirmed"

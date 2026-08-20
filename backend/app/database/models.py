@@ -37,6 +37,9 @@ class Project(Base, TimestampMixin):
     # mock_mode is kept for API/database compatibility. run_mode is authoritative.
     mock_mode: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     run_mode: Mapped[str] = mapped_column(String(16), default="live", nullable=False)
+    assessment_profile: Mapped[str] = mapped_column(
+        String(40), default="critical_infrastructure", nullable=False
+    )
 
     apps: Mapped[list["AppArtifact"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
@@ -189,6 +192,9 @@ class FridaScript(Base, TimestampMixin):
     __tablename__ = "frida_scripts"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    target_app_id: Mapped[str | None] = mapped_column(
+        ForeignKey("app_artifacts.id"), index=True
+    )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     platform: Mapped[str] = mapped_column(String(24), nullable=False)
     category: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -375,5 +381,13 @@ class ControlTest(Base, TimestampMixin):
     source_url: Mapped[str] = mapped_column(Text, default="")
     evidence_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    standard: Mapped[str] = mapped_column(
+        String(40), default="owasp_mastg", nullable=False, index=True
+    )
+    criteria: Mapped[list[str]] = mapped_column(JSON, default=list)
+    evidence_requirements: Mapped[list[list[str]]] = mapped_column(JSON, default=list)
+    finding_categories: Mapped[list[str]] = mapped_column(JSON, default=list)
+    finding_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    risk: Mapped[str] = mapped_column(String(20), default="low", nullable=False)
 
     app: Mapped["AppArtifact"] = relationship(back_populates="control_tests")

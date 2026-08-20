@@ -69,6 +69,7 @@ class AppSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
     lan_access: bool = False
+    docker_loopback_bridge: bool = False
     api_token: str | None = None
     admin_token: str | None = None
     trusted_hosts: list[str] = Field(default_factory=list)
@@ -215,6 +216,10 @@ def get_settings() -> AppSettings:
         "host": os.getenv("MSW_HOST", values.get("host", "127.0.0.1")),
         "port": int(os.getenv("MSW_PORT", values.get("port", 8765))),
         "lan_access": _env_bool("MSW_LAN_ACCESS", values.get("lan_access", False)),
+        "docker_loopback_bridge": _env_bool(
+            "MSW_DOCKER_LOOPBACK_BRIDGE",
+            values.get("docker_loopback_bridge", False),
+        ),
         "api_token": os.getenv("MSW_API_TOKEN"),
         "admin_token": os.getenv("MSW_ADMIN_TOKEN"),
         "trusted_hosts": [

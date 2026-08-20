@@ -138,7 +138,7 @@ def normalize_control_validation_request(
     return {
         "enabled": True,
         "mode": "authorized_control_validation",
-        "execution_policy": "observation_only",
+        "execution_policy": "observation_plus_approved_manual_bypass",
         "automatic_control_evasion": False,
         "external_ai_excluded": True,
         "network_scope_policy": "default_deny",

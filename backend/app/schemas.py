@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from backend.app.core.status import FindingVerdict, RunMode
+from backend.app.core.status import AssessmentProfile, FindingVerdict, RunMode
 from backend.app.core.targets import SSH_USERNAME_PATTERN, is_valid_host
 from backend.app.frida.target import normalize_frida_endpoint
 
@@ -21,6 +21,7 @@ class ProjectCreate(BaseModel):
     external_ai_allowed: bool = False
     external_analyzer_allowed: bool = False
     run_mode: RunMode = RunMode.LIVE
+    assessment_profile: AssessmentProfile = AssessmentProfile.CRITICAL_INFRASTRUCTURE
     mock_mode: bool | None = None
 
     @model_validator(mode="after")
@@ -39,6 +40,7 @@ class ProjectUpdate(BaseModel):
     external_analyzer_allowed: bool | None = None
     mock_mode: bool | None = None
     run_mode: RunMode | None = None
+    assessment_profile: AssessmentProfile | None = None
 
     @model_validator(mode="after")
     def normalize_legacy_mode(self):
@@ -63,6 +65,7 @@ class ProjectOut(ORMModel):
     external_analyzer_certificate_sha256: str | None
     mock_mode: bool
     run_mode: str
+    assessment_profile: str
     created_at: datetime
     updated_at: datetime
 
@@ -165,6 +168,7 @@ class FridaScriptCreate(BaseModel):
 
 class FridaScriptOut(ORMModel):
     id: str
+    target_app_id: str | None
     name: str
     platform: str
     category: str
@@ -212,6 +216,7 @@ class AIFindingCandidate(BaseModel):
     evidence_ids: list[str]
     false_positive_risk: str
     additional_checks: list[str]
+    control_ids: list[str] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def confirmed_requires_evidence(self):

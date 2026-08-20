@@ -7,6 +7,9 @@ RUN npm run build
 
 FROM python:3.12-slim
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml ./
 COPY backend/ backend/
 COPY scripts/ scripts/

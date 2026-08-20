@@ -32,6 +32,11 @@ from sqlalchemy.orm import Session
 
 from backend.app.ai import AIProviderChain, MockAIProvider
 from backend.app.ai.masking import mask_context
+from backend.app.assessment import evaluate_standard_controls, upsert_standard_finding
+from backend.app.assessment_plan import (
+    refresh_app_assessment_plan,
+    stored_plan_is_current,
+)
 from backend.app.analyzers import (
     APKiDAnalyzerAdapter,
     AndroguardAnalyzerAdapter,
@@ -40,7 +45,15 @@ from backend.app.analyzers import (
     StaticAnalyzer,
     replace_analysis_records,
 )
-from backend.app.catalog import CATALOG_SOURCE, MASTG_CONTROLS
+from backend.app.catalog import (
+    CATALOG_SOURCE,
+    MASTG_CONTROLS,
+    PROFILE_SOURCES,
+    control_by_id,
+    controls_for_profile,
+    execution_matrix,
+    execution_plan,
+)
 from backend.app.control_validation import (
     ControlScopeError,
     active_control_scope,
@@ -90,6 +103,7 @@ from backend.app.devices import (
     MockDeviceAdapter,
 )
 from backend.app.evidence.report import EvidenceReportRenderer
+from backend.app.evidence.docx_report import VulnerabilityDocxReportRenderer
 from backend.app.evidence.service import EvidenceService
 from backend.app.frida import FridaManager, FridaSessionScript
 from backend.app.frida.policy import is_safe_automatic_script, script_applies_to_app
@@ -206,9 +220,9 @@ def _normalize_control_validation_options(
 ) -> dict[str, Any] | None:
     """Validate a locally recorded, authorised control-validation request.
 
-    This mode records the user's approved test boundary for observation and
-    evidence collection. It never changes device security state or permits
-    automatic evasion of security controls.
+    This mode records the user's approved test boundary for evidence collection
+    and separately approved manual Frida bypasses. It never changes device
+    security state or permits automatic evasion of security controls.
     """
     raw = options.get("control_validation")
     if raw is None:
@@ -332,6 +346,11 @@ def _activate_analysis_run(
                 previous_active.status = "superseded"
         replace_analysis_records(
             db, project=project, artifact=artifact, result=result
+        )
+        refresh_app_assessment_plan(
+            db,
+            project=project,
+            artifact=artifact,
         )
         db.commit()
     except Exception:
@@ -462,6 +481,16 @@ async def update_project(
     requested_mode = changes.get("run_mode")
     if requested_mode and requested_mode != project.run_mode and (project.apps or project.runs):
         raise HTTPException(409, "앱 또는 진단 이력이 있는 프로젝트의 실행 모드는 변경할 수 없습니다.")
+    requested_profile = changes.get("assessment_profile")
+    if (
+        requested_profile
+        and requested_profile != project.assessment_profile
+        and (project.apps or project.runs)
+    ):
+        raise HTTPException(
+            409,
+            "앱 또는 진단 이력이 있는 프로젝트의 국내 진단 기준은 변경할 수 없습니다.",
+        )
     for key, value in changes.items():
         setattr(project, key, value)
     if "external_analyzer_allowed" in changes:
@@ -767,6 +796,16 @@ def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
         .where(
             ControlTest.app_id == app_id,
             ControlTest.run_id.is_(None),
+            ControlTest.standard == "owasp_mastg",
+        )
+        .order_by(ControlTest.masvs_id, ControlTest.mastg_id)
+    ).all()
+    assessment_controls = db.scalars(
+        select(ControlTest)
+        .where(
+            ControlTest.app_id == app_id,
+            ControlTest.run_id.is_(None),
+            ControlTest.standard == artifact.project.assessment_profile,
         )
         .order_by(ControlTest.masvs_id, ControlTest.mastg_id)
     ).all()
@@ -787,6 +826,8 @@ def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
             for item in analysis_runs
         ],
         "catalog_source": CATALOG_SOURCE,
+        "assessment_profile": artifact.project.assessment_profile,
+        "assessment_source": PROFILE_SOURCES[artifact.project.assessment_profile],
         "tool_runs": [
             {
                 "id": item.id,
@@ -821,11 +862,172 @@ def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
             for item in raw_findings
         ],
         "controls": [_control_to_dict(item) for item in controls],
+        "assessment_controls": [
+            _control_to_dict(item) for item in assessment_controls
+        ],
+    }
+
+
+class AppAITriageRequest(BaseModel):
+    use_mock: bool = False
+    simulate_nvidia_failure: bool = False
+
+
+@router.post("/apps/{app_id}/ai/triage")
+async def app_ai_static_triage(
+    request: Request,
+    app_id: str,
+    payload: AppAITriageRequest,
+    db: Session = Depends(get_db),
+):
+    app = _app_or_404(db, app_id)
+    project = _project_or_404(db, app.project_id)
+    if not project.ai_enabled:
+        raise HTTPException(409, "이 프로젝트는 AI 진단 보조가 비활성화되어 있습니다.")
+    if payload.use_mock and project.run_mode != RunMode.MOCK.value:
+        raise HTTPException(422, "Live 프로젝트에서는 Mock AI를 사용할 수 없습니다.")
+    if project.run_mode == RunMode.LIVE.value and not project.external_ai_allowed:
+        raise HTTPException(409, "이 프로젝트는 외부 AI 전송이 비활성화되어 있습니다.")
+
+    definitions = controls_for_profile(project.assessment_profile)
+    static_analysis = dict(app.analysis_result or {})
+    static_analysis.pop("ai_static_triage", None)
+    raw_rows = db.scalars(
+        select(RawFinding)
+        .where(RawFinding.app_id == app.id)
+        .order_by(RawFinding.created_at.desc())
+        .limit(100)
+    ).all()
+    context = {
+        "platform": app.platform,
+        "assessment_profile": project.assessment_profile,
+        "assessment_controls": [
+            {
+                "control_id": item.control_id,
+                "title": item.title,
+                "criteria": list(item.criteria),
+                "finding_categories": list(item.finding_categories),
+                "evidence_requirements": [
+                    list(group) for group in item.evidence_requirements
+                ],
+                "risk": item.risk,
+            }
+            for item in definitions
+        ],
+        "artifact": {
+            "sha256": app.sha256,
+            "package_name": app.package_name,
+            "version": app.version,
+        },
+        "static_analysis_excerpt": _bounded_ai_value(
+            static_analysis,
+            limit=60_000,
+        ),
+        "raw_findings": [
+            {
+                "tool": item.source_tool,
+                "rule_id": item.rule_id,
+                "title": item.title,
+                "category": item.category,
+                "severity": item.severity,
+                "location": item.location,
+                "confidence": item.confidence,
+            }
+            for item in raw_rows
+        ],
+        "evidence_ids": [],
+        "evidence_catalog": [],
+        "simulate_nvidia_failure": payload.simulate_nvidia_failure,
+        "decision_boundary": (
+            "정적 사전 분류는 needs_review만 허용하며 실제 단말·서버 재현 없이 confirmed를 금지합니다."
+        ),
+    }
+    task = (
+        "APK·IPA 정적 분석 결과를 선택한 국내 모바일 취약점 기준에 사전 매핑하세요. "
+        "각 후보는 입력에 있는 정확한 control_id만 사용하고 verdict는 needs_review로 작성하세요. "
+        "실제 단말이나 서버 재현이 필요한 추가 점검 절차를 구체적으로 제시하세요."
+    )
+    settings = _settings(request)
+    if project.run_mode == RunMode.MOCK.value:
+        selected = await MockAIProvider().analyze(task, context, masked=True)
+        attempts = [selected]
+    else:
+        selected, attempts = await AIProviderChain(settings=settings).analyze(
+            task,
+            context,
+            masked=settings.mask_external_ai_data,
+        )
+
+    for attempt in attempts:
+        raw_path = save_ai_raw_response(
+            settings,
+            f"app-triage-{app.id}-{uuid.uuid4()}-{attempt.provider}.json",
+            attempt.raw_response,
+        )
+        db.add(
+            AIInvocation(
+                project_id=project.id,
+                run_id=None,
+                provider=attempt.provider,
+                model=attempt.model,
+                task="app_static_triage",
+                status=attempt.status.value,
+                masked=attempt.masked,
+                quality_score=attempt.quality_score,
+                raw_response_path=str(raw_path) if raw_path else None,
+                error=(
+                    attempt.message
+                    if attempt.status != CapabilityStatus.AVAILABLE
+                    else None
+                ),
+                synthetic=app.synthetic,
+            )
+        )
+
+    valid_control_ids = {item.control_id for item in definitions}
+    findings: list[dict[str, Any]] = []
+    if selected.status == CapabilityStatus.AVAILABLE and selected.analysis:
+        for candidate in selected.analysis.findings:
+            value = candidate.model_dump(mode="json")
+            value["verdict"] = "needs_review"
+            value["evidence_ids"] = []
+            value["control_ids"] = [
+                item
+                for item in dict.fromkeys(candidate.control_ids)
+                if item in valid_control_ids
+            ]
+            findings.append(value)
+
+    triage = {
+        "status": selected.status.value,
+        "provider": selected.provider,
+        "model": selected.model,
+        "message": selected.message,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "artifact_sha256": app.sha256,
+        "assessment_profile": project.assessment_profile,
+        "decision_policy": "static_needs_review_only",
+        "findings": findings,
+    }
+    analysis_result = dict(app.analysis_result or {})
+    analysis_result["ai_static_triage"] = triage
+    app.analysis_result = analysis_result
+    assessment_plan = refresh_app_assessment_plan(
+        db,
+        project=project,
+        artifact=app,
+    )
+    db.commit()
+    return {
+        "triage": triage,
+        "assessment_plan": assessment_plan,
+        "selected": selected.to_dict(),
+        "attempts": [item.to_dict() for item in attempts],
     }
 
 
 def _control_to_dict(item: ControlTest) -> dict[str, Any]:
-    return {
+    value = {
         "id": item.id,
         "project_id": item.project_id,
         "app_id": item.app_id,
@@ -843,7 +1045,23 @@ def _control_to_dict(item: ControlTest) -> dict[str, Any]:
         "evidence_ids": item.evidence_ids,
         "synthetic": item.synthetic,
         "updated_at": item.updated_at,
+        "standard": item.standard,
+        "control_id": item.mastg_id,
+        "group": item.masvs_id,
+        "criteria": item.criteria,
+        "evidence_requirements": item.evidence_requirements,
+        "finding_categories": item.finding_categories,
+        "finding_ids": item.finding_ids,
+        "risk": item.risk,
     }
+    definition = (
+        control_by_id(item.standard, item.mastg_id)
+        if item.standard in PROFILE_SOURCES
+        else None
+    )
+    if definition is not None:
+        value["execution"] = execution_plan(definition)
+    return value
 
 
 @router.post(
@@ -1180,6 +1398,45 @@ def create_operation_approval(
         except (NetworkApprovalError, ControlScopeError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
         target = candidate.id
+    elif payload.resource_type == "frida":
+        if payload.candidate_id is not None or not payload.action.startswith("execute:"):
+            raise HTTPException(
+                422, "Frida 승인에는 execute:<script-id> 작업이 필요합니다."
+            )
+        if run.status != RunStatus.SAFELY_PAUSED.value:
+            raise HTTPException(
+                409, "Frida 실행 승인은 Run이 안전 일시정지 상태일 때만 발급합니다."
+            )
+        if not app:
+            raise HTTPException(422, "Frida 실행에는 대상 앱이 연결된 진단이 필요합니다.")
+        script_id = payload.action.removeprefix("execute:")
+        script = db.get(FridaScript, script_id)
+        if not script or script.approval_status != "approved":
+            raise HTTPException(409, "현재 코드 검토를 마친 승인된 Frida 스크립트가 필요합니다.")
+        current_sha256 = hashlib.sha256(script.content.encode("utf-8")).hexdigest()
+        if not script.approved_sha256 or script.approved_sha256 != current_sha256:
+            raise HTTPException(409, "승인 후 Frida 스크립트 내용이 변경됐습니다.")
+        if normalize_platform(script.platform) != normalize_platform(app.platform):
+            raise HTTPException(422, "Frida 스크립트 플랫폼이 대상 앱과 일치하지 않습니다.")
+        if script.target_app_id and script.target_app_id != app.id:
+            raise HTTPException(422, "이 AI Frida 후보는 다른 앱의 정적 분석에 고정되어 있습니다.")
+        if (
+            script.category in {"Root Detection Bypass", "Jailbreak Detection Bypass"}
+            and run.current_stage != "security_bypass_preparation"
+        ):
+            raise HTTPException(
+                409,
+                "루팅·탈옥 탐지 우회는 첫 앱 실행 전 보안통제 우회 준비 단계에서만 승인합니다.",
+            )
+        if run.run_mode == RunMode.LIVE.value:
+            try:
+                if active_control_scope(run.options, run.device_id) is None:
+                    raise ControlScopeError(
+                        "Live Frida 우회에는 활성화된 승인 통제 검증 범위가 필요합니다."
+                    )
+            except ControlScopeError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
     else:
         if payload.candidate_id is not None:
             raise HTTPException(422, "이 작업 유형에는 Candidate ID를 사용할 수 없습니다.")
@@ -2373,11 +2630,15 @@ async def create_run(
         raise HTTPException(
             422, "pause_for_approval_candidates는 boolean이어야 합니다."
         )
+    pause_for_security_bypass = options.get("pause_for_security_bypass", False)
+    if not isinstance(pause_for_security_bypass, bool):
+        raise HTTPException(422, "pause_for_security_bypass는 boolean이어야 합니다.")
     navigation_options = options.get("navigation_limits", {})
     if not isinstance(navigation_options, dict):
         raise HTTPException(422, "navigation_limits는 객체여야 합니다.")
     options.update(
         {
+            "assessment_profile": project.assessment_profile,
             "frida_script_ids": selected_script_ids,
             "auto_select_frida": payload.auto_select_frida,
             "pause_for_login": payload.pause_for_login,
@@ -2385,6 +2646,7 @@ async def create_run(
             "auto_navigation": auto_navigation,
             "dynamic_storage": dynamic_storage,
             "pause_for_approval_candidates": pause_for_approval_candidates,
+            "pause_for_security_bypass": pause_for_security_bypass,
             "navigation_limits": NavigationLimits.from_options(
                 navigation_options
             ).to_dict(),
@@ -2893,6 +3155,46 @@ def view_report(
     return FileResponse(path, media_type="text/html")
 
 
+@router.post("/runs/{run_id}/report/docx")
+def create_vulnerability_docx_report(
+    request: Request,
+    run_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        path = VulnerabilityDocxReportRenderer(_settings(request)).render(db, run_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "status": "created",
+        "run_id": run_id,
+        "url": f"/api/runs/{run_id}/report/docx",
+        "file": path.name,
+        "policy": "confirmed_vulnerabilities_only",
+    }
+
+
+@router.get("/runs/{run_id}/report/docx")
+def download_vulnerability_docx_report(
+    request: Request,
+    run_id: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        path = VulnerabilityDocxReportRenderer(_settings(request)).render(db, run_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=path.name,
+    )
+
+
 @router.get("/frida/scripts", response_model=list[FridaScriptOut])
 def list_frida_scripts(
     platform: str | None = None,
@@ -3014,6 +3316,27 @@ async def execute_frida_script(
     )
     if normalize_platform(script.platform) != app_platform:
         raise HTTPException(422, "Frida 스크립트 플랫폼이 대상 앱과 일치하지 않습니다.")
+    if script.target_app_id and script.target_app_id != app.id:
+        raise HTTPException(422, "이 AI Frida 후보는 다른 앱의 정적 분석에 고정되어 있습니다.")
+    if (
+        script.category in {"Root Detection Bypass", "Jailbreak Detection Bypass"}
+        and (
+            run.current_stage != "security_bypass_preparation"
+            or payload.mode != "spawn"
+        )
+    ):
+        raise HTTPException(
+            409,
+            "루팅·탈옥 탐지 우회는 첫 앱 실행 전 준비 단계에서 Spawn 방식으로만 실행합니다.",
+        )
+    if run.run_mode == RunMode.LIVE.value:
+        try:
+            if active_control_scope(run.options, run.device_id) is None:
+                raise ControlScopeError(
+                    "Live Frida 우회에는 활성화된 승인 통제 검증 범위가 필요합니다."
+                )
+        except ControlScopeError as exc:
+            raise HTTPException(409, str(exc)) from exc
     target = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
     try:
         device_adapter = _orchestrator(request).device_for_run(db, run)
@@ -3197,6 +3520,10 @@ async def execute_frida_script(
             command=result.command,
             inline_data={
                 "script_id": script.id,
+                "script_name": script.name,
+                "risk": script.risk,
+                "category": script.category,
+                "content_sha256": content_sha256,
                 "result": result_data,
                 "approval_id": approval.id,
                 "approved_by": approval.approved_by,
@@ -3204,6 +3531,24 @@ async def execute_frida_script(
                 "lifecycle_evidence_ids": lifecycle_evidence_ids,
             },
         )
+        options = dict(run.options)
+        executions = list(options.get("manual_frida_scripts") or [])
+        executions.append(
+            {
+                "script_id": script.id,
+                "script_name": script.name,
+                "risk": script.risk,
+                "category": script.category,
+                "content_sha256": content_sha256,
+                "mode": payload.mode,
+                "status": result.status.value,
+                "evidence_id": evidence.id,
+                "approved_by": approval.approved_by,
+                "approved_at": approval.approved_at.isoformat(),
+            }
+        )
+        options["manual_frida_scripts"] = executions
+        run.options = options
         db.commit()
         result_data["evidence_id"] = evidence.id
         return result_data
@@ -3216,6 +3561,9 @@ async def execute_frida_script(
 
 class FridaGenerateRequest(BaseModel):
     project_id: str
+    run_id: str | None = None
+    app_id: str | None = None
+    purpose: Literal["repair", "security_bypass", "observation"] = "repair"
     platform: str = Field(pattern="^(android|ios)$")
     category: str = Field(default="Custom", max_length=100)
     target_framework: str = Field(default="generic", max_length=100)
@@ -3226,6 +3574,97 @@ class FridaGenerateRequest(BaseModel):
     failure_message: str = Field(default="", max_length=8000)
     use_mock: bool = False
     simulate_nvidia_failure: bool = False
+
+
+_AI_BYPASS_EVIDENCE_TYPES = {
+    "static_analysis",
+    "device_state",
+    "device_log",
+    "command_log",
+    "frida_session",
+    "frida_script",
+    "runtime_tool",
+    "screenshot",
+}
+_AI_CONTROL_SIGNAL_KEYS = {
+    "root_jailbreak_detection",
+    "root_detection",
+    "jailbreak_detection",
+    "frida_hook_detection",
+    "debugger_detection",
+    "integrity_signature",
+    "certificate_pinning",
+}
+
+
+def _bounded_ai_value(value: Any, *, limit: int = 4000) -> str:
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        encoded = str(value)
+    return encoded if len(encoded) <= limit else encoded[:limit] + "…[truncated]"
+
+
+def _security_bypass_ai_context(
+    db: Session,
+    *,
+    run: DiagnosticRun | None,
+    app: AppArtifact,
+) -> tuple[dict[str, Any], list[str]]:
+    rows = (
+        db.scalars(
+            select(Evidence)
+            .where(
+                Evidence.run_id == run.id,
+                Evidence.evidence_type.in_(_AI_BYPASS_EVIDENCE_TYPES),
+            )
+            .order_by(Evidence.sequence.desc())
+            .limit(16)
+        ).all()
+        if run
+        else []
+    )
+    rows.reverse()
+    catalog = [
+        {
+            "id": item.id,
+            "type": item.evidence_type,
+            "title": item.title,
+            "sequence": item.sequence,
+            "description": item.description[:1000],
+            "inline_excerpt": (
+                "binary screenshot omitted"
+                if item.evidence_type == "screenshot"
+                else _bounded_ai_value(item.inline_data)
+            ),
+        }
+        for item in rows
+    ]
+    analysis = app.analysis_result if isinstance(app.analysis_result, dict) else {}
+    signals = analysis.get("signals") if isinstance(analysis.get("signals"), dict) else {}
+    selected_signals = {
+        key: signals[key]
+        for key in _AI_CONTROL_SIGNAL_KEYS
+        if key in signals
+    }
+    return {
+        "purpose": "security_bypass",
+        "platform": app.platform,
+        "target_app": app.package_name,
+        "target_app_sha256": app.sha256,
+        "analysis_mode": "run_evidence" if run else "static_preparation",
+        "static_control_signals": selected_signals,
+        "evidence_catalog": catalog,
+        "execution_boundary": {
+            "target_process_only": True,
+            "first_launch_preparation": True,
+            "network_exfiltration": False,
+            "file_deletion": False,
+            "credential_collection": False,
+            "persistence": False,
+            "automatic_execution": False,
+        },
+    }, [item.id for item in rows]
 
 
 @router.post("/frida/scripts/generate")
@@ -3242,8 +3681,64 @@ async def generate_frida_script(
     if not payload.use_mock and project.run_mode == RunMode.LIVE.value and not project.external_ai_allowed:
         raise HTTPException(409, "이 프로젝트는 외부 AI 전송이 비활성화되어 있습니다.")
 
+    run: DiagnosticRun | None = None
+    app: AppArtifact | None = None
+    analyzed_evidence_ids: list[str] = []
+    server_context: dict[str, Any] = {}
+    generation_task = payload.task
+    if payload.purpose == "security_bypass":
+        if payload.run_id:
+            project, run, app = _scoped_run(
+                db,
+                project_id=payload.project_id,
+                run_id=payload.run_id,
+            )
+        elif payload.app_id:
+            app = _app_or_404(db, payload.app_id)
+            if app.project_id != project.id:
+                raise HTTPException(422, "선택한 앱이 프로젝트에 속하지 않습니다.")
+        else:
+            raise HTTPException(
+                422,
+                "보안통제 우회 분석에는 대상 앱 또는 안전 일시정지된 Run이 필요합니다.",
+            )
+        if not app:
+            raise HTTPException(422, "보안통제 우회 분석에는 대상 앱이 연결된 Run이 필요합니다.")
+        if payload.app_id and payload.app_id != app.id:
+            raise HTTPException(422, "선택한 앱과 Run 대상 앱이 일치하지 않습니다.")
+        if normalize_platform(app.platform) != normalize_platform(payload.platform):
+            raise HTTPException(422, "선택한 플랫폼과 Run 대상 앱이 일치하지 않습니다.")
+        if run and run.current_stage != "security_bypass_preparation":
+            raise HTTPException(
+                409,
+                "보안통제 우회 분석은 첫 앱 실행 전 우회 준비 단계에서만 수행합니다.",
+            )
+        if run and run.run_mode == RunMode.LIVE.value:
+            try:
+                if active_control_scope(run.options, run.device_id) is None:
+                    raise ControlScopeError(
+                        "Live 우회 분석에는 활성화된 승인 통제 검증 범위가 필요합니다."
+                    )
+            except ControlScopeError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            _target_for_app(app, live=True)
+        server_context, analyzed_evidence_ids = _security_bypass_ai_context(
+            db,
+            run=run,
+            app=app,
+        )
+        generation_task = (
+            "승인된 루팅·탈옥 단말에서 대상 앱의 탐지 통제만 최소 범위로 우회하는 "
+            "Frida 후보를 작성하세요. 제공된 신호에 없는 Hook은 추측하지 말고, "
+            "대상 프로세스 밖 동작·외부 전송·파일 삭제·자격증명 수집·지속성 코드는 제외하세요."
+            if run
+            else "APK·IPA 정적 보안통제 신호만 사용해 루팅·탈옥 탐지 Hook의 사전 검토 후보를 작성하세요. "
+            "런타임 성공을 주장하지 말고 존재가 확인된 클래스·함수만 사용하세요."
+        )
+
     context = {
         "platform": payload.platform,
+        "purpose": payload.purpose,
         "category": payload.category,
         "target_framework": payload.target_framework,
         "code_excerpt": payload.code_excerpt,
@@ -3251,18 +3746,19 @@ async def generate_frida_script(
         "failed_script": payload.failed_script,
         "failure_message": payload.failure_message,
         "simulate_nvidia_failure": payload.simulate_nvidia_failure,
+        **server_context,
     }
     settings = _settings(request)
     if project.run_mode == RunMode.MOCK.value:
         selected = await MockAIProvider().generate_frida_script(
-            payload.task, context, masked=True
+            generation_task, context, masked=True
         )
         attempts = [selected]
     else:
         selected, attempts = await AIProviderChain(
             settings=settings
         ).generate_frida_script(
-            payload.task,
+            generation_task,
             context,
             masked=settings.mask_external_ai_data,
         )
@@ -3277,9 +3773,14 @@ async def generate_frida_script(
         db.add(
             AIInvocation(
                 project_id=project.id,
+                run_id=run.id if run else None,
                 provider=attempt.provider,
                 model=attempt.model,
-                task="frida_script_generation",
+                task=(
+                    "security_bypass_script_generation"
+                    if payload.purpose == "security_bypass"
+                    else "frida_script_generation"
+                ),
                 status=attempt.status.value,
                 masked=attempt.masked,
                 quality_score=attempt.quality_score,
@@ -3297,10 +3798,32 @@ async def generate_frida_script(
     syntax_message = None
     if selected.status == CapabilityStatus.AVAILABLE and selected.candidate:
         candidate = selected.candidate
+        if payload.purpose == "security_bypass":
+            candidate = candidate.model_copy(
+                update={
+                    "platform": payload.platform,
+                    "category": (
+                        "Root Detection Bypass"
+                        if payload.platform == "android"
+                        else "Jailbreak Detection Bypass"
+                    ),
+                    "risk": "high",
+                    "safety_notes": list(
+                        dict.fromkeys(
+                            [
+                                *candidate.safety_notes,
+                                "AI 분석 결과이며 자동 실행되지 않습니다.",
+                                "현재 Run·대상 앱·전체 코드·SHA-256을 검토한 1회 승인이 필요합니다.",
+                            ]
+                        )
+                    ),
+                }
+            )
         syntax_status, syntax_message = await FridaManager(
             settings
         ).check_syntax(candidate.content)
         script = FridaScript(
+            target_app_id=app.id if payload.purpose == "security_bypass" and app else None,
             name=candidate.name,
             platform=payload.platform,
             category=candidate.category,
@@ -3323,6 +3846,10 @@ async def generate_frida_script(
         if script
         else None,
         "syntax_message": syntax_message,
+        "purpose": payload.purpose,
+        "run_id": run.id if run else None,
+        "app_id": app.id if app else None,
+        "analyzed_evidence_ids": analyzed_evidence_ids,
         "execution_policy": "never_auto_execute; syntax_check_then_user_approval",
     }
 
@@ -3470,9 +3997,12 @@ def coverage(
     run_id: str | None = None,
     scope: str = "template",
     platform: str | None = None,
+    standard: str = "owasp_mastg",
     db: Session = Depends(get_db),
 ):
-    query = select(ControlTest)
+    if standard != "owasp_mastg" and standard not in PROFILE_SOURCES:
+        raise HTTPException(422, "지원하지 않는 진단 기준입니다.")
+    query = select(ControlTest).where(ControlTest.standard == standard)
     if project_id:
         query = query.where(ControlTest.project_id == project_id)
     if app_id:
@@ -3491,15 +4021,335 @@ def coverage(
     for item in rows:
         counts[item.status] = counts.get(item.status, 0) + 1
         result_counts[item.result] = result_counts.get(item.result, 0) + 1
+    source = CATALOG_SOURCE if standard == "owasp_mastg" else PROFILE_SOURCES[standard]
+    total_catalog = (
+        len([item for item in MASTG_CONTROLS if not platform or item.platform == platform])
+        if standard == "owasp_mastg"
+        else len(controls_for_profile(standard))
+    )
     return {
-        "source": CATALOG_SOURCE,
-        "total_catalog": len(
-            [item for item in MASTG_CONTROLS if not platform or item.platform == platform]
-        ),
+        "source": source,
+        "standard": standard,
+        "total_catalog": total_catalog,
         "counts": counts,
         "result_counts": result_counts,
         "tests": [_control_to_dict(item) for item in rows],
     }
+
+
+@router.get("/assessment/profiles")
+def assessment_profiles():
+    return [
+        {
+            **source,
+            "controls": [item.to_dict() for item in controls_for_profile(profile)],
+        }
+        for profile, source in PROFILE_SOURCES.items()
+    ]
+
+
+@router.get("/assessment/execution-matrix")
+def assessment_execution_matrix(profile: str | None = None):
+    if profile is not None and profile not in PROFILE_SOURCES:
+        raise HTTPException(422, "지원하지 않는 국내 진단 기준입니다.")
+    selected = [profile] if profile else list(PROFILE_SOURCES)
+    profiles = {
+        item: {
+            "source": PROFILE_SOURCES[item],
+            **execution_matrix(controls_for_profile(item)),
+        }
+        for item in selected
+    }
+    return {
+        "total": sum(value["total"] for value in profiles.values()),
+        "device_deferred": sum(
+            value["device_deferred"] for value in profiles.values()
+        ),
+        "ready_without_device": sum(
+            value["ready_without_device"] for value in profiles.values()
+        ),
+        "profiles": profiles,
+    }
+
+
+@router.get("/apps/{app_id}/assessment/plan")
+def app_assessment_plan(app_id: str, db: Session = Depends(get_db)):
+    artifact = _app_or_404(db, app_id)
+    project = _project_or_404(db, artifact.project_id)
+    if not stored_plan_is_current(artifact, project.assessment_profile):
+        plan = refresh_app_assessment_plan(
+            db,
+            project=project,
+            artifact=artifact,
+        )
+        db.commit()
+        return plan
+    return artifact.analysis_result["assessment_plan"]
+
+
+@router.post("/apps/{app_id}/assessment/plan/refresh")
+def refresh_assessment_plan(app_id: str, db: Session = Depends(get_db)):
+    artifact = _app_or_404(db, app_id)
+    project = _project_or_404(db, artifact.project_id)
+    plan = refresh_app_assessment_plan(
+        db,
+        project=project,
+        artifact=artifact,
+    )
+    db.commit()
+    return plan
+
+
+def _assessment_control_or_404(
+    db: Session,
+    control_test_id: str,
+) -> ControlTest:
+    control = db.get(ControlTest, control_test_id)
+    if not control or control.standard not in PROFILE_SOURCES:
+        raise HTTPException(404, "국내 기준 점검 항목을 찾을 수 없습니다.")
+    if not control.run_id:
+        raise HTTPException(409, "앱 기준선이 아니라 진단 Run 항목에 결과를 기록하세요.")
+    return control
+
+
+def _assert_assessment_recording_state(run: DiagnosticRun) -> None:
+    allowed = {
+        RunStatus.SAFELY_PAUSED.value,
+        RunStatus.COMPLETED.value,
+        RunStatus.COMPLETED_WITH_GAPS.value,
+        RunStatus.MANUAL_REQUIRED.value,
+    }
+    if run.status not in allowed:
+        raise HTTPException(
+            409,
+            "안전 일시정지 또는 종료된 Run에서만 국내 기준 증적·판정을 기록할 수 있습니다.",
+        )
+
+
+@router.post("/assessment-controls/{control_test_id}/evidence")
+async def upload_assessment_evidence(
+    request: Request,
+    control_test_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    control = _assessment_control_or_404(db, control_test_id)
+    run = _run_or_404(db, control.run_id or "")
+    _assert_assessment_recording_state(run)
+    name = Path(file.filename or "evidence.bin").name
+    suffix = Path(name).suffix.casefold()
+    allowed = {".png", ".jpg", ".jpeg", ".txt", ".log", ".json", ".xml", ".har"}
+    if suffix not in allowed:
+        raise HTTPException(415, "PNG/JPEG/TXT/LOG/JSON/XML/HAR 증적만 첨부할 수 있습니다.")
+    destination = (
+        EvidenceService(_settings(request)).run_dir(run.id)
+        / "assessment"
+        / f"{uuid.uuid4()}{suffix}"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    limit = min(_settings(request).max_upload_mb, 16) * 1024 * 1024
+    total = 0
+    try:
+        with destination.open("wb") as stream:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    raise HTTPException(413, "수동 점검 증적은 최대 16MB까지 첨부할 수 있습니다.")
+                stream.write(chunk)
+        evidence = EvidenceService(_settings(request)).add(
+            db,
+            run_id=run.id,
+            evidence_type="manual_assessment_attachment",
+            title=f"{control.mastg_id} 수동 점검 증적",
+            description="국내 기준 점검자가 첨부한 로컬 원본입니다.",
+            file_path=destination,
+            inline_data={
+                "control_test_id": control.id,
+                "control_id": control.mastg_id,
+                "original_name": name,
+                "size_bytes": total,
+            },
+        )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+    control.evidence_ids = list(dict.fromkeys([*control.evidence_ids, evidence.id]))
+    db.commit()
+    return {
+        "evidence_id": evidence.id,
+        "sha256": evidence.sha256,
+        "control": _control_to_dict(control),
+    }
+
+
+class AssessmentRecordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal[
+        "confirmed", "not_vulnerable", "needs_review", "not_applicable"
+    ]
+    reviewer: str = Field(min_length=1, max_length=100)
+    summary: str = Field(min_length=1, max_length=4000)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=100)
+    criteria_confirmed: bool = False
+
+
+@router.post("/assessment-controls/{control_test_id}/record")
+def record_assessment_result(
+    request: Request,
+    control_test_id: str,
+    payload: AssessmentRecordRequest,
+    db: Session = Depends(get_db),
+):
+    control = _assessment_control_or_404(db, control_test_id)
+    run = _run_or_404(db, control.run_id or "")
+    _assert_assessment_recording_state(run)
+    app = _app_or_404(db, control.app_id)
+    requested_ids = (
+        list(dict.fromkeys([*control.evidence_ids, *payload.evidence_ids]))
+        if payload.outcome == "confirmed"
+        else []
+    )
+    evidence = db.scalars(
+        select(Evidence).where(
+            Evidence.run_id == run.id,
+            Evidence.id.in_(requested_ids or ["-"]),
+        )
+    ).all()
+    if len(evidence) != len(requested_ids):
+        raise HTTPException(422, "다른 Run 또는 존재하지 않는 증적은 연결할 수 없습니다.")
+    foreign_attachments = [
+        item
+        for item in evidence
+        if item.evidence_type == "manual_assessment_attachment"
+        and (
+            not isinstance(item.inline_data, dict)
+            or item.inline_data.get("control_test_id") != control.id
+        )
+    ]
+    if foreign_attachments:
+        raise HTTPException(422, "다른 국내 기준 항목에 첨부한 수동 증적은 재사용할 수 없습니다.")
+    if payload.outcome == "confirmed":
+        if not payload.criteria_confirmed:
+            raise HTTPException(422, "문서의 진단 기준 수행 확인이 필요합니다.")
+        if not evidence:
+            raise HTTPException(422, "취약 확정 판정에는 재현 원본 증적이 필요합니다.")
+        available = {item.evidence_type for item in evidence}
+        missing = [
+            group
+            for group in control.evidence_requirements
+            if not available.intersection(group)
+        ]
+        if missing:
+            raise HTTPException(
+                422,
+                "필수 증적 유형이 부족합니다: "
+                + "; ".join(" 또는 ".join(group) for group in missing),
+            )
+    control.status = "completed"
+    control.result = payload.outcome
+    control.summary = payload.summary
+    if payload.outcome == "confirmed":
+        attestation = EvidenceService(_settings(request)).add(
+            db,
+            run_id=run.id,
+            evidence_type="assessment_attestation",
+            title=f"{control.mastg_id} 취약 판정 확인",
+            description=payload.summary,
+            inline_data={
+                "control_test_id": control.id,
+                "control_id": control.mastg_id,
+                "standard": control.standard,
+                "outcome": payload.outcome,
+                "reviewer": payload.reviewer,
+                "criteria_confirmed": payload.criteria_confirmed,
+                "linked_evidence_ids": requested_ids,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        control.evidence_ids = [*requested_ids, attestation.id]
+        finding = upsert_standard_finding(
+            db,
+            run=run,
+            app=app,
+            control=control,
+            evidence_ids=control.evidence_ids,
+            rationale=payload.summary,
+        )
+        control.finding_ids = [finding.id]
+    else:
+        control.evidence_ids = []
+        if control.finding_ids:
+            prior_findings = db.scalars(
+                select(Finding).where(Finding.id.in_(control.finding_ids))
+            ).all()
+            for finding in prior_findings:
+                finding.verdict = (
+                    "false_positive"
+                    if payload.outcome == "not_vulnerable"
+                    else "needs_review"
+                )
+        control.finding_ids = []
+    db.flush()
+    summary = evaluate_standard_controls(db, run, app)
+    options = dict(run.options)
+    options["assessment_summary"] = {
+        key: value for key, value in summary.items() if key != "controls"
+    }
+    if summary["confirmed"]:
+        vulnerability_evidence = EvidenceService(_settings(request)).add_json(
+            db,
+            run_id=run.id,
+            filename=f"confirmed-vulnerabilities-{uuid.uuid4()}.json",
+            title=f"국내 기준 취약점 확정 원장 갱신 · {control.mastg_id}",
+            evidence_type="vulnerability_assessment",
+            data={
+                "profile": summary["profile"],
+                "confirmed": summary["confirmed"],
+                "controls": [
+                    item for item in summary["controls"] if item["result"] == "confirmed"
+                ],
+            },
+            description="취약 판정이 확정된 항목과 연결 원본 증적만 기록했습니다.",
+        )
+        options["assessment_summary"][
+            "vulnerability_evidence_id"
+        ] = vulnerability_evidence.id
+    reviews = list(options.get("assessment_reviews") or [])
+    reviews.append(
+        {
+            "control_test_id": control.id,
+            "control_id": control.mastg_id,
+            "outcome": payload.outcome,
+            "reviewer": payload.reviewer,
+            "summary": payload.summary,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    options["assessment_reviews"] = reviews[-500:]
+    quality_gaps = [
+        item
+        for item in options.get("quality_gaps", [])
+        if item.get("stage") != "domestic_assessment"
+    ]
+    if run.run_mode == RunMode.LIVE.value and summary["unresolved"]:
+        quality_gaps.append(
+            {
+                "stage": "domestic_assessment",
+                "message": f"{summary['unresolved']}개 국내 기준 항목의 점검이 완료되지 않았습니다.",
+            }
+        )
+    options["quality_gaps"] = quality_gaps
+    options["failed_required_stages"] = [item["stage"] for item in quality_gaps]
+    run.options = options
+    if run.status == RunStatus.COMPLETED_WITH_GAPS.value and not quality_gaps:
+        run.status = RunStatus.COMPLETED.value
+        run.current_stage = RunStatus.COMPLETED.value
+    db.commit()
+    db.refresh(control)
+    return _control_to_dict(control)
 
 
 class AITestRequest(BaseModel):

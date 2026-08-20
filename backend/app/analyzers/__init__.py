@@ -4,7 +4,7 @@ from .adapters import (
     MobSFAnalyzerAdapter,
     SemgrepAnalyzerAdapter,
 )
-from .persistence import replace_analysis_records
+from .persistence import ensure_assessment_baseline, replace_analysis_records
 from .static import StaticAnalysisResult, StaticAnalyzer
 
 __all__ = [
@@ -15,4 +15,5 @@ __all__ = [
     "StaticAnalysisResult",
     "StaticAnalyzer",
     "replace_analysis_records",
+    "ensure_assessment_baseline",
 ]

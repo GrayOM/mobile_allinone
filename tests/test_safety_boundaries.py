@@ -7,6 +7,7 @@ import time
 import zipfile
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -30,6 +31,8 @@ from backend.app.database.migrations import (
     MIGRATION_ID,
     MIGRATION_ID_V3,
     MIGRATION_ID_V4,
+    MIGRATION_ID_V5,
+    MIGRATION_ID_V6,
     apply_migrations,
 )
 from backend.app.devices import IOSDeviceAdapter
@@ -279,11 +282,16 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
 
     columns = {item["name"] for item in inspect(engine).get_columns("projects")}
     assert "run_mode" in columns
+    assert "assessment_profile" in columns
     artifact_columns = {
         item["name"] for item in inspect(engine).get_columns("app_artifacts")
     }
     assert "active_analysis_run_id" in artifact_columns
     assert inspect(engine).has_table("analysis_runs")
+    frida_columns = {
+        item["name"] for item in inspect(engine).get_columns("frida_scripts")
+    }
+    assert "target_app_id" in frida_columns
     assert {
         "external_analyzer_destination",
         "external_analyzer_addresses",
@@ -313,11 +321,21 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
             text("SELECT id FROM schema_migrations WHERE id = :id"),
             {"id": MIGRATION_ID_V4},
         )
+        assessment_migration = connection.scalar(
+            text("SELECT id FROM schema_migrations WHERE id = :id"),
+            {"id": MIGRATION_ID_V5},
+        )
+        frida_binding_migration = connection.scalar(
+            text("SELECT id FROM schema_migrations WHERE id = :id"),
+            {"id": MIGRATION_ID_V6},
+        )
     assert migration.id == MIGRATION_ID
     assert migration.backup_path and Path(migration.backup_path).is_file()
     assert approval_status == "pending_approval"
     assert destination_migration == MIGRATION_ID_V3
     assert analysis_migration == MIGRATION_ID_V4
+    assert assessment_migration == MIGRATION_ID_V5
+    assert frida_binding_migration == MIGRATION_ID_V6
 
 
 def _wait_until_paused(client, run_id: str):
@@ -487,6 +505,59 @@ def test_lan_api_requires_bearer_and_separate_admin_token(tmp_path: Path):
         assert secured.post("/api/value", headers=bearer).status_code == 403
         bearer["X-MSW-Admin-Token"] = str(settings.admin_token)
         assert secured.post("/api/value", headers=bearer).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_docker_bridge_accepts_only_loopback_host_without_forwarding(
+    tmp_path: Path,
+):
+    settings = AppSettings(data_dir=tmp_path, docker_loopback_bridge=True)
+    app = FastAPI()
+    app.add_middleware(ApiSecurityMiddleware, settings=settings)
+
+    @app.get("/api/value")
+    def read_value():
+        return {"ok": True}
+
+    transport = httpx.ASGITransport(
+        app=app,
+        client=("172.18.0.1", 50000),
+    )
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://172.18.0.2",
+    ) as bridge:
+        loopback_host = {"Host": "127.0.0.1:8765"}
+        assert (await bridge.get("/api/value", headers=loopback_host)).status_code == 200
+        assert (await bridge.get(
+            "/api/value",
+            headers={**loopback_host, "X-Forwarded-For": "127.0.0.1"},
+        )).status_code == 403
+        assert (await bridge.get(
+            "/api/value", headers={"Host": "192.168.1.10:8765"}
+        )).status_code == 403
+
+    disabled = FastAPI()
+    disabled.add_middleware(
+        ApiSecurityMiddleware,
+        settings=AppSettings(data_dir=tmp_path / "disabled"),
+    )
+
+    @disabled.get("/api/value")
+    def read_disabled_value():
+        return {"ok": True}
+
+    disabled_transport = httpx.ASGITransport(
+        app=disabled,
+        client=("172.18.0.1", 50000),
+    )
+    async with httpx.AsyncClient(
+        transport=disabled_transport,
+        base_url="http://172.18.0.2",
+    ) as bridge:
+        assert (await bridge.get(
+            "/api/value", headers={"Host": "127.0.0.1:8765"}
+        )).status_code == 403
 
 
 @pytest.mark.asyncio

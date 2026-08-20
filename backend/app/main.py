@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
+from backend.app.analyzers import ensure_assessment_baseline
 from backend.app.analyzers.locks import AnalysisLeaseManager
 from backend.app.api.router import router
 from backend.app.core.config import AppSettings, get_settings
@@ -21,7 +22,7 @@ from backend.app.core.network import (
 from backend.app.core.security import ApiSecurityMiddleware, WebSocketTicketStore
 from backend.app.core.status import RunStatus
 from backend.app.database.base import utcnow
-from backend.app.database.models import DiagnosticRun, Project
+from backend.app.database.models import AppArtifact, DiagnosticRun, Project
 from backend.app.database.session import SessionLocal, init_database
 from backend.app.frida.library import seed_builtin_scripts, validate_builtin_scripts
 from backend.app.orchestration import DiagnosticOrchestrator
@@ -99,6 +100,12 @@ async def lifespan(app: FastAPI):
             run.current_stage = "interrupted"
             run.error = "서버 재시작으로 이전 진단을 중단 상태로 복구했습니다."
             run.finished_at = utcnow()
+        for artifact in db.scalars(select(AppArtifact)).all():
+            ensure_assessment_baseline(
+                db,
+                project=artifact.project,
+                artifact=artifact,
+            )
         db.commit()
         seed_builtin_scripts(db)
         await validate_builtin_scripts(db, settings)

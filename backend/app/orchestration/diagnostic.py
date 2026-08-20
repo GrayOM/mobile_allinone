@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from backend.app.ai import AIProviderChain, MockAIProvider
 from backend.app.ai.storage import save_ai_raw_response
 from backend.app.ai.masking import mask_context
+from backend.app.assessment import evaluate_standard_controls
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.events import EventBus, event_bus
 from backend.app.core.status import CapabilityStatus, Platform, RunMode, RunStatus
@@ -913,6 +914,12 @@ class DiagnosticOrchestrator:
                     source_url=item.source_url,
                     evidence_ids=[],
                     synthetic=run.synthetic,
+                    standard=item.standard,
+                    criteria=item.criteria,
+                    evidence_requirements=item.evidence_requirements,
+                    finding_categories=item.finding_categories,
+                    finding_ids=[],
+                    risk=item.risk,
                 )
             )
         db.commit()
@@ -1407,9 +1414,52 @@ class DiagnosticOrchestrator:
                     if install.status != CapabilityStatus.AVAILABLE:
                         raise RuntimeError(install.message)
 
-                await self._stage(db, run, "launch_baseline", 32, "원본 상태에서 앱을 실행합니다.")
+                if bool(run.options.get("pause_for_security_bypass")):
+                    run.current_stage = "security_bypass_preparation"
+                    db.commit()
+                    await self.events.publish(
+                        run.id,
+                        "stage",
+                        {
+                            "stage": "security_bypass_preparation",
+                            "progress": run.progress,
+                            "message": (
+                                "첫 앱 실행 전에 승인된 루팅·탈옥 탐지 우회 "
+                                "Frida 스크립트를 검토하고 실행하세요."
+                            ),
+                            "status": RunStatus.PAUSE_REQUESTED.value,
+                        },
+                    )
+                    await self.pause(
+                        run.id,
+                        "Frida 라이브러리에서 대상 코드와 SHA-256을 검토해 1회 승인 실행한 뒤 재개하세요.",
+                    )
+                    await self._checkpoint(run.id)
+                    db.refresh(run)
+
+                bypass_session_active = self.frida_sessions.is_active(run.id)
+                await self._stage(
+                    db,
+                    run,
+                    "launch_baseline",
+                    32,
+                    (
+                        "승인된 Frida 우회가 적용된 상태로 앱 실행을 확인합니다."
+                        if bypass_session_active
+                        else "원본 상태에서 앱을 실행합니다."
+                    ),
+                )
                 launch = await device.start_app(run.device_id, package_name)
-                await self._record_operation(db, run.id, "원본 상태 앱 실행", launch)
+                await self._record_operation(
+                    db,
+                    run.id,
+                    (
+                        "승인된 Frida 우회 상태 앱 실행"
+                        if bypass_session_active
+                        else "원본 상태 앱 실행"
+                    ),
+                    launch,
+                )
                 if launch.status == CapabilityStatus.MANUAL_REQUIRED:
                     record_check("app_launch", False, launch.message)
                     raise DiagnosticManualRequired(launch.message)
@@ -1439,8 +1489,16 @@ class DiagnosticOrchestrator:
                     run,
                     device,
                     "01-app-launched.png",
-                    "앱 실행 직후",
-                    "보안통제 적용 전 원본 실행 상태입니다.",
+                    (
+                        "승인된 Frida 우회 적용 후 앱 실행"
+                        if bypass_session_active
+                        else "앱 실행 직후"
+                    ),
+                    (
+                        "승인된 루팅·탈옥 탐지 우회가 적용된 앱 실행 상태입니다."
+                        if bypass_session_active
+                        else "보안통제 적용 전 원본 실행 상태입니다."
+                    ),
                 )
                 record_check(
                     "screenshot",
@@ -1827,12 +1885,31 @@ class DiagnosticOrchestrator:
                             f"Frida {frida_mode} lifecycle 검증 실패: {execution.message}"
                         )
                 else:
-                    record_check(
-                        "frida_session",
-                        True,
-                        "선택된 Frida 스크립트가 없어 실행하지 않았습니다.",
-                        required=False,
-                    )
+                    if self.frida_sessions.is_active(run.id):
+                        frida_session_started = True
+                        health = self.frida_sessions.health(run.id)
+                        record_check(
+                            "frida_session",
+                            self.frida_sessions.is_healthy(run.id),
+                            "승인된 직접 Frida 스크립트가 Run 수명 세션에서 실행 중입니다.",
+                            required=False,
+                        )
+                        await self.events.publish(run.id, "frida_health", health)
+                        after_frida_screen = await self._capture(
+                            db,
+                            run,
+                            device,
+                            "03-after-approved-bypass.png",
+                            "승인된 보안통제 우회 적용 후",
+                            "검토·승인된 직접 Frida 스크립트를 적용한 대상 앱 실행 상태입니다.",
+                        )
+                    else:
+                        record_check(
+                            "frida_session",
+                            True,
+                            "선택된 Frida 스크립트가 없어 실행하지 않았습니다.",
+                            required=False,
+                        )
 
                 runtime_tool = str(run.options.get("runtime_tool") or "none")
                 if runtime_tool in {"objection", "drozer"}:
@@ -2400,6 +2477,11 @@ class DiagnosticOrchestrator:
                         "control_scope_enforcement",
                         "approved_ui_action_scope",
                         "approved_network_replay_scope",
+                        "assessment_attestation",
+                        "manual_assessment_attachment",
+                        "assessment_ledger",
+                        "assessment_ledger_amendment",
+                        "vulnerability_assessment",
                     }
                 ]
                 evidence_ids = [item.id for item in ai_evidence_rows]
@@ -2411,6 +2493,25 @@ class DiagnosticOrchestrator:
                         "sequence": item.sequence,
                     }
                     for item in ai_evidence_rows
+                ]
+                assessment_controls = [
+                    {
+                        "control_id": item.mastg_id,
+                        "title": item.title,
+                        "criteria": item.criteria,
+                        "finding_categories": item.finding_categories,
+                        "evidence_requirements": item.evidence_requirements,
+                        "risk": item.risk,
+                    }
+                    for item in db.scalars(
+                        select(ControlTest)
+                        .where(
+                            ControlTest.run_id == run.id,
+                            ControlTest.standard
+                            == str(run.options.get("assessment_profile")),
+                        )
+                        .order_by(ControlTest.mastg_id)
+                    ).all()
                 ]
                 db.commit()
                 proxy_summaries = [
@@ -2431,6 +2532,8 @@ class DiagnosticOrchestrator:
                     "proxy_flows": proxy_summaries,
                     "evidence_ids": evidence_ids,
                     "evidence_catalog": evidence_catalog,
+                    "assessment_profile": run.options.get("assessment_profile"),
+                    "assessment_controls": assessment_controls,
                     "simulate_nvidia_failure": bool(
                         run.options.get("simulate_nvidia_failure")
                     ),
@@ -2488,7 +2591,12 @@ class DiagnosticOrchestrator:
 
                 created_findings: list[Finding] = []
                 finding_policy_decisions: list[dict[str, Any]] = []
+                ai_assessment_recommendations: list[dict[str, Any]] = []
                 if ai_result and ai_result.analysis:
+                    valid_control_ids = {
+                        str(item["control_id"])
+                        for item in assessment_controls
+                    }
                     valid_evidence = {
                         item.id: item
                         for item in db.scalars(
@@ -2565,6 +2673,23 @@ class DiagnosticOrchestrator:
                             )
                         )
                         created_findings.append(finding)
+                        mapped_control_ids = [
+                            item
+                            for item in dict.fromkeys(analysis.control_ids)
+                            if item in valid_control_ids
+                        ]
+                        if mapped_control_ids:
+                            ai_assessment_recommendations.append(
+                                {
+                                    "finding_id": finding.id,
+                                    "control_ids": mapped_control_ids,
+                                    "provider": ai_result.provider,
+                                    "model": ai_result.model,
+                                    "confidence": analysis.confidence,
+                                    "effective_verdict": verdict,
+                                    "evidence_ids": linked_ids,
+                                }
+                            )
                         finding_policy_decisions.append(
                             {
                                 "finding_id": finding.id,
@@ -2573,6 +2698,7 @@ class DiagnosticOrchestrator:
                                 "effective_verdict": verdict,
                                 "proposed_evidence_ids": proposed_ids,
                                 "selected_evidence_ids": linked_ids,
+                                "control_ids": mapped_control_ids,
                                 "missing_requirements": (
                                     policy_decision.missing_requirements
                                 ),
@@ -2605,6 +2731,61 @@ class DiagnosticOrchestrator:
                         description="모든 Run 증적이 아니라 Finding 유형별 관련 증적만 선택했습니다.",
                     )
                     await self._emit_evidence(run.id, policy_evidence)
+
+                if attempts:
+                    options = dict(run.options)
+                    options["ai_assessment_recommendations"] = (
+                        ai_assessment_recommendations
+                    )
+                    run.options = options
+                    db.commit()
+
+                if app:
+                    assessment_summary = evaluate_standard_controls(db, run, app)
+                    options = dict(run.options)
+                    options["assessment_summary"] = {
+                        key: value
+                        for key, value in assessment_summary.items()
+                        if key != "controls"
+                    }
+                    if assessment_summary["confirmed"]:
+                        vulnerability_evidence = self.evidence.add_json(
+                            db,
+                            run_id=run.id,
+                            filename="confirmed-vulnerabilities.json",
+                            title="국내 기준 취약점 확정 증적 원장",
+                            evidence_type="vulnerability_assessment",
+                            data={
+                                "profile": assessment_summary["profile"],
+                                "confirmed": assessment_summary["confirmed"],
+                                "controls": [
+                                    item
+                                    for item in assessment_summary["controls"]
+                                    if item["result"] == "confirmed"
+                                ],
+                            },
+                            description="취약 판정이 확정된 항목과 연결 원본 증적만 기록했습니다.",
+                        )
+                        await self._emit_evidence(run.id, vulnerability_evidence)
+                        options["assessment_summary"][
+                            "vulnerability_evidence_id"
+                        ] = vulnerability_evidence.id
+                    run.options = options
+                    if (
+                        run.run_mode == RunMode.LIVE.value
+                        and assessment_summary["unresolved"]
+                    ):
+                        quality_gaps.append(
+                            {
+                                "stage": "domestic_assessment",
+                                "message": (
+                                    f"{assessment_summary['profile']} 기준 "
+                                    f"{assessment_summary['unresolved']}개 항목의 "
+                                    "점검이 완료되지 않았습니다."
+                                ),
+                            }
+                        )
+                    db.commit()
 
                 await self._stage(
                     db, run, "finalize", 96, "증적 인덱스를 검증하고 캡처를 종료합니다."

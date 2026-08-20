@@ -5,7 +5,10 @@ services:
       - "127.0.0.1:8765:8765"
     volumes:
       - ./data:/data
-    env_file:
-      - path: .env
-        required: false
+    environment:
+      MSW_DATA_DIR: /data
+      MSW_PORT: "8765"
+      MSW_AUTO_OPEN_BROWSER: "false"
+      # Safe only together with the loopback-only host port mapping above.
+      MSW_DOCKER_LOOPBACK_BRIDGE: "true"
 

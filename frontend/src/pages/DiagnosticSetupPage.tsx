@@ -182,6 +182,8 @@ export default function DiagnosticSetupPage() {
           dynamic_storage: data.get("dynamic_storage") === "on",
           pause_for_approval_candidates:
             data.get("pause_for_approval_candidates") === "on",
+          pause_for_security_bypass:
+            data.get("pause_for_security_bypass") === "on",
           ...(controlValidationEnabled ? {
             control_validation: {
               enabled: true,
@@ -247,7 +249,7 @@ export default function DiagnosticSetupPage() {
           </div>
           <div className="diagnostic-guide__checks">
             <div className={project ? "guide-check guide-check--done" : "guide-check"}>
-              <span>1</span><div><strong>프로젝트</strong><small>{project ? `${project.run_mode === "mock" ? "Mock 연습" : "Live 진단"} 모드 선택됨` : "프로젝트를 선택하세요"}</small></div>
+              <span>1</span><div><strong>프로젝트·기준</strong><small>{project ? `${project.run_mode === "mock" ? "Mock 연습" : "Live 진단"} · ${project.assessment_profile === "electronic_financial" ? "전자금융기반시설 56항목" : "주요정보통신기반시설 27항목"}` : "프로젝트를 선택하세요"}</small></div>
             </div>
             <div className={selectedApp ? "guide-check guide-check--done" : "guide-check"}>
               <span>2</span><div><strong>대상 앱</strong><small>{selectedApp ? (selectedApp.app_name || selectedApp.original_name) : "APK 또는 IPA를 선택하세요"}</small></div>
@@ -444,6 +446,11 @@ export default function DiagnosticSetupPage() {
                 <div><strong>승인 후보에서 자동 일시정지</strong><small>중위험 UI 동작 또는 Live GET/HEAD 후보가 만들어지면 현재 화면·Flow를 고정해 1회 승인 검토를 기다립니다.</small></div>
               </label>
               <label className="toggle-line">
+                <input type="checkbox" name="pause_for_security_bypass" />
+                <span />
+                <div><strong>루팅·탈옥 탐지 우회 준비</strong><small>앱 설치 후 첫 실행 전에 멈춥니다. Frida 라이브러리에서 고위험 우회 코드를 검토·승인·Spawn한 뒤 재개합니다.</small></div>
+              </label>
+              <label className="toggle-line">
                 <input type="checkbox" name="simulate_nvidia_failure" />
                 <span />
                 <div><strong>NVIDIA 실패 모의</strong><small>외부 AI 프로젝트에서 Claude fallback을 검증합니다.</small></div>
@@ -471,7 +478,7 @@ export default function DiagnosticSetupPage() {
                 <span />
                 <div>
                   <strong>승인된 통제 검증 모드</strong>
-                  <small>{project?.run_mode !== "live" ? "Live 진단에서만 사용할 수 있습니다." : !selectedDevice ? "승인 범위를 고정할 실제 단말을 먼저 선택하세요." : controlValidationEnabled ? "승인 범위가 기록되며 관찰·증적 수집만 수행합니다." : "사용자 동의와 승인 범위를 기록한 뒤에만 활성화합니다."}</small>
+                  <small>{project?.run_mode !== "live" ? "Live 진단에서만 사용할 수 있습니다." : !selectedDevice ? "승인 범위를 고정할 실제 단말을 먼저 선택하세요." : controlValidationEnabled ? "승인 범위가 기록되며 고위험 우회는 별도 코드 검토와 1회 승인이 필요합니다." : "사용자 동의와 승인 범위를 기록한 뒤에만 활성화합니다."}</small>
                 </div>
               </label>
             </div>

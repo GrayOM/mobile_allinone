@@ -14,6 +14,7 @@ from backend.app.database.models import (
     RawFinding,
     ToolRun,
 )
+from backend.app.catalog import evaluate_profile_baseline
 
 from .correlation import correlate_findings
 from .static import StaticAnalysisResult
@@ -30,6 +31,56 @@ def _parse_time(value: str | None) -> datetime | None:
 
 def _severity_rank(value: str) -> int:
     return {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}.get(value, 0)
+
+
+def ensure_assessment_baseline(
+    db: Session,
+    *,
+    project: Project,
+    artifact: AppArtifact,
+) -> bool:
+    exists = db.scalar(
+        select(ControlTest.id)
+        .where(
+            ControlTest.app_id == artifact.id,
+            ControlTest.run_id.is_(None),
+            ControlTest.standard == project.assessment_profile,
+        )
+        .limit(1)
+    )
+    if exists:
+        return False
+    for item in evaluate_profile_baseline(
+        project.assessment_profile,
+        artifact.platform,
+    ):
+        db.add(
+            ControlTest(
+                project_id=project.id,
+                app_id=artifact.id,
+                run_id=None,
+                mastg_id=item["control_id"],
+                masvs_id=item["group"],
+                platform=artifact.platform,
+                title=item["title"],
+                automation=item["automation"],
+                status=item["status"],
+                result=item["result"],
+                summary=item["summary"],
+                replacement_ids=[],
+                source_url="",
+                evidence_ids=[],
+                synthetic=artifact.synthetic,
+                standard=project.assessment_profile,
+                criteria=item["criteria"],
+                evidence_requirements=item["evidence_requirements"],
+                finding_categories=item["finding_categories"],
+                finding_ids=[],
+                risk=item["risk"],
+            )
+        )
+    db.flush()
+    return True
 
 
 def replace_analysis_records(
@@ -197,7 +248,9 @@ def replace_analysis_records(
                 source_url=item.get("source_url", ""),
                 evidence_ids=[],
                 synthetic=artifact.synthetic,
+                standard="owasp_mastg",
             )
         )
+    ensure_assessment_baseline(db, project=project, artifact=artifact)
     db.flush()
     return findings

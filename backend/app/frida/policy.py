@@ -8,7 +8,9 @@ from backend.app.database.models import AppArtifact, FridaScript
 
 _CATEGORY_SIGNALS = {
     "root detection": "root_jailbreak_detection",
+    "root detection bypass": "root_jailbreak_detection",
     "jailbreak detection": "root_jailbreak_detection",
+    "jailbreak detection bypass": "root_jailbreak_detection",
     "ssl pinning": "certificate_pinning",
     "anti-debug": "debugger_detection",
 }

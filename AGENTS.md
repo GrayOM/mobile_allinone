@@ -1,6 +1,6 @@
 # Mobile Security Workbench — 세션 인수인계
 
-> 최종 갱신: 2026-08-13
+> 최종 갱신: 2026-08-20
 > 작업 위치: `/mnt/c/Users/PSM/Desktop/project/mobile_allinone`
 > 새 세션에서는 이 파일을 먼저 읽고, 완료된 기능을 처음부터 다시 만들지 않는다.
 
@@ -11,9 +11,9 @@
 - 최신 기능 기준점: `c1033a3` (`219244c` 승인형 Candidate 실행 + 후속 검증 문서)
 - Draft PR: [#1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1), base `main`, head `test/approved-control-validation`
 - `c1033a3` 기준 GitHub Actions의 backend, frontend, portable-startup 중복 실행이 모두 통과했다. Backend는 98 tests, frontend audit은 high 취약점 0건이다.
-- 이 인수인계 갱신 외 추가 코드 변경은 없으며, 실제 Android/iOS Live 단말 검증 결과도 아직 추가되지 않았다.
+- 현재 작업트리에는 주요정보통신기반시설 27개·전자금융기반시설 56개 진단 프로필, 83개 항목 실행 경계 매트릭스, 앱 SHA-256 고정 점검 계획·배차판, 취약 확정 전용 증적·DOCX 보고서, 승인형 Android 루팅·iOS 탈옥 탐지 우회, 앱 정적 AI 사전 진단과 대상 앱 고정 우회 후보, 수동 증적·판정 API/UI와 Docker loopback bridge 수정이 미커밋 상태로 있다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
 
-마지막 기능 변경은 승인 가능한 Candidate를 현재 화면·Flow에 고정한 뒤 5분 만료 1회 토큰으로 실행하는 흐름이다. UI는 현재 package·fingerprint·element ID를 재검증한 medium tap만 실행하고, Live API는 승인 host의 본문 없는 GET/HEAD만 DNS·peer IP 고정 상태에서 1회 실행한다. high·blocked UI와 상태 변경 API, 보안통제 무력화 코드는 승인 후에도 자동 실행하지 않는다.
+현재 기능 변경은 프로젝트 생성 시 국내 진단 기준 하나를 고정하고, 해당 항목만 앱·Run 원장에 생성한 뒤 같은 Run의 재현 결과와 필수 원본 증적이 충족될 때만 취약점을 확정하는 흐름이다. 양호·해당없음은 상태만 기록하고 증적을 만들지 않는다. 기존 승인형 Candidate 안전 경계는 유지되며 high·blocked UI와 상태 변경 API는 실행하지 않는다. 루팅·탈옥 탐지 우회는 자동 실행하지 않고 첫 실행 전 안전 일시정지에서 코드 SHA-256과 대상 범위를 고정한 5분 만료 1회 승인으로만 직접 실행한다.
 
 ## 1. 프로젝트 목적과 절대 원칙
 
@@ -31,6 +31,7 @@
 - MobSF 앱 원본 전송은 프로젝트의 `external_analyzer_allowed`와 목적지 허용목록을 모두 따른다.
 - 프로젝트 실행 모드는 `mock | live`로 분리하며 Live에서 Mock Adapter로 fallback하지 않는다.
 - Mock에서 생성한 앱·실행·증적·패킷·발견항목·AI 결과에는 `synthetic=true`를 영구 보존한다.
+- 국내 기준의 정적 신호는 `needs_review`까지만 허용하며 같은 Run의 필수 증적 또는 증적을 고정한 승인 수동 판정 없이는 `confirmed`로 만들지 않는다.
 - 기존 사용자 파일과 관련 없는 변경은 건드리지 않는다.
 
 ## 2. 현재 기술 구조
@@ -50,7 +51,7 @@
 backend/app/
 ├─ api/              REST·WebSocket API
 ├─ analyzers/        자체 분석 + OSS Analyzer Adapter + 상관분석
-├─ catalog/          OWASP MASTG 통제 카탈로그
+├─ catalog/          국내 2종 진단 기준 + OWASP MASTG 통제 카탈로그
 ├─ devices/          Android/iOS/Mock DeviceAdapter
 ├─ frida/            스크립트 라이브러리·구문검사·실행
 ├─ proxy/            mitmproxy/Burp/Fiddler/Mock ProxyAdapter
@@ -66,7 +67,7 @@ frontend/src/
 └─ router.tsx
 
 rules/semgrep/       프로젝트 자체 Android 보안 규칙
-scripts/frida/       내장 관찰용 Frida 스크립트
+scripts/frida/       저위험 관찰 + 승인형 고위험 우회 Frida 스크립트
 tests/               단위·API·Mock E2E 테스트
 ```
 
@@ -83,6 +84,7 @@ tests/               단위·API·Mock E2E 테스트
 - 취약점 목록·상세·증적 타임라인
 - 취약점별 HTML 증적 설명서
 - Windows 로컬 웹 실행
+- 주요정보통신기반시설 27개·전자금융기반시설 56개 분리 프로필과 증적 기반 판정 원장
 
 ### 운영 안전 경계
 
@@ -98,6 +100,7 @@ tests/               단위·API·Mock E2E 테스트
 - 일시정지는 `pause_requested`에서 현재 작업 종료와 checkpoint를 거친 `safely_paused`로 전환하며, 직접 단말·Runtime·Frida 작업은 이 안전 상태와 Run Lease가 모두 일치할 때만 실행한다.
 - 고위험 직접 작업은 DB에 해시로 저장한 5분 만료 1회 승인 토큰과 증적을 사용한다. 수동 작업 Task가 살아 있는 동안 자동 Run 재개와 일반 중지를 409로 차단하고, 서버 종료는 해당 Task와 Frida 세션을 먼저 정리한 뒤 단말 Lease를 해제한다.
 - 서버는 기본 loopback 전용이다. 특정 LAN IP 실행은 프로세스별 API·관리자 토큰과 Trusted Host를 강제하며 API 문서는 기본 비활성화한다.
+- Docker Compose는 `.env` 전체를 전달하지 않고 `127.0.0.1` 포트 공개와 loopback Host 검증을 함께 만족할 때만 Docker bridge의 API 접근을 허용한다.
 - WebSocket은 접근 토큰 대신 Bearer 인증으로 발급한 30초 만료·Run/IP 범위·1회용 Ticket을 사용한다. LAN 토큰은 URL이나 브라우저 저장소에 넣지 않는다.
 - 증적 이미지·원본 다운로드·HTML 보고서는 인증된 Fetch로 Blob을 받은 뒤 짧은 수명의 브라우저 Object URL로 표시한다. LAN 모드에서도 인증 없는 일반 `/api` URL을 DOM에 넣지 않는다.
 - Run 종료 상태는 `completed`, `completed_with_gaps`, `manual_required`, `failed`로 나뉜다. 앱 프로세스·화면·로그·선택 Frida·프록시 흐름/사용자 확인을 점검하고 누락된 필수 Stage를 `options.failed_required_stages`에 보존한다.
@@ -145,6 +148,17 @@ tests/               단위·API·Mock E2E 테스트
 
 동일 앱 재분석은 앱 ID별 Lease로 직렬화한다. 실행마다 `analysis/<uploaded-file-stem>/runs/<analysis-run-id>/`와 `analysis_runs` 레코드를 사용한다. 출력 검증과 `latest.json` 교체가 성공한 뒤 하나의 DB transaction에서 `active_analysis_run_id`, 앱 메타데이터, Raw Finding, Tool Run, Control Test를 활성화한다. 실패하면 기존 Active Run과 포인터를 유지하며, 이미 분석 중이면 409 `analysis_in_progress`를 반환한다.
 
+### 국내 취약점 진단 프로필
+
+- `backend/app/catalog/korean_standards.py`에 주요정보통신기반시설 27개(`CII-MA-*`)와 전자금융기반시설 56개(`EFI-MA-*`) 기준선이 있다.
+- 프로젝트의 `assessment_profile`은 생성 시 선택하며 앱·Run 이력이 생긴 뒤 변경을 409로 차단한다.
+- 앱 분석과 Run은 선택 프로필 항목만 `ControlTest`로 생성한다. MASTG는 별도 보조 기준으로 유지한다.
+- 정적 신호 단독으로 취약점을 확정하지 않는다. 같은 Run의 confirmed Finding과 필수 증적 또는 필수 원본 증적에 대한 승인 수동 판정이 필요하다.
+- 루팅·탈옥 항목은 privileged 단말 상태, 대상 앱 프로세스 실행, 화면 증적이 모두 있어야 자동 `confirmed`가 된다.
+- Run 종료 시 취약 확정 항목이 있을 때만 `vulnerability_assessment`를 생성하고 Live 미판정 항목은 품질 Gap과 `completed_with_gaps`로 남긴다. 양호·해당없음은 상태만 기록하고 증적을 요구하지 않는다.
+- 수동 취약 확정은 허용된 원본 형식·SHA-256·검토자·판정 기준을 `manual_assessment_attachment`와 `assessment_attestation`으로 보존한다.
+- `/coverage`의 국내 원장이 주 판정 화면이며 MASTG는 국제 보조 기준 스위치로 제공한다.
+
 ### MASTG 통제 커버리지
 
 - `backend/app/catalog/mastg.py`에 Android/iOS 통제 기준선이 있다.
@@ -156,16 +170,19 @@ tests/               단위·API·Mock E2E 테스트
 
 ### Frida와 AI
 
-- 내장 스크립트는 동작을 바꾸지 않는 저위험 관찰용이다.
+- 자동 선택 가능한 내장 스크립트는 동작을 바꾸지 않는 저위험 관찰용이다. Android 루팅 탐지와 iOS 탈옥 탐지 우회 스크립트는 내장되어 있지만 `high`로 분류되어 자동 선택되지 않는다.
 - 자동 진단의 Frida는 Python 바인딩으로 앱을 한 번 Spawn/Attach하고 여러 스크립트를 같은 Session에 로드한다. 메시지를 로그인·동적·프록시 단계까지 수집하고 정상 경로에서는 JSONL을 확정한 뒤 unload/detach하며, 중지·실패·취소 경로는 `finally`에서 정리한다.
 - Attach는 baseline 프로세스 실행을 재확인한 뒤 연결한다. Spawn은 baseline 증적 후 앱 종료·종료 확인·spawn·script load·resume·재실행 확인 순서로 진행하며 각 단계 증적 ID를 연결한다.
 - Frida 메시지는 최근 500~2000건 Ring Buffer와 Run별 append-only JSONL로 분리한다. Callback은 bounded Queue에만 넣고 단일 writer가 파일을 한 번 열어 기록한다. Binary는 base64로 직렬화하고 개별/전체/Queue 크기 제한의 `dropped_count`, `truncated_count`를 Run health와 UI에 보존한다. WebSocket은 설정된 초당 빈도로 sampling한다. `dropped_count > 0`은 실제 증적 손실이므로 `frida_evidence_integrity` 품질 Gap과 `completed_with_gaps`를 만들고, `truncated_count`만 있는 경우는 정보로 남긴다.
 - iOS USB는 UDID transport를 사용하고, SSH 프로필은 검증된 `frida_endpoint`를 Python Frida `add_remote_device`에 실제 전달한다. 설정 route와 실제 연결 Device를 단말/Run UI에 표시하며 종료 시 `remove_remote_device`로 등록을 정리한다.
 - 빈 Frida 선택은 “실행 안 함”이며 자동 선택은 별도 `auto_select_frida=true`에서만 동작한다.
 - 자동 진단은 대상 앱의 플랫폼·프레임워크·정적 신호와 맞는 `builtin + low` 스크립트만 실행한다. 사용자·AI·medium/high 스크립트는 `safely_paused` Run의 1회 승인 직접 실행만 허용한다.
+- `pause_for_security_bypass=true`는 앱 설치 후 첫 실행 전에 `security_bypass_preparation`에서 안전 일시정지한다. 승인된 Android Root Detection Bypass 또는 iOS Jailbreak Detection Bypass를 Spawn하면 스크립트 ID·분류·위험도·코드 SHA-256·승인자·lifecycle을 `frida_script` 증적으로 보존하고 Run 수명 세션으로 이어간다. Live에서는 활성 승인 통제 검증 범위가 추가로 필요하다.
 - 사용자 스크립트와 AI 후보는 `pending_approval`로 저장한다.
 - NVIDIA가 1차, Claude가 fallback이다.
 - Mock Provider로 외부 전송 없는 승인 흐름을 시험할 수 있다.
+- AI 취약점 분석에는 선택한 국내 프로필의 정확한 ID·판정 조건을 제공한다. AI 추천 ID는 현재 프로필과 대조해 `needs_review`로만 연결하며 필수 재현 증적 없이 `confirmed`로 만들지 않는다.
+- 보안솔루션 우회 AI는 `security_bypass_preparation`에서 안전 일시정지된 Run의 제한된 정적 보안통제 신호·로그·증적만 사용한다. Live는 활성 승인 범위가 필요하고 결과는 플랫폼별 우회 범주·`high`·`pending_approval`로 서버가 강제하며 호출 이력을 Run에 묶는다.
 - Frida 실패 시 옵션이 켜져 있으면 관련 코드·로그·기존 스크립트만 AI에 전달해 수정 후보를 만든다.
 - 생성 후보는 저장만 하고 절대 자동 실행하지 않는다.
 - Provider, 모델, 상태, 품질과 원문 경로는 `ai_invocations`에 기록한다.
@@ -219,12 +236,14 @@ tests/               단위·API·Mock E2E 테스트
 - `tool_runs`: 분석 도구 실행 이력
 - `raw_findings`: 도구별 원시 탐지
 - `finding_sources`: 정규화 발견항목과 원시 탐지 연결
-- `control_tests`: 앱 기준선 및 진단 실행별 MASTG 상태
+- `control_tests`: 앱 기준선 및 진단 실행별 국내 기준·MASTG 상태와 필수 증적·Finding 연결
 - `ai_invocations`: AI Provider·모델·상태·원문 기록
 - `operation_approvals`: 직접 작업의 승인 범위·승인자·만료·소비 상태와 토큰 SHA-256
 - `analysis_runs`: 정적 분석 시도별 상태·출력 경로·결과·SHA-256·활성화 시각
 
 `app_artifacts.active_analysis_run_id`는 현재 활성 분석 결과를 가리킨다. `20260804_analysis_runs_v4` migration이 기존 DB를 백업한 뒤 이 컬럼을 추가하며, 신규 `analysis_runs` 테이블은 `create_all`로 생성한다.
+
+`20260820_assessment_profiles_v5` migration은 프로젝트 진단 프로필과 `control_tests`의 기준·진단 조건·증적 조건·Finding 연결 컬럼을 백업 후 추가한다.
 
 현재 Alembic은 사용하지 않는다. 안전 경계 컬럼은 `schema_migrations`와 시작 전 DB 백업을 사용하는 명시적 SQLite migration으로 추가한다. 이후 스키마 변경도 `create_all`만 믿지 말고 같은 방식 또는 Alembic 도입 후 진행한다.
 
@@ -273,6 +292,13 @@ data/
 /api/analysis/tools
 /api/runtime/adapters
 /api/runtime/execute
+/api/assessment/profiles
+/api/assessment/execution-matrix
+/api/apps/{id}/assessment/plan
+/api/apps/{id}/assessment/plan/refresh
+/api/apps/{id}/ai/triage
+/api/assessment-controls/{id}/evidence
+/api/assessment-controls/{id}/record
 /api/coverage
 /api/findings
 /api/findings/{id}/sources
@@ -296,7 +322,7 @@ data/
 - 발견항목 목록·상세
 - 증적 타임라인
 - Frida 라이브러리
-- MASTG 통제 커버리지
+- 국내 기준 판정 원장과 MASTG 보조 커버리지
 - 설정과 OSS Adapter 상태
 - 대시보드 첫 실행 안내: Mock 데모 → 결과·증적 확인 → 실제 진단 준비
 - 진단 설정의 4단계 준비도: 프로젝트·대상 앱·단말 연결·캡처 범위
@@ -384,16 +410,30 @@ MSW_ENABLE_API_DOCS=false
 
 ## 9. 현재 검증 결과
 
-마지막 검증(2026-08-13):
+마지막 검증(2026-08-20):
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          98 passed
+pytest -q                          106 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
 
 추가 수동 검증:
+
+- 제공된 DOCX 두 종의 27개·56개 항목을 분리 카탈로그로 구성하고 선택 프로필만 기준선·Run에 생성되는 회귀 테스트를 확인했다.
+- 정적 신호의 확정 차단, 루팅·탈옥 단말 상태 + 앱 프로세스 + 화면 증적의 자동 확정, 필수 증적 없는 수동 확정의 422 거부를 확인했다.
+- 양호 판정은 원본 증적 없이 저장되고 새 Evidence를 만들지 않으며, 취약 확정 항목만 `vulnerability_assessment`에 포함되는 회귀 테스트를 확인했다.
+- Android 루팅 탐지·iOS 탈옥 탐지 우회 스크립트의 Node 구문 검사, high 자동 선택 차단, 첫 실행 전 안전 일시정지, Spawn 전용 5분 만료 1회 승인과 토큰 재사용 차단을 확인했다.
+- Docker 기존 CyberOne 데이터에 V5 migration 백업과 주요정보통신기반시설 27개 기준선이 적용됨을 확인했다. Compose 컨테이너에는 외부 서비스 비밀 키가 전달되지 않는다.
+- Docker 런타임에 Node.js 20을 포함해 우회 스크립트가 `available/pending_approval`로 표시되고, 컨테이너가 healthy 상태임을 확인했다.
+- 프로젝트의 27개/56개 선택 화면과 국내 기준 원장을 헤드리스 Chromium으로 확인했다. 390×844에서 가로 넘침과 콘솔 오류·경고가 0이고 관련 API가 모두 200이었다.
+- Frida 라이브러리와 진단 설정의 우회 준비 UI를 1440×1000·390×844 헤드리스 Chromium에서 확인했으며 콘솔 오류·경고와 가로 넘침은 0건이었다.
+- AI 국내 기준 ID 추천이 `needs_review`로만 연결되고, 안전 일시정지 Run의 보안솔루션 우회 후보가 서버에서 `high`·`pending_approval`로 고정되는 회귀 테스트를 확인했다.
+- 83개 항목 실행 매트릭스, 앱 SHA-256에 고정된 정적 AI 사전진단, 대상 앱에 고정된 우회 후보, 확정 취약점만 포함하는 DOCX를 Docker Mock API에서 검증했다. 전체 105 tests, frontend build/audit와 Docker healthy 상태가 통과했다.
+- 실행 경계 원장과 AI 사전진단을 1440×1000·390×844 headless Firefox에서 확인하고 Frida 정적 사전 분석 앱 선택기를 열어 검증했다. 가로 넘침과 콘솔 오류·경고는 0건이었다.
+- APK·IPA 업로드·재분석 활성화 시 앱 ID·SHA-256·프로필에 고정된 점검 계획이 생성되고, NOW 후보 선별과 DEVICE/SERVER/MANUAL 대기가 분리되는 회귀 테스트를 확인했다. 정적 후보 부재는 양호로 바뀌지 않고 취약 확정도 자동 생성하지 않는다.
+- Docker Mock API에서 NOW 2/2 선별, DEVICE 5, SERVER 20과 취약·양호 자동 판정 0건을 확인했다. 앱 점검 배차판의 NOW 필터는 2개 행만 표시했고 1440×1000·390×844 headless Firefox에서 가로 넘침과 콘솔 오류·경고가 0건이었다.
 
 - Androguard 4.1.4와 공식 테스트 APK로 바이너리 Manifest 해석 성공
 - 패키지명 `tests.androguard`, 상태 `available`, 원문 SHA-256 생성 확인
@@ -437,6 +477,7 @@ npm audit --audit-level=high
 
 - Fiddler/Burp 프로세스 API 자동 제어
 - 제조사별 보안 솔루션·보안 키패드·RASP 전용 검증 Adapter
+- 국내 기준 83개 중 상태 변경·공격성 재현이 필요한 항목의 자동 실행(항목은 원장에 있으며 `manual_required`로 판정)
 - macOS가 필요한 IPA 서명·재서명
 - 모든 iOS 버전/단말 조합의 파일·화면 수집 보장
 - iOS Keychain 구조화 뷰어와 Android app-specific external storage 수집
@@ -448,7 +489,7 @@ npm audit --audit-level=high
 - 장시간 Logcat·화면 녹화 스트리밍 제어 UI
 - 조직용 인증·역할·감사 로그
 
-실제 Live 검증을 재개하려면 고객사 승인 범위가 적용된 Android/iOS 단말, 테스트 계정 참조, 허용 테스트 서버 목록과 유효한 승인 만료 시각이 필요하다. Android 우선 검증에서는 ADB 연결·루팅 권한·Frida/프록시 준비 상태를 확인한 뒤 실제 화면·Logcat·프로세스·프록시·저장소 증적을 수집한다. 보안 솔루션이 차단하면 차단 화면과 로그 자체를 통제 검증 증적으로 남기며 자동 우회 코드를 추가하지 않는다.
+실제 Live 검증을 재개하려면 고객사 승인 범위가 적용된 Android/iOS 단말, 테스트 계정 참조, 허용 테스트 서버 목록과 유효한 승인 만료 시각이 필요하다. Android 우선 검증에서는 ADB 연결·루팅 권한·Frida/프록시 준비 상태를 확인한 뒤 실제 화면·Logcat·프로세스·프록시·저장소 증적을 수집한다. 앱이 루팅·탈옥 탐지로 차단되면 내장 고위험 우회 스크립트를 첫 실행 전 승인형 Spawn으로 시도한다. 적용되지 않는 제조사 RASP·보안 키패드는 차단 화면과 로그를 남기고 전용 Adapter 개발 전까지 `manual_required`로 처리한다.
 
 ## 11. 새 세션 시작 체크리스트
 
@@ -481,6 +522,7 @@ npm audit --audit-level=high
 - `README.md`: 사용자 설치·운영 설명
 - `docs/IMPLEMENTATION_PLAN.md`: 전체 구조
 - `docs/OSS_INTEGRATIONS.md`: OSS 경계·라이선스·설치
+- `docs/DOMESTIC_ASSESSMENT.md`: 국내 2종 진단 프로필·증적 판정 정책
 - `THIRD_PARTY_NOTICES.md`: 제3자 고지
 - `.env.example`, `config.example.yaml`: 설정 예시
 

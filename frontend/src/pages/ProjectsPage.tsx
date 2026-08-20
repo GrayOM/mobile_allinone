@@ -9,6 +9,11 @@ import {
   formatDate,
 } from "../components/UI";
 
+const PROFILE_LABELS: Record<Project["assessment_profile"], string> = {
+  critical_infrastructure: "주요정보통신기반시설",
+  electronic_financial: "전자금융기반시설",
+};
+
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<string>(
@@ -79,6 +84,7 @@ export default function ProjectsPage() {
         external_ai_allowed: data.get("external_ai_allowed") === "on",
         external_analyzer_allowed: data.get("external_analyzer_allowed") === "on",
         run_mode: data.get("run_mode"),
+        assessment_profile: data.get("assessment_profile"),
       });
       setProjects((items) => [created, ...items]);
       selectProject(created.id);
@@ -191,13 +197,25 @@ export default function ProjectsPage() {
               <label htmlFor="project-description">설명</label>
               <textarea id="project-description" name="description" rows={2} placeholder="진단 범위와 권한 정보를 기록하세요." />
             </div>
+            <fieldset className="assessment-profile-picker field--wide">
+              <legend>국내 취약점 진단 기준</legend>
+              <label>
+                <input type="radio" name="assessment_profile" value="critical_infrastructure" defaultChecked />
+                <span><strong>1 · 주요정보통신기반시설</strong><small>모바일·웹/API 공통 27개 항목</small></span>
+              </label>
+              <label>
+                <input type="radio" name="assessment_profile" value="electronic_financial" />
+                <span><strong>2 · 전자금융기반시설</strong><small>거래·인증·모바일·TLS 56개 항목</small></span>
+              </label>
+              <p>앱 등록 후에는 기준을 변경할 수 없습니다. Run은 선택한 항목만 판정 원장에 생성합니다.</p>
+            </fieldset>
             <label className="check-card">
               <input type="checkbox" name="ai_enabled" defaultChecked />
-              <span><strong>AI 분석 사용</strong><small>증적 분류와 설명을 생성합니다.</small></span>
+              <span><strong>AI 진단 보조 사용</strong><small>증적 분류·국내 기준 매핑과 승인형 Frida 후보 분석에 사용합니다.</small></span>
             </label>
             <label className="check-card">
               <input type="checkbox" name="external_ai_allowed" />
-              <span><strong>외부 AI 전송 허용</strong><small>마스킹 후 NVIDIA·Claude로 전송합니다.</small></span>
+              <span><strong>외부 AI 전송 허용</strong><small>선택한 최소 증적을 마스킹한 뒤 NVIDIA 우선·Claude 대체 순서로 전송합니다.</small></span>
             </label>
             <label className="check-card">
               <input type="checkbox" name="external_analyzer_allowed" />
@@ -230,7 +248,7 @@ export default function ProjectsPage() {
             >
               <strong>{item.name}</strong>
               <small>{formatDate(item.updated_at)}</small>
-              <span>{item.run_mode.toUpperCase()}</span>
+              <span>{item.run_mode.toUpperCase()} · {item.assessment_profile === "electronic_financial" ? "EFI" : "CII"}</span>
             </button>
           )) : (
             <EmptyState title="프로젝트가 없습니다" description="첫 진단 범위를 만들어 시작하세요." />
@@ -248,6 +266,7 @@ export default function ProjectsPage() {
                 </div>
                 <div className="chip-row">
                   <StatusChip value={project.run_mode === "mock" ? "manual_required" : "available"} label={project.run_mode === "mock" ? "Mock · 합성 데이터" : "Live · 실제 결과"} />
+                  <StatusChip value="available" label={PROFILE_LABELS[project.assessment_profile]} />
                   <StatusChip value={project.external_ai_allowed ? "available" : "not_configured"} label={project.external_ai_allowed ? "외부 AI 허용" : "외부 AI 차단"} />
                   <StatusChip value={project.external_analyzer_allowed ? "available" : "not_configured"} label={project.external_analyzer_allowed ? "MobSF 전송 허용" : "MobSF 전송 차단"} />
                   <button className="button button--danger button--small" onClick={() => void deleteCurrentProject()}>프로젝트 삭제</button>
@@ -410,7 +429,7 @@ function AnalysisSummary({
           {!overview?.tool_runs.length && <small>분석 실행 이력을 읽는 중입니다.</small>}
         </div>
         <div className="analyzer-federation__foot">
-          <span>MASTG 기준선 {overview?.controls.length ?? 0}</span>
+          <span>국내 기준 {overview?.assessment_controls.length ?? 0} · MASTG {overview?.controls.length ?? 0}</span>
           <a href="/coverage">통제 원장 열기 →</a>
         </div>
       </div>

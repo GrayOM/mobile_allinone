@@ -74,6 +74,61 @@ def test_run_finding_register_includes_selected_apps_static_findings_without_ai(
 
 def test_mock_ai_frida_candidate_is_never_auto_approved(client):
     demo = client.post("/api/demo/bootstrap").json()
+    triage = client.post(
+        f"/api/apps/{demo['app']['id']}/ai/triage",
+        json={"use_mock": True},
+    )
+    assert triage.status_code == 200
+    triage_payload = triage.json()["triage"]
+    assert triage_payload["decision_policy"] == "static_needs_review_only"
+    assert triage_payload["findings"]
+    assert all(item["verdict"] == "needs_review" for item in triage_payload["findings"])
+    assert all(item["evidence_ids"] == [] for item in triage_payload["findings"])
+    assert "CII-MA-05" in triage_payload["findings"][0]["control_ids"]
+    refreshed_plan = triage.json()["assessment_plan"]
+    mapped = next(
+        item for item in refreshed_plan["controls"] if item["control_id"] == "CII-MA-05"
+    )
+    assert mapped["ai_mapped"] is True
+    assert mapped["queue_status"] == "candidate_detected"
+    persisted = next(
+        item
+        for item in client.get(
+            f"/api/projects/{demo['project']['id']}/apps"
+        ).json()
+        if item["id"] == demo["app"]["id"]
+    )
+    assert persisted["analysis_result"]["ai_static_triage"]["artifact_sha256"] == demo["app"]["sha256"]
+    assert persisted["analysis_result"]["assessment_plan"]["artifact_sha256"] == demo["app"]["sha256"]
+
+    bypass_without_run = client.post(
+        "/api/frida/scripts/generate",
+        json={
+            "project_id": demo["project"]["id"],
+            "purpose": "security_bypass",
+            "platform": "android",
+            "use_mock": True,
+        },
+    )
+    assert bypass_without_run.status_code == 422
+    assert "안전 일시정지된 Run" in bypass_without_run.json()["detail"]
+
+    static_bypass = client.post(
+        "/api/frida/scripts/generate",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "purpose": "security_bypass",
+            "platform": "android",
+            "use_mock": True,
+        },
+    )
+    assert static_bypass.status_code == 200
+    static_script = static_bypass.json()["script"]
+    assert static_script["target_app_id"] == demo["app"]["id"]
+    assert static_script["risk"] == "high"
+    assert static_script["approval_status"] == "pending_approval"
+
     generated = client.post(
         "/api/frida/scripts/generate",
         json={

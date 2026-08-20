@@ -12,3 +12,6 @@ frontend/dist/
 
 .playwright-cli/
 output/playwright/
+
+# Local authorized test artifacts must never be published.
+/test_apk/

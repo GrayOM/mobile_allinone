@@ -14,9 +14,28 @@ Windows 10/11에서 브라우저로 사용하는 **AI 기반 모바일 자동 �
 4. 설치, 원본 실행, 캡처, Logcat, Frida, HTTP 흐름, AI 판정 상태가 실시간 화면에 표시된다.
 5. 발견항목에서 화면·명령·스크립트·패킷·로그 타임라인을 확인한다.
 6. 취약점별 HTML 증적 설명서를 열고 원본 파일을 내려받는다.
-7. 통제 커버리지에서 MASTG 기준선과 자동·수동·미지원 상태를 확인한다.
+7. 통제 커버리지에서 선택한 국내 진단 기준의 판정·증적 상태와 MASTG 보조 기준을 확인한다.
 
 Mock 데모 APK는 실행 중 로컬에서 생성되는 안전한 ZIP 기반 샘플이다. 실제 Android 단말에는 설치할 수 없으며 Mock Adapter 전용이다.
+
+## 국내 취약점 진단 프로필
+
+프로젝트를 만들 때 다음 중 하나를 고정 선택한다.
+
+1. **주요정보통신기반시설**: 제공된 모바일 앱 보안 권고안의 27개 항목
+2. **전자금융기반시설**: 제공된 2026 보안 권고안의 56개 항목
+
+선택한 프로필만 앱 기준선과 Run 판정 원장에 생성된다. 앱이나 Run 이력이 생긴 뒤에는 기준을 바꿀 수 없다. `/coverage`의 국내 기준 원장이 주 판정 화면이며 OWASP MASTG는 교차 확인용 보조 원장이다.
+
+국내 기준 원장은 항목별 실행 경계를 `NOW`, `DEVICE`, `SERVER`, `MANUAL`로 분리한다. 실제 단말이 필요한 항목은 완료로 표시하지 않고 `device_required`로 남기며, 단말 없이 가능한 정적 분석·AI 사전 분류·수동 증적 준비·테스트 절차 정의는 계속 진행할 수 있다. 전체 83개 항목의 구조화된 매트릭스는 `/api/assessment/execution-matrix`에서 확인한다.
+
+APK·IPA 업로드와 재분석이 성공하면 선택한 프로필의 앱별 점검 계획을 자동 생성한다. 계획은 현재 앱 SHA-256에 고정되며 NOW 항목의 정적 후보·통제 신호를 즉시 선별하고, 나머지는 `waiting_device`, `waiting_server_scope`, `waiting_manual_review`로 배차한다. 정적 후보가 없다는 사실은 양호 판정이 아니며 `not_tested`를 유지한다. `/coverage`의 **앱 점검 배차판**에서 각 lane을 필터링하고 계획을 다시 계산할 수 있다. API는 `GET /api/apps/{app-id}/assessment/plan`과 `POST /api/apps/{app-id}/assessment/plan/refresh`다.
+
+정적 문자열·Manifest 신호만으로는 취약점을 확정하지 않는다. 같은 Live Run에서 기준에 맞는 재현 결과와 필수 원본 증적이 모두 연결되거나, 승인된 수동 검토자가 원본 증적을 선택해 판정을 기록해야 `confirmed`가 된다. 예를 들어 루팅·탈옥 항목은 변조 상태 증적, 대상 앱 프로세스 실행 증적, 화면 증적이 함께 있어야 한다. `not_vulnerable`과 `not_applicable`은 상태만 기록하며 별도 증적을 요구하거나 생성하지 않는다. Mock 결과는 같은 흐름을 연습할 수 있지만 항상 `synthetic=true`이며 실제 진단 결과로 사용할 수 없다.
+
+상세 판정 흐름과 API는 [`docs/DOMESTIC_ASSESSMENT.md`](docs/DOMESTIC_ASSESSMENT.md)에 정리되어 있다.
+
+Run에서 취약 확정 항목이 하나 이상 있으면 국내 기준 원장에서 **취약점만 DOCX**를 내려받을 수 있다. 이 문서는 `confirmed` 항목, 판정 기준, 재현 절차, 연결 증적, 조치 권고만 포함하며 양호·해당없음·미확정 항목은 수록하지 않는다. 확정 항목이 없으면 서버가 409로 생성을 거부한다.
 
 ## Windows 설치
 
@@ -59,10 +78,10 @@ chmod +x scripts/run.sh
 Docker는 하드웨어 단말·ADB·Frida Server 접근을 대신하지 않으며, **Mock 데모와 웹 UI를 안전하게 검토하는 용도**로 제공된다.
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
-Compose 구성은 호스트의 `127.0.0.1:8765`에만 포트를 공개하고 `./data`를 컨테이너의 영속 데이터 디렉터리로 연결한다. 컨테이너 상태는 `http://127.0.0.1:8765/healthz`에서 확인할 수 있다. `docker run -p 8765:8765`처럼 모든 네트워크 인터페이스에 포트를 노출하는 명령은 사용하지 않는다.
+Compose 구성은 호스트의 `127.0.0.1:8765`에만 포트를 공개하고 `./data`를 컨테이너의 영속 데이터 디렉터리로 연결한다. 프로젝트 `.env` 전체를 컨테이너에 전달하지 않으며 Docker UI 접근에 필요한 bridge 허용은 loopback Host 요청으로 제한한다. 최종 이미지에는 Frida JavaScript 승인에 필요한 Node.js 구문 검사기가 포함된다. 컨테이너 상태는 `http://127.0.0.1:8765/healthz`에서 확인할 수 있다. `docker run -p 8765:8765`처럼 모든 네트워크 인터페이스에 포트를 노출하는 명령은 사용하지 않는다.
 
 추가 OSS 도구는 기본 설치와 분리되어 있다. 라이선스와 플랫폼 요구사항을 검토한 뒤 필요한 도구만 선택한다.
 
@@ -157,6 +176,10 @@ MSW_MASK_EXTERNAL_AI_DATA=true
 10. 진단의 자동 수정 옵션도 후보를 실행하지 않으며 사용자가 Frida 라이브러리에서 승인해야 한다.
 11. 승인자는 전체 코드·적용 대상·위험도를 명시적으로 검토해야 하며, 브라우저가 전송한 현재 코드 SHA-256이 서버에서 재계산한 해시와 일치할 때만 승인된다. 내용이 변경되면 재승인이 필요하다.
 12. 승인된 통제 검증 모드의 동의·승인 범위는 외부 AI 전송에서 제외하며 로컬 증적으로만 보존한다.
+13. 취약점 분석 AI에는 선택한 국내 프로필의 ID·판정 조건과 현재 Run 증적 목록을 제공한다. AI가 추천한 ID는 `needs_review`로만 연결하며 필수 재현 증적 없이는 확정하지 않는다.
+14. 보안통제 우회 AI는 `security_bypass_preparation`에서 안전 일시정지된 Run의 제한된 정적 신호·로그만 사용한다. 서버가 결과를 `high`와 `pending_approval`로 강제하고 Run별 호출 이력을 남긴다.
+15. 실제 단말이 없어도 앱 분석 기준선에서 AI 사전 진단을 실행할 수 있다. 결과는 앱 SHA-256과 선택 프로필에 고정하고 모두 `needs_review`로 저장한다.
+16. 정적 신호로 만든 우회 후보는 대상 앱 ID에 묶는다. 다른 앱의 Run에서는 승인·실행할 수 없고, 실제 성공 여부는 추후 Live 단말 증적으로만 판정한다.
 
 NVIDIA 연동은 OpenAI 호환 `POST /v1/chat/completions`, Claude 연동은 Messages `POST /v1/messages`와 JSON Schema `output_config`를 사용한다.
 
@@ -168,7 +191,20 @@ NVIDIA 연동은 OpenAI 호환 `POST /v1/chat/completions`, Claude 연동은 Mes
 
 허용 서버는 `api.test.example`, `*.sandbox.example`, `192.0.2.15`처럼 호스트·IP·하위 도메인 와일드카드로 입력한다. 단일 `*`, URL 경로와 쿼리는 허용하지 않는다. 이 모드에서 mitmproxy는 허용목록 밖 목적지를 upstream 전송 전에 HTTP 451로 차단하고 차단 흐름을 원본 증적으로 남긴다. Burp/Fiddler Import를 포함해 범위 밖 흐름이 식별되면 이후 자동 네트워크 테스트와 AI 판정을 진행하지 않고 Run을 `manual_required`로 종료한다. 집행 결과는 `control_scope_enforcement` 증적과 Run 옵션에 보존하며 승인 원장과 함께 외부 AI 컨텍스트에서 제외한다.
 
-> 이 모드는 관찰·증적 수집 전용이다. 보안 통제를 자동으로 무력화하지 않고, 운영 계정·실제 고객 데이터에 접근하지 않으며, 승인 정보는 외부 AI 컨텍스트에 포함하지 않는다. 승인 만료·단말 불일치·범위 밖 목적지는 `manual_required`로 전환해 고객사와 솔루션 공급사의 별도 절차를 따른다.
+> 이 모드는 보안 통제를 자동으로 무력화하지 않는다. 운영 계정·실제 고객 데이터에 접근하지 않으며, 승인 정보는 외부 AI 컨텍스트에 포함하지 않는다. 승인 만료·단말 불일치·범위 밖 목적지는 `manual_required`로 전환한다. 루팅·탈옥 탐지 우회는 아래의 별도 코드 검토와 1회 승인 경계를 거친 경우에만 실행한다.
+
+### 승인형 루팅·탈옥 탐지 우회
+
+루팅 Android 또는 탈옥 iOS에서 대상 앱이 진단 시작 자체를 차단할 때 사용할 수 있도록 다음 고위험 내장 Frida 스크립트를 제공한다.
+
+- Android `Root Detection Bypass`: root 경로·패키지·속성·명령 실행과 RootBeer 계열 탐지를 대상 프로세스 안에서 마스킹한다.
+- iOS `Jailbreak Detection Bypass`: 탈옥 경로, URL Scheme, `fork`, `DYLD_INSERT_LIBRARIES` 탐지를 대상 프로세스 안에서 마스킹한다.
+
+진단 설정에서 **루팅·탈옥 탐지 우회 준비**를 켜면 앱 설치 후 첫 실행 전에 Run이 `safely_paused`로 전환된다. Frida 라이브러리에서 전체 코드·대상·위험도를 확인하고 현재 SHA-256을 승인한 뒤, 해당 Run에 Spawn 방식으로 1회 실행하고 진단을 재개한다. 승인 토큰은 프로젝트·Run·단말·대상 앱·스크립트에 묶이며 5분 안에 한 번만 사용할 수 있다. Live 실행에는 유효한 승인 통제 검증 범위가 추가로 필요하다. 우회 스크립트와 lifecycle 결과는 로컬 `frida_script` 증적으로 보존되지만, 그 자체만으로 취약점을 확정하지 않고 앱 실행·화면·로그 등 기준별 필수 재현 증적과 함께 판정한다.
+
+내장 스크립트가 대상 보안 솔루션과 맞지 않으면 같은 일시정지 Run에서 **AI 후보 생성 → 보안솔루션 우회 분석**을 사용할 수 있다. 서버가 현재 앱의 루팅·탈옥·Frida·디버거·무결성 관련 정적 신호와 제한된 Run 증적만 선택하며, 승인 범위와 원본 파일은 AI에 보내지 않는다. 생성 후보는 Android `Root Detection Bypass` 또는 iOS `Jailbreak Detection Bypass`, 위험도 `high`, 승인 대기로 고정된다. AI 결과가 곧 우회 성공이나 취약 판정을 뜻하지 않는다.
+
+실제 단말 Run이 아직 없으면 등록된 APK·IPA의 정적 신호만 사용해 사전 후보를 만들 수 있다. 이 후보에는 `target_app_id`가 저장되며 다른 앱에는 적용할 수 없다. 실행은 이후 동일 앱의 `security_bypass_preparation` 안전 일시정지와 기존 SHA-256·5분 1회 승인 경계를 모두 통과해야 한다.
 
 ## 승인형 딥링크·외부 노출 컴포넌트 검증
 
@@ -260,7 +296,7 @@ scripts/frida/
    └─ Jailbreak Detection/
 ```
 
-각 스크립트는 플랫폼, 카테고리, 대상 프레임워크, 적용 조건, 위험도, 승인 상태, 구문 상태, 성공·실패 횟수를 저장한다. 내장 스크립트는 우회 성공을 가짜로 만들지 않는 관찰용 후크다.
+각 스크립트는 플랫폼, 카테고리, 대상 프레임워크, 적용 조건, 위험도, 승인 상태, 구문 상태, 성공·실패 횟수를 저장한다. 자동 선택 가능한 내장 스크립트는 관찰용이며, 별도 루팅·탈옥 탐지 우회 스크립트는 `high`라서 자동 선택되지 않는다.
 
 사용자·AI 후보는:
 
@@ -270,7 +306,7 @@ scripts/frida/
 4. 승인된 스크립트만 Spawn·Attach 또는 Mock 실행
 5. 실행 명령, 전체 스크립트, 메시지와 오류를 증적으로 저장
 
-스크립트 화면의 AI 후보 생성기는 관련 코드·실패 로그만 입력받는다. 프로젝트의 외부 전송 정책과 마스킹을 적용하고 NVIDIA 실패 시 Claude로 fallback한다. Mock Provider로 외부 전송 없는 승인 흐름도 검증할 수 있다. AI는 통제의 탐지·차단 신호와 수동 재검증 절차를 제안할 수 있지만 통제 무력화 코드를 자동 생성·실행하는 경로로 사용하지 않는다.
+스크립트 화면의 AI 후보 생성기는 실패 수정·관찰·보안솔루션 우회 분석 목적을 분리한다. 프로젝트의 외부 전송 정책과 마스킹을 적용하고 NVIDIA 실패 시 Claude로 fallback한다. Mock Provider로 외부 전송 없는 승인 흐름도 검증할 수 있다. 보안솔루션 우회 목적은 안전 일시정지된 현재 Run 증적에 고정되며 결과를 고위험 승인 대기로만 저장한다. 어떤 AI 후보도 자동 실행하지 않는다.
 
 ## 정적 분석 범위
 
@@ -384,6 +420,8 @@ npm run build
 - NVIDIA 실패 → Claude fallback
 - AI Frida 후보 JSON Schema·구문 검사·승인 대기
 - Frida 후보 승인 전 실행 차단
+- 고위험 루팅·탈옥 탐지 우회의 자동 선택 차단, 첫 실행 전 Spawn·1회 승인
+- 양호 판정의 무증적 저장과 취약 확정 전용 증적 원장
 - 분석기 원시 결과·MASTG 커버리지 저장
 - 고위험 objection/drozer 작업 승인 차단
 - Mock 업로드 → 진단 → 증적 → 발견항목 → HTML 전체 흐름
@@ -393,7 +431,7 @@ npm run build
 Docker는 Mock 데모와 웹 UI 용도다. USB ADB·Windows Fiddler·로컬 Frida 접근은 Windows 직접 실행을 권장한다.
 
 ```powershell
-docker compose up --build
+docker compose up -d --build
 ```
 
 ## 프로젝트 구조
@@ -402,7 +440,7 @@ docker compose up --build
 backend/app/
 ├─ api/              # REST·WebSocket
 ├─ analyzers/        # APK·IPA 정적 분석
-├─ catalog/          # MASTG 통제 카탈로그·실행 기준선
+├─ catalog/          # 국내 2종 진단 기준·MASTG 보조 원장
 ├─ devices/          # Android/iOS/Mock DeviceAdapter
 ├─ frida/            # 실행기·라이브러리 시드
 ├─ proxy/            # mitmproxy/Burp/Fiddler/Mock
@@ -418,7 +456,7 @@ frontend/src/
 rules/
 └─ semgrep/          # 프로젝트 자체 Android 보안 규칙
 scripts/
-├─ frida/
+├─ frida/            # 저위험 관찰 + 승인형 루팅·탈옥 탐지 우회
 └─ mitm_capture_addon.py
 tests/
 docs/

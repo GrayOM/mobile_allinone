@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, post } from "../api";
-import type { DiagnosticRun, FridaScript, Project } from "../types";
+import type { AppArtifact, DiagnosticRun, FridaScript, Project } from "../types";
 import { EmptyState, SectionHeading, StatusChip } from "../components/UI";
 
 async function sha256(content: string): Promise<string> {
@@ -22,6 +22,9 @@ export default function ScriptsPage() {
   const [error, setError] = useState("");
   const [project, setProject] = useState<Project | null>(null);
   const [pausedRuns, setPausedRuns] = useState<DiagnosticRun[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [apps, setApps] = useState<AppArtifact[]>([]);
+  const [selectedAppId, setSelectedAppId] = useState("");
 
   function load() {
     void api<FridaScript[]>("/frida/scripts").then((items) => {
@@ -35,14 +38,23 @@ export default function ScriptsPage() {
     if (projectId) void Promise.all([
       api<Project>(`/projects/${projectId}`),
       api<DiagnosticRun[]>(`/projects/${projectId}/runs`),
-    ]).then(([projectItem, runs]) => {
+      api<AppArtifact[]>(`/projects/${projectId}/apps`),
+    ]).then(([projectItem, runs, appItems]) => {
       setProject(projectItem);
       setPausedRuns(runs.filter((run) => run.status === "safely_paused"));
+      setApps(appItems);
+      setSelectedAppId((current) => current || appItems[0]?.id || "");
     });
   }, []);
 
   const filtered = scripts.filter((item) => item.platform === platform);
-  const selected = scripts.find((item) => item.id === selectedId) ?? filtered[0];
+  const selected = filtered.find((item) => item.id === selectedId) ?? filtered[0];
+  const compatiblePausedRuns = pausedRuns.filter((item) => (
+    platform === "ios"
+      ? item.device_adapter.toLowerCase().includes("ios") || item.device_id.toLowerCase().includes("ios")
+      : !item.device_adapter.toLowerCase().includes("ios") && !item.device_id.toLowerCase().includes("ios")
+  ));
+  const compatibleApps = apps.filter((item) => item.platform === platform);
   const categories = useMemo(
     () => [...new Set(filtered.map((item) => item.category))],
     [filtered],
@@ -50,17 +62,20 @@ export default function ScriptsPage() {
 
   async function execute() {
     if (!selected) return;
-    if (!project || project.run_mode !== "mock") {
-      setError("Mock Frida 실행은 Mock 프로젝트에서만 허용됩니다. Live 단말 실행은 진단 설정에서 진행하세요.");
+    if (!project) {
+      setError("프로젝트를 먼저 선택하세요.");
       return;
     }
-    const run = pausedRuns.find((item) => (
-      selected.platform === "ios" ? item.device_id.includes("ios") : !item.device_id.includes("ios")
-    ));
+    const run = compatiblePausedRuns.find((item) => item.id === selectedRunId)
+      ?? compatiblePausedRuns[0];
     if (!run) {
-      setError("같은 플랫폼의 Mock 진단을 일시정지한 뒤 실행하세요. 직접 Frida 실행도 Run Lease와 증적에 연결됩니다.");
+      setError("같은 플랫폼 진단을 안전 일시정지한 뒤 실행하세요. 진단 설정의 ‘루팅·탈옥 탐지 우회 준비’를 사용하면 첫 앱 실행 전에 멈춥니다.");
       return;
     }
+    if (project.run_mode === "live" && !window.confirm(
+      `${selected.name}을(를) 승인 범위의 실제 단말과 대상 앱에 실행합니다.\n\n현재 코드·위험도·대상 Run을 확인했습니까?`,
+    )) return;
+    setError("");
     setRunning(true);
     try {
       const approval = await post<{ token: string }>("/approvals", {
@@ -78,6 +93,8 @@ export default function ScriptsPage() {
       });
       setResult(value);
       load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Frida 실행 실패");
     } finally {
       setRunning(false);
     }
@@ -110,6 +127,15 @@ export default function ScriptsPage() {
       return;
     }
     const data = new FormData(event.currentTarget);
+    const purpose = String(data.get("purpose") || "security_bypass");
+    const contextRun = compatiblePausedRuns.find((item) => item.id === selectedRunId)
+      ?? compatiblePausedRuns[0];
+    const contextApp = compatibleApps.find((item) => item.id === selectedAppId)
+      ?? compatibleApps[0];
+    if (purpose === "security_bypass" && !contextRun && !contextApp) {
+      setError("분석할 APK 또는 IPA를 프로젝트에 먼저 등록하세요.");
+      return;
+    }
     setGenerating(true);
     setError("");
     try {
@@ -118,10 +144,15 @@ export default function ScriptsPage() {
         syntax_message: string | null;
       }>("/frida/scripts/generate", {
         project_id: projectId,
+        run_id: contextRun?.id ?? null,
+        app_id: contextRun?.app_id ?? contextApp?.id ?? null,
+        purpose,
         platform,
         category: data.get("category"),
         target_framework: data.get("target_framework"),
-        task: "런타임 실패 로그와 코드에 맞는 관찰·검증 Frida 후보 생성",
+        task: purpose === "repair"
+          ? "런타임 실패 로그와 코드에 맞는 Frida 수정 후보 생성"
+          : "대상 코드와 증적에 맞는 관찰 Frida 후보 생성",
         code_excerpt: data.get("code_excerpt"),
         runtime_log: data.get("runtime_log"),
         failed_script: selected?.content ?? "",
@@ -148,7 +179,7 @@ export default function ScriptsPage() {
       <SectionHeading
         eyebrow="SCRIPT CONTROL"
         title="관찰 조건과 실행 이력을 함께 관리합니다"
-        description="내장 스크립트는 저위험 관찰용이며, AI·사용자 생성 후보는 구문 검사와 승인 전까지 실행할 수 없습니다."
+        description="저위험 내장 스크립트만 자동 선택됩니다. 루팅·탈옥 탐지 우회와 AI·사용자 코드는 안전 일시정지 상태에서 코드 해시를 검토하고 1회 승인해야 실행됩니다."
         action={
           <button className="button button--primary" onClick={() => setShowGenerator((value) => !value)}>
             AI 후보 생성
@@ -160,10 +191,46 @@ export default function ScriptsPage() {
         <form className="script-generator panel panel--accent" onSubmit={generate}>
           <div>
             <span className="eyebrow">REVIEW-GATED GENERATION</span>
-            <h3>실패 증적에서 최소 후보 만들기</h3>
-            <p>선택 스크립트와 아래 입력은 프로젝트 정책에 따라 마스킹됩니다. 결과는 승인 대기 상태로만 저장됩니다.</p>
+            <h3>증적 기반 AI Frida 후보 만들기</h3>
+            <p>우회 분석은 현재 Run의 정적 통제 신호와 제한된 로그만 마스킹해 사용합니다. 결과는 고위험·승인 대기로 저장되고 자동 실행되지 않습니다.</p>
           </div>
           <div className="form-grid">
+            <div className="field">
+              <label htmlFor="candidate-purpose">분석 목적</label>
+              <select id="candidate-purpose" name="purpose" defaultValue="security_bypass">
+                <option value="security_bypass">보안솔루션 우회 분석</option>
+                <option value="repair">실패 스크립트 수정</option>
+                <option value="observation">관찰 Hook 생성</option>
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="candidate-run">분석할 안전 일시정지 Run</label>
+              <select
+                id="candidate-run"
+                value={selectedRunId || compatiblePausedRuns[0]?.id || ""}
+                onChange={(event) => setSelectedRunId(event.target.value)}
+              >
+                {!compatiblePausedRuns.length && <option value="">준비된 Run 없음</option>}
+                {compatiblePausedRuns.map((run) => (
+                  <option key={run.id} value={run.id}>{run.current_stage} · {run.device_id} · {run.id.slice(0, 8)}</option>
+                ))}
+              </select>
+              <small>Run이 있으면 정적 신호와 현재 로그를 함께 사용합니다.</small>
+            </div>
+            <div className="field">
+              <label htmlFor="candidate-app">정적 사전 분석 앱</label>
+              <select
+                id="candidate-app"
+                value={selectedAppId || compatibleApps[0]?.id || ""}
+                onChange={(event) => setSelectedAppId(event.target.value)}
+              >
+                {!compatibleApps.length && <option value="">등록된 {platform.toUpperCase()} 앱 없음</option>}
+                {compatibleApps.map((app) => (
+                  <option key={app.id} value={app.id}>{app.app_name || app.original_name} · {app.sha256.slice(0, 10)}</option>
+                ))}
+              </select>
+              <small>실제 단말이 없어도 APK·IPA의 정적 통제 신호로 검토 후보를 만들 수 있습니다.</small>
+            </div>
             <div className="field">
               <label htmlFor="candidate-category">보안통제 범주</label>
               <input id="candidate-category" name="category" defaultValue={selected?.category || "Custom"} />
@@ -193,6 +260,7 @@ export default function ScriptsPage() {
               <span><strong>NVIDIA 실패 모의</strong><small>Claude fallback 경로를 확인합니다.</small></span>
             </label>
           </div>
+          <p className="form-note">AI는 국내 기준의 관련 항목도 추천하지만, 필수 재현 증적 없이 취약 판정을 확정하지 않습니다.</p>
           <button className="button button--signal" disabled={generating}>
             {generating ? "후보 생성·검사 중…" : "후보 생성"}
           </button>
@@ -228,6 +296,7 @@ export default function ScriptsPage() {
                   <div className="chip-row">
                     <span className="plain-chip">위험도 {selected.risk}</span>
                     <span className="plain-chip">{selected.target_framework}</span>
+                    {selected.target_app_id && <span className="plain-chip">앱 고정 {selected.target_app_id.slice(0, 8)}</span>}
                     <StatusChip value={selected.syntax_status} />
                   </div>
                 </div>
@@ -241,9 +310,23 @@ export default function ScriptsPage() {
                 <div className="tag-cloud">{selected.conditions.map((item) => <span key={item}>{item}</span>)}</div>
               </div>
               <pre className="code-view code-view--tall">{selected.content}</pre>
+              {compatiblePausedRuns.length > 0 && (
+                <div className="field">
+                  <label htmlFor="frida-run">실행할 안전 일시정지 Run</label>
+                  <select
+                    id="frida-run"
+                    value={selectedRunId || compatiblePausedRuns[0]?.id || ""}
+                    onChange={(event) => setSelectedRunId(event.target.value)}
+                  >
+                    {compatiblePausedRuns.map((run) => (
+                      <option key={run.id} value={run.id}>{run.current_stage} · {run.device_id} · {run.id.slice(0, 8)}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="form-actions">
-                <button className="button button--signal" onClick={() => void execute()} disabled={running || selected.approval_status !== "approved" || selected.syntax_status !== "available" || project?.run_mode !== "mock" || !pausedRuns.length}>
-                  {running ? "Mock 실행 중…" : "Mock 단말에서 실행"}
+                <button className="button button--signal" onClick={() => void execute()} disabled={running || selected.approval_status !== "approved" || selected.syntax_status !== "available" || !project || !compatiblePausedRuns.length}>
+                  {running ? "승인 실행 중…" : project?.run_mode === "live" ? "Live 단말에서 1회 실행" : "Mock 단말에서 1회 실행"}
                 </button>
                 {selected.approval_status !== "approved" && (
                   <button className="button button--primary" onClick={() => void approve()} disabled={selected.syntax_status !== "available"}>

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import secrets
 import time
 from dataclasses import dataclass
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from starlette.responses import JSONResponse
 
@@ -86,6 +87,28 @@ class ApiSecurityMiddleware:
         response = JSONResponse({"detail": detail}, status_code=status)
         await response(scope, receive, send)
 
+    def _is_local_request(self, scope, headers: dict[bytes, bytes]) -> bool:
+        server_host = str((scope.get("server") or ("", 0))[0])
+        if is_loopback_host(server_host):
+            return True
+        if not self.settings.docker_loopback_bridge:
+            return False
+        if any(
+            name in headers
+            for name in (b"forwarded", b"x-forwarded-for", b"x-forwarded-host")
+        ):
+            return False
+        authority = headers.get(b"host", b"").decode("latin-1")
+        request_host = urlsplit(f"//{authority}").hostname or ""
+        if not is_loopback_host(request_host):
+            return False
+        client_host = str((scope.get("client") or ("", 0))[0])
+        try:
+            client_ip = ipaddress.ip_address(client_host)
+        except ValueError:
+            return False
+        return client_ip.is_loopback or client_ip.is_private
+
     async def __call__(self, scope, receive, send):
         scope_type = scope.get("type")
         path = str(scope.get("path") or "")
@@ -93,9 +116,9 @@ class ApiSecurityMiddleware:
             await self.app(scope, receive, send)
             return
 
-        server_host = str((scope.get("server") or ("", 0))[0])
+        headers = self._headers(scope)
         if scope_type == "websocket":
-            if not self.settings.lan_access and not is_loopback_host(server_host):
+            if not self.settings.lan_access and not self._is_local_request(scope, headers):
                 await send({"type": "websocket.close", "code": 4403})
                 return
             query = parse_qs(scope.get("query_string", b"").decode("utf-8"))
@@ -112,7 +135,7 @@ class ApiSecurityMiddleware:
             return
 
         if not self.settings.lan_access:
-            if is_loopback_host(server_host):
+            if self._is_local_request(scope, headers):
                 await self.app(scope, receive, send)
                 return
             if scope_type == "websocket":
@@ -127,7 +150,6 @@ class ApiSecurityMiddleware:
                 )
             return
 
-        headers = self._headers(scope)
         if str(scope.get("method") or "").upper() == "OPTIONS":
             await self.app(scope, receive, send)
             return

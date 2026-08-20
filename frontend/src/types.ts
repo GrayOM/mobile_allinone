@@ -19,6 +19,7 @@ export interface Project {
   external_analyzer_certificate_sha256: string | null;
   mock_mode: boolean;
   run_mode: "mock" | "live";
+  assessment_profile: "critical_infrastructure" | "electronic_financial";
   created_at: string;
   updated_at: string;
 }
@@ -41,6 +42,7 @@ export interface AppArtifact {
     findings?: Array<Record<string, unknown>>;
     signals?: Record<string, Array<Record<string, string>>>;
     warnings?: string[];
+    assessment_plan?: AssessmentPlan;
   };
   active_analysis_run_id: string | null;
   synthetic: boolean;
@@ -160,6 +162,7 @@ export interface ProxyFlow {
 
 export interface FridaScript {
   id: string;
+  target_app_id: string | null;
   name: string;
   platform: string;
   category: string;
@@ -225,6 +228,94 @@ export interface ControlTest {
   evidence_ids: string[];
   synthetic: boolean;
   updated_at: string;
+  standard: string;
+  control_id: string;
+  group: string;
+  criteria: string[];
+  evidence_requirements: string[][];
+  finding_categories: string[];
+  finding_ids: string[];
+  risk: string;
+  execution?: {
+    lane: "ready_now" | "device_required" | "server_scope_required" | "manual_review";
+    capability: string;
+    available_now: string[];
+    device_required: boolean;
+    server_scope_required: boolean;
+    test_account_required: boolean;
+    state_changing: boolean;
+    automatic_execution: boolean;
+    next_action: string;
+    remediation: string;
+  };
+}
+
+export interface AIStaticTriage {
+  status: string;
+  provider: string;
+  model: string;
+  message: string;
+  generated_at: string;
+  artifact_sha256: string;
+  assessment_profile: string;
+  decision_policy: string;
+  findings: Array<{
+    title: string;
+    category: string;
+    severity: string;
+    verdict: string;
+    confidence: number;
+    rationale: string;
+    additional_checks: string[];
+    control_ids: string[];
+  }>;
+}
+
+export type AssessmentPlanLane =
+  | "ready_now"
+  | "device_required"
+  | "server_scope_required"
+  | "manual_review";
+
+export interface AssessmentPlanControl {
+  control_id: string;
+  group: string;
+  title: string;
+  risk: string;
+  lane: AssessmentPlanLane;
+  queue_status: string;
+  screening_completed: boolean;
+  candidate_count: number;
+  ai_mapped: boolean;
+  static_candidates: Array<{
+    source: string;
+    category: string;
+    title: string;
+    severity: string;
+    location: string;
+  }>;
+  blockers: string[];
+  available_now: string[];
+  next_action: string;
+  test_account_required: boolean;
+  state_changing: boolean;
+}
+
+export interface AssessmentPlan {
+  version: number;
+  app_id: string;
+  artifact_sha256: string;
+  assessment_profile: string;
+  generated_at: string;
+  generated_by: string;
+  decision_policy: string;
+  total: number;
+  lane_counts: Record<AssessmentPlanLane, number>;
+  queue_counts: Record<string, number>;
+  ready_now_total: number;
+  ready_now_screened: number;
+  candidate_controls: number;
+  controls: AssessmentPlanControl[];
 }
 
 export interface AnalysisOverview {
@@ -234,10 +325,14 @@ export interface AnalysisOverview {
   tool_runs: AnalysisToolRun[];
   raw_findings: RawFinding[];
   controls: ControlTest[];
+  assessment_profile: string;
+  assessment_source: Record<string, unknown>;
+  assessment_controls: ControlTest[];
 }
 
 export interface CoverageData {
   source: Record<string, unknown>;
+  standard: string;
   total_catalog: number;
   counts: Record<string, number>;
   result_counts: Record<string, number>;

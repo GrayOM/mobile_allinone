@@ -23,6 +23,13 @@ class MockAIProvider(AIProvider):
             and item.get("id")
             and item.get("type") in {"network_capture", "device_log"}
         ]
+        control_ids = [
+            str(item["control_id"])
+            for item in context.get("assessment_controls", [])
+            if isinstance(item, dict)
+            and item.get("control_id")
+            and "sensitive_data_exposure" in item.get("finding_categories", [])
+        ][:3]
         finding = AIFindingCandidate(
             title="인증 토큰이 프록시 응답에서 관찰됨",
             category="sensitive_data_exposure",
@@ -47,6 +54,7 @@ class MockAIProvider(AIProvider):
                 "Logcat 토큰 노출 여부 확인",
                 "세션 만료·폐기 정책 확인",
             ],
+            control_ids=control_ids,
         )
         analysis = AIAnalysis(findings=[finding])
         return AIProviderResult(
@@ -66,13 +74,18 @@ class MockAIProvider(AIProvider):
     ) -> AIScriptResult:
         await asyncio.sleep(0.05)
         platform = str(context.get("platform") or "android")
+        security_bypass = context.get("purpose") == "security_bypass"
         candidate = FridaScriptCandidate(
-            name=f"Mock {platform} 보안통제 관찰 후보",
+            name=(
+                f"Mock {platform} 루팅·탈옥 탐지 우회 후보"
+                if security_bypass
+                else f"Mock {platform} 보안통제 관찰 후보"
+            ),
             platform=platform,
             category=str(context.get("category") or "Custom"),
             target_framework=str(context.get("target_framework") or "generic"),
             conditions=["Java runtime available", "target class is loaded"],
-            risk="low",
+            risk="high" if security_bypass else "low",
             content=(
                 "setImmediate(function () {\n"
                 "  try {\n"
@@ -82,10 +95,18 @@ class MockAIProvider(AIProvider):
                 "  }\n"
                 "});\n"
             ),
-            rationale="Mock 모드에서 승인·구문 검사 흐름을 검증하는 관찰 전용 후보입니다.",
+            rationale=(
+                "Mock 모드에서 고위험 우회 후보의 분석·승인·구문 검사 흐름을 검증합니다."
+                if security_bypass
+                else "Mock 모드에서 승인·구문 검사 흐름을 검증하는 관찰 전용 후보입니다."
+            ),
             confidence=0.78,
             safety_notes=[
-                "반환값과 앱 상태를 변경하지 않습니다.",
+                (
+                    "실제 단말에는 적용되지 않는 합성 후보이며 실행 전 전체 코드 검토가 필요합니다."
+                    if security_bypass
+                    else "반환값과 앱 상태를 변경하지 않습니다."
+                ),
                 "사용자 승인 전에는 실행되지 않습니다.",
             ],
         )
