@@ -27,6 +27,10 @@ AfterHook = Callable[
     Awaitable[list[str]],
 ]
 UpdateHook = Callable[[dict[str, object]], Awaitable[None]]
+RankingHook = Callable[
+    [UIState, list[NavigationCandidate]],
+    Awaitable[list[str]],
+]
 
 
 @dataclass(slots=True)
@@ -34,6 +38,7 @@ class NavigationHooks:
     before_action: BeforeHook | None = None
     after_action: AfterHook | None = None
     on_update: UpdateHook | None = None
+    rank_candidates: RankingHook | None = None
 
 
 class NavigationEngine:
@@ -210,6 +215,45 @@ class NavigationEngine:
         self._actions.append(action)
         await self._update("action", action=action.to_dict())
         return action, after_state
+
+    async def _rank_safe_candidates(
+        self,
+        state: UIState,
+        candidates: list[NavigationCandidate],
+    ) -> list[NavigationCandidate]:
+        if not self.hooks.rank_candidates or len(candidates) < 2:
+            return candidates
+        allowed = {
+            item.element_id: item
+            for item in candidates
+            if item.risk == "low" and not item.requires_approval
+        }
+        try:
+            proposed_ids = await self.hooks.rank_candidates(state, list(allowed.values()))
+        except Exception as exc:  # Provider failure must not fail bounded navigation.
+            await self._update(
+                "ranking_fallback",
+                state_fingerprint=state.fingerprint,
+                message=f"{type(exc).__name__}: {exc}",
+            )
+            return candidates
+        ordered: list[NavigationCandidate] = []
+        seen: set[str] = set()
+        for candidate_id in proposed_ids:
+            candidate = allowed.get(str(candidate_id))
+            if candidate is None or candidate.element_id in seen:
+                continue
+            ordered.append(candidate)
+            seen.add(candidate.element_id)
+        ordered.extend(
+            item for item in candidates if item.element_id not in seen
+        )
+        await self._update(
+            "ranking_applied",
+            state_fingerprint=state.fingerprint,
+            candidate_order=[item.element_id for item in ordered],
+        )
+        return ordered
 
     async def _execute_back(self, state: UIState) -> UIState | None:
         if self._limit_reached():
@@ -388,9 +432,12 @@ class NavigationEngine:
             item
             for item in candidates
             if item.risk == "low" and not item.requires_approval
-        ][: self.limits.per_screen_action_limit]
+        ]
         if depth >= self.limits.max_depth:
             safe = []
+        else:
+            safe = await self._rank_safe_candidates(state, safe)
+            safe = safe[: self.limits.per_screen_action_limit]
 
         current = state
         for candidate in safe:

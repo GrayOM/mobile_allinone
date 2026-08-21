@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from backend.app.core.status import CapabilityStatus
-from backend.app.schemas import AIAnalysis, FridaScriptCandidate
+from backend.app.schemas import AIAnalysis, FridaScriptCandidate, NavigationRanking
 
 
 @dataclass(slots=True)
@@ -50,6 +50,27 @@ class AIScriptResult:
         return result
 
 
+@dataclass(slots=True)
+class AINavigationRankingResult:
+    status: CapabilityStatus
+    provider: str
+    model: str
+    message: str
+    ranking: NavigationRanking | None = None
+    raw_response: str | None = None
+    quality_score: float | None = None
+    masked: bool = True
+    fallback_reason: str | None = None
+    synthetic: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["status"] = self.status.value
+        if self.ranking:
+            result["ranking"] = self.ranking.model_dump()
+        return result
+
+
 class AIProvider(ABC):
     name: str
     model: str
@@ -68,5 +89,16 @@ class AIProvider(ABC):
             self.name,
             self.model,
             "이 AI Provider는 Frida 스크립트 생성을 지원하지 않습니다.",
+            masked=masked,
+        )
+
+    async def rank_navigation_candidates(
+        self, task: str, context: dict[str, Any], *, masked: bool = True
+    ) -> AINavigationRankingResult:
+        return AINavigationRankingResult(
+            CapabilityStatus.UNSUPPORTED,
+            self.name,
+            self.model,
+            "이 AI Provider는 UI 탐색 후보 순위화를 지원하지 않습니다.",
             masked=masked,
         )

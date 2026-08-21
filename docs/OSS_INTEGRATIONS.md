@@ -110,6 +110,15 @@ in the approval queue. Structural fingerprints bound visits while content hashes
 record dynamic text and state changes separately. Mock Android exposes the same
 graph and policy path with a deterministic synthetic UI.
 
+Optional AI candidate ranking runs only after that local policy has produced the
+current screen's low-risk allowlist. NVIDIA with Claude fallback, or the Mock
+provider, receives bounded labels/resource hints and the selected assessment
+focus; it returns exact candidate IDs with advisory scores. The engine drops
+unknown and duplicate IDs, appends omitted local candidates in deterministic
+order, and rechecks the live UI and local risk immediately before every tap.
+Provider failure preserves the local order. Ranking calls and the effective
+order are audited on the Run but are not vulnerability evidence or verdicts.
+
 Every executed transition records Before screenshot/tree, the fixed action, and
 After screenshot/tree in sequence. `navigation-graph.json` links those evidence
 IDs. Password fields are masked in normalized state; raw local trees remain

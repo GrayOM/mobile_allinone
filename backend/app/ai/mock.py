@@ -3,9 +3,20 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from backend.app.ai.base import AIProvider, AIProviderResult, AIScriptResult
+from backend.app.ai.base import (
+    AINavigationRankingResult,
+    AIProvider,
+    AIProviderResult,
+    AIScriptResult,
+)
 from backend.app.core.status import CapabilityStatus
-from backend.app.schemas import AIAnalysis, AIFindingCandidate, FridaScriptCandidate
+from backend.app.schemas import (
+    AIAnalysis,
+    AIFindingCandidate,
+    FridaScriptCandidate,
+    NavigationCandidateRanking,
+    NavigationRanking,
+)
 
 
 class MockAIProvider(AIProvider):
@@ -118,6 +129,63 @@ class MockAIProvider(AIProvider):
             candidate=candidate,
             raw_response=candidate.model_dump_json(),
             quality_score=candidate.confidence,
+            masked=masked,
+            synthetic=True,
+        )
+
+    async def rank_navigation_candidates(
+        self, task: str, context: dict[str, Any], *, masked: bool = True
+    ) -> AINavigationRankingResult:
+        del task
+        await asyncio.sleep(0.03)
+        candidates = [
+            item
+            for item in context.get("navigation_candidates", [])
+            if isinstance(item, dict) and item.get("candidate_id")
+        ]
+        security_terms = {
+            "계정": 24,
+            "보안": 30,
+            "인증": 30,
+            "인증서": 28,
+            "프로필": 20,
+            "로그인": 30,
+            "session": 30,
+            "security": 30,
+            "account": 24,
+            "profile": 20,
+            "certificate": 28,
+        }
+        rankings: list[NavigationCandidateRanking] = []
+        for index, item in enumerate(candidates):
+            label = f"{item.get('label', '')} {item.get('resource_hint', '')}".casefold()
+            bonus = max(
+                (points for term, points in security_terms.items() if term in label),
+                default=0,
+            )
+            score = min(100, 50 + bonus - index)
+            rankings.append(
+                NavigationCandidateRanking(
+                    candidate_id=str(item["candidate_id"]),
+                    priority_score=score,
+                    confidence=0.84 if bonus else 0.68,
+                    rationale=(
+                        "보안·인증 관련 화면에서 취약 증적 신호를 관찰할 가능성이 높습니다."
+                        if bonus
+                        else "안전 후보 중 화면 커버리지 확대 가능성을 기준으로 정렬했습니다."
+                    ),
+                )
+            )
+        rankings.sort(key=lambda item: (-item.priority_score, item.candidate_id))
+        ranking = NavigationRanking(rankings=rankings)
+        return AINavigationRankingResult(
+            CapabilityStatus.AVAILABLE,
+            self.name,
+            self.model,
+            "Mock AI가 로컬 안전 후보의 탐색 순서를 제안했습니다.",
+            ranking=ranking,
+            raw_response=ranking.model_dump_json(),
+            quality_score=ranking.confidence,
             masked=masked,
             synthetic=True,
         )

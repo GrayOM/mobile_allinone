@@ -571,6 +571,180 @@ class DiagnosticOrchestrator:
             await self._emit_evidence(run.id, graph)
             return result, graph
 
+        project = db.get(Project, run.project_id)
+        ranking_enabled = bool(
+            run.options.get("ai_rank_navigation")
+            and project
+            and project.ai_enabled
+        )
+        assessment_focus = [
+            {
+                "control_id": item.mastg_id,
+                "title": item.title,
+                "categories": item.finding_categories,
+            }
+            for item in db.scalars(
+                select(ControlTest)
+                .where(
+                    ControlTest.run_id == run.id,
+                    ControlTest.standard
+                    == str(run.options.get("assessment_profile") or ""),
+                )
+                .order_by(ControlTest.mastg_id)
+                .limit(40)
+            ).all()
+        ]
+
+        async def rank_candidates(state, candidates):
+            local_order = [item.element_id for item in candidates]
+            if not ranking_enabled or not project:
+                return local_order
+            context = {
+                "platform": "android",
+                "assessment_profile": run.options.get("assessment_profile"),
+                "screen": {
+                    "state_fingerprint": state.fingerprint,
+                    "activity": state.activity,
+                    "visible_text": state.visible_text[:24],
+                },
+                "assessment_focus": assessment_focus,
+                "navigation_candidates": [
+                    {
+                        "candidate_id": item.element_id,
+                        "action_type": item.action_type,
+                        "label": item.label[:160],
+                        "risk": item.risk,
+                        "resource_hint": (
+                            state.element(item.element_id).resource_id.rsplit("/", 1)[-1][
+                                :120
+                            ]
+                            if state.element(item.element_id)
+                            else ""
+                        ),
+                        "rationale": item.rationale[:400],
+                    }
+                    for item in candidates
+                ],
+                "decision_boundary": (
+                    "로컬 정책이 low로 허용한 현재 화면 후보의 순서만 제안합니다. "
+                    "새 동작·위험도 변경·클릭·승인·취약 판정은 금지됩니다."
+                ),
+                "simulate_nvidia_failure": bool(
+                    run.options.get("simulate_nvidia_failure")
+                ),
+            }
+            db.commit()
+            if run.run_mode == RunMode.MOCK.value:
+                selected = await self.mock_ai.rank_navigation_candidates(
+                    "취약 증적 수집 기대도에 따른 안전 UI 탐색 후보 순위화",
+                    context,
+                    masked=True,
+                )
+                attempts = [selected]
+            elif project.external_ai_allowed:
+                selected, attempts = await self.ai_chain.rank_navigation_candidates(
+                    "취약 증적 수집 기대도에 따른 안전 UI 탐색 후보 순위화",
+                    context,
+                    masked=self.settings.mask_external_ai_data,
+                )
+            else:
+                return local_order
+
+            for attempt in attempts:
+                raw_path = save_ai_raw_response(
+                    self.settings,
+                    (
+                        f"navigation-ranking-{run.id}-{state.fingerprint[:12]}-"
+                        f"{attempt.provider}.json"
+                    ),
+                    attempt.raw_response,
+                )
+                db.add(
+                    AIInvocation(
+                        project_id=project.id,
+                        run_id=run.id,
+                        provider=attempt.provider,
+                        model=attempt.model,
+                        task="navigation_candidate_ranking",
+                        status=attempt.status.value,
+                        masked=attempt.masked,
+                        quality_score=attempt.quality_score,
+                        raw_response_path=str(raw_path) if raw_path else None,
+                        error=(
+                            attempt.message
+                            if attempt.status != CapabilityStatus.AVAILABLE
+                            else None
+                        ),
+                        synthetic=run.synthetic,
+                    )
+                )
+
+            allowed = {item.element_id: item for item in candidates}
+            seen: set[str] = set()
+            recommendations: list[dict[str, Any]] = []
+            raw_rankings = (
+                selected.ranking.rankings
+                if selected.status == CapabilityStatus.AVAILABLE
+                and selected.ranking
+                else []
+            )
+            for item in sorted(
+                raw_rankings,
+                key=lambda value: (-value.priority_score, value.candidate_id),
+            ):
+                if item.candidate_id not in allowed or item.candidate_id in seen:
+                    continue
+                candidate = allowed[item.candidate_id]
+                recommendations.append(
+                    {
+                        "candidate_id": item.candidate_id,
+                        "label": candidate.label,
+                        "priority_score": item.priority_score,
+                        "confidence": item.confidence,
+                        "rationale": item.rationale,
+                    }
+                )
+                seen.add(item.candidate_id)
+            effective_order = [item["candidate_id"] for item in recommendations]
+            effective_order.extend(
+                candidate_id
+                for candidate_id in local_order
+                if candidate_id not in seen
+            )
+            record = {
+                "state_fingerprint": state.fingerprint,
+                "activity": state.activity,
+                "provider": selected.provider,
+                "model": selected.model,
+                "status": selected.status.value,
+                "message": selected.message,
+                "recommendations": recommendations,
+                "effective_order": effective_order,
+                "local_candidate_count": len(local_order),
+                "ignored_ai_candidate_count": max(
+                    0, len(raw_rankings) - len(recommendations)
+                ),
+                "decision_policy": "advisory_order_local_safety_authoritative",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "synthetic": run.synthetic,
+            }
+            options = dict(run.options)
+            navigation = dict(options.get("navigation") or {})
+            history = [
+                item
+                for item in navigation.get("ai_rankings", [])
+                if isinstance(item, dict)
+                and item.get("state_fingerprint") != state.fingerprint
+            ]
+            history.append(record)
+            navigation["ai_rankings"] = history[-50:]
+            navigation["ai_ranking_policy"] = record["decision_policy"]
+            options["navigation"] = navigation
+            run.options = options
+            db.commit()
+            await self.events.publish(run.id, "navigation_ranking", record)
+            return effective_order
+
         async def before_action(sequence, state, candidate):
             evidence_ids: list[str] = []
             screen_path = self.evidence.run_dir(run.id) / (
@@ -722,6 +896,7 @@ class DiagnosticOrchestrator:
                 before_action=before_action,
                 after_action=after_action,
                 on_update=navigation_update,
+                rank_candidates=rank_candidates if ranking_enabled else None,
             ),
             synthetic=run.synthetic,
         )
@@ -2027,6 +2202,11 @@ class DiagnosticOrchestrator:
                         if isinstance(previous_navigation, dict)
                         else []
                     )
+                    ai_rankings = (
+                        list(previous_navigation.get("ai_rankings") or [])
+                        if isinstance(previous_navigation, dict)
+                        else []
+                    )
                     approved_ids = {
                         str(item.get("id") or "")
                         for item in approved_actions
@@ -2038,6 +2218,12 @@ class DiagnosticOrchestrator:
                         if str(item.get("id") or "") not in approved_ids
                     ]
                     navigation_summary["approved_actions"] = approved_actions
+                    navigation_summary["ai_rankings"] = ai_rankings
+                    navigation_summary["ai_ranking_policy"] = (
+                        "advisory_order_local_safety_authoritative"
+                        if run.options.get("ai_rank_navigation")
+                        else "local_deterministic_order"
+                    )
                     options = dict(run.options)
                     options["navigation"] = navigation_summary
                     options["pending_navigation_actions"] = (

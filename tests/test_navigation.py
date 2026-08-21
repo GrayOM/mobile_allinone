@@ -10,6 +10,7 @@ from backend.app.devices.base import DeviceOperation
 from backend.app.navigation import (
     MockAndroidUIDriver,
     NavigationEngine,
+    NavigationHooks,
     NavigationLimits,
     UIState,
 )
@@ -155,6 +156,35 @@ async def test_dangerous_ui_actions_enter_approval_queue_and_are_never_executed(
     assert {"송금", "로그아웃"}.issubset(pending_labels)
     assert not ({"송금", "로그아웃"} & executed_labels)
     assert all(item.synthetic for item in result.actions)
+
+
+@pytest.mark.asyncio
+async def test_ai_ranking_can_only_reorder_locally_safe_candidates():
+    received = []
+
+    async def rank_candidates(state, candidates):
+        del state
+        received.extend(candidates)
+        help_candidate = next(item for item in candidates if item.label == "도움말 목록")
+        return ["not-a-current-candidate", help_candidate.element_id]
+
+    result = await NavigationEngine(
+        MockAndroidUIDriver(package_name="com.example.demo"),
+        target_package="com.example.demo",
+        limits=NavigationLimits(
+            max_states=3,
+            max_depth=2,
+            max_actions=1,
+            per_screen_action_limit=1,
+        ),
+        hooks=NavigationHooks(rank_candidates=rank_candidates),
+        synthetic=True,
+    ).run()
+
+    assert received
+    assert all(item.risk == "low" and not item.requires_approval for item in received)
+    assert result.actions[0].label == "도움말 목록"
+    assert any(item["label"] == "송금" for item in result.pending_approval)
 
 
 class RepeatingDriver(MockAndroidUIDriver):
@@ -384,3 +414,53 @@ def test_mock_navigation_persists_ordered_before_after_evidence(client):
     action = navigation["actions"][0]
     assert action["evidence_ids"] == [item["id"] for item in transition]
     assert navigation["graph_evidence_id"] == graph["id"]
+
+
+def test_mock_ai_navigation_ranking_is_audited_and_applied(client):
+    from sqlalchemy import select
+
+    from backend.app.database.models import AIInvocation
+    from backend.app.database.session import SessionLocal
+
+    demo = client.post("/api/demo/bootstrap").json()
+    started = client.post(
+        "/api/runs",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "device_id": "mock-android-01",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+            "options": {
+                "auto_navigation": True,
+                "ai_rank_navigation": True,
+                "navigation_limits": {
+                    "max_states": 2,
+                    "max_depth": 1,
+                    "max_actions": 1,
+                    "per_screen_action_limit": 1,
+                    "action_timeout": 2,
+                    "total_navigation_minutes": 0.2,
+                },
+            },
+        },
+    )
+    assert started.status_code == 201
+    run = _wait_for_terminal(client, started.json()["id"])
+    assert run["status"] == "completed"
+    navigation = run["options"]["navigation"]
+    ranking = navigation["ai_rankings"][0]
+    assert ranking["status"] == "available"
+    assert ranking["synthetic"] is True
+    assert ranking["decision_policy"] == "advisory_order_local_safety_authoritative"
+    assert ranking["effective_order"][0] == navigation["actions"][0]["element_id"]
+    assert ranking["ignored_ai_candidate_count"] == 0
+    with SessionLocal() as db:
+        invocations = db.scalars(
+            select(AIInvocation).where(
+                AIInvocation.run_id == run["id"],
+                AIInvocation.task == "navigation_candidate_ranking",
+            )
+        ).all()
+    assert invocations
+    assert all(item.synthetic for item in invocations)

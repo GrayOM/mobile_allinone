@@ -233,6 +233,24 @@ class AIAnalysis(BaseModel):
         return max((item.confidence for item in self.findings), default=0.0)
 
 
+class NavigationCandidateRanking(BaseModel):
+    candidate_id: str = Field(min_length=1, max_length=100)
+    priority_score: int = Field(ge=0, le=100)
+    confidence: float = Field(ge=0, le=1)
+    rationale: str = Field(min_length=1, max_length=500)
+
+
+class NavigationRanking(BaseModel):
+    rankings: list[NavigationCandidateRanking] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+
+    @property
+    def confidence(self) -> float:
+        return max((item.confidence for item in self.rankings), default=0.0)
+
+
 class FridaScriptCandidate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     platform: str = Field(pattern="^(android|ios)$")

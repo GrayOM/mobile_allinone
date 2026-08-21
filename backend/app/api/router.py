@@ -2619,6 +2619,19 @@ async def create_run(
         raise HTTPException(422, "auto_navigation은 boolean이어야 합니다.")
     if auto_navigation and app_platform != "android":
         raise HTTPException(422, "자동 UI 탐색은 현재 Android에서만 지원합니다.")
+    ai_rank_navigation = options.get("ai_rank_navigation", False)
+    if not isinstance(ai_rank_navigation, bool):
+        raise HTTPException(422, "AI UI 탐색 순위화는 boolean이어야 합니다.")
+    if ai_rank_navigation and not auto_navigation:
+        raise HTTPException(422, "AI UI 탐색 순위화에는 저위험 UI 자동 탐색이 필요합니다.")
+    if ai_rank_navigation and not project.ai_enabled:
+        raise HTTPException(409, "이 프로젝트는 AI 진단 보조가 비활성화되어 있습니다.")
+    if (
+        ai_rank_navigation
+        and run_mode == RunMode.LIVE
+        and not project.external_ai_allowed
+    ):
+        raise HTTPException(409, "Live AI UI 순위화에는 외부 AI 전송 승인이 필요합니다.")
     dynamic_storage = options.get(
         "dynamic_storage",
         run_mode == RunMode.MOCK and app_platform == "android",
@@ -2648,6 +2661,7 @@ async def create_run(
             "pause_for_login": payload.pause_for_login,
             "frida_mode": frida_mode,
             "auto_navigation": auto_navigation,
+            "ai_rank_navigation": ai_rank_navigation,
             "dynamic_storage": dynamic_storage,
             "pause_for_approval_candidates": pause_for_approval_candidates,
             "pause_for_security_bypass": pause_for_security_bypass,

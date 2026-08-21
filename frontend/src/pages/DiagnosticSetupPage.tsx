@@ -179,6 +179,7 @@ export default function DiagnosticSetupPage() {
           frida_mode: data.get("frida_mode"),
           runtime_tool: data.get("runtime_tool"),
           auto_navigation: data.get("auto_navigation") === "on",
+          ai_rank_navigation: data.get("ai_rank_navigation") === "on",
           dynamic_storage: data.get("dynamic_storage") === "on",
           pause_for_approval_candidates:
             data.get("pause_for_approval_candidates") === "on",
@@ -427,6 +428,16 @@ export default function DiagnosticSetupPage() {
                     <input type="checkbox" name="auto_navigation" defaultChecked />
                     <span />
                     <div><strong>저위험 UI 자동 탐색</strong><small>UIAutomator Tree에 실제 존재하는 요소만 실행하며 결제·송금·삭제 등은 승인 대기로 분리합니다.</small></div>
+                  </label>
+                  <label className="toggle-line">
+                    <input
+                      type="checkbox"
+                      name="ai_rank_navigation"
+                      defaultChecked={project?.run_mode === "mock" && project.ai_enabled}
+                      disabled={!project?.ai_enabled || (project.run_mode === "live" && !project.external_ai_allowed)}
+                    />
+                    <span />
+                    <div><strong>AI 안전 후보 순서 추천</strong><small>로컬 정책이 허용한 low 후보만 증적 수집 기대도로 정렬합니다. 새 동작·클릭·취약 판정은 AI가 수행하지 않습니다.</small></div>
                   </label>
                   <label className="toggle-line">
                     <input type="checkbox" name="dynamic_storage" defaultChecked />

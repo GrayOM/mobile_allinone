@@ -184,6 +184,7 @@ tests/               단위·API·Mock E2E 테스트
 - Mock Provider로 외부 전송 없는 승인 흐름을 시험할 수 있다.
 - AI 취약점 분석에는 선택한 국내 프로필의 정확한 ID·판정 조건을 제공한다. AI 추천 ID는 현재 프로필과 대조해 `needs_review`로만 연결하며 필수 재현 증적 없이 `confirmed`로 만들지 않는다.
 - 안전 일시정지 또는 종료된 Run의 AI 증적 우선순위는 확정·양호·해당없음 항목을 제외한다. AI 추천 항목·증적 ID를 현재 Run과 프로필에 다시 고정하고 로컬 정책으로 필수 증적 유형과 수동 첨부 귀속을 검사한다. 결과는 임시 화면 선택 후보이며 ControlTest 판정·증적 연결·DOCX를 자동 변경하지 않는다.
+- 선택형 AI UI 탐색 순위화는 로컬 위험 정책이 현재 화면에서 허용한 `low` 후보만 입력으로 사용한다. NVIDIA→Claude 또는 Mock 응답은 정확한 현재 element ID로 재검증하며, 미지·중복 ID는 버리고 누락 후보는 로컬 순서로 보완한다. AI는 새 동작·좌표·위험도·승인·취약 판정을 만들지 못하고 실행 직전 Tree·정책 재검증은 그대로 유지된다. 호출·추천·실제 적용 순서는 Run과 `ai_invocations`에 기록하며 실패 시 로컬 결정론적 순서를 사용한다.
 - 보안솔루션 우회 AI는 `security_bypass_preparation`에서 안전 일시정지된 Run의 제한된 정적 보안통제 신호·로그·증적만 사용한다. Live는 활성 승인 범위가 필요하고 결과는 플랫폼별 우회 범주·`high`·`pending_approval`로 서버가 강제하며 호출 이력을 Run에 묶는다.
 - Frida 실패 시 옵션이 켜져 있으면 관련 코드·로그·기존 스크립트만 AI에 전달해 수정 후보를 만든다.
 - 생성 후보는 저장만 하고 절대 자동 실행하지 않는다.
@@ -416,7 +417,7 @@ MSW_ENABLE_API_DOCS=false
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          108 passed
+pytest -q                          111 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -439,6 +440,7 @@ npm audit --audit-level=high      0 vulnerabilities
 - 종료된 Mock Run의 항목별 취약 판정 데스크에서 필수 증적 충족, 같은 Run 원본 선택, 양호 전환 시 증적·DOCX 제외를 확인했다. 1440×1000·390×844 headless Firefox에서 가로 넘침과 콘솔 오류·경고가 0건이었다.
 - 루팅·탈옥 자동 판정은 Run의 모든 화면을 연결하지 않고 privileged 단말 상태, 대상 앱 실행 프로세스, 대표 앱 화면의 3개 증적만 연결한다. Docker Mock Run과 회귀 테스트에서 유형·건수를 확인했다.
 - AI 증적 우선순위는 확정 항목을 제외하고 같은 Run의 증적 ID·필수 유형·수동 첨부 귀속을 재검증하며 ControlTest 판정을 변경하지 않는 회귀 테스트를 확인했다. Docker Mock Run에서 26개 미판정 중 AI 매핑 1개·필수 증적 준비 9개를 산출했고, 추천 증적 검토 화면과 `SYNTHETIC MOCK` 표식을 확인했다. 1440×1000·390×844 headless Firefox에서 가로 넘침과 콘솔 오류·경고는 0건이었다.
+- AI UI 탐색 순위화는 로컬 `low` 후보만 Provider에 전달하고 미지 ID를 무시하며 NVIDIA→Claude fallback과 Mock 적용 순서를 회귀 테스트로 확인했다. Docker Mock Run에서 추천 1순위와 실제 첫 안전 동작이 일치했고 `advisory_order_local_safety_authoritative` 정책·AIInvocation을 보존했다. 실시간 순위 rail과 설정 옵션을 1440×1000·390×844 headless Firefox에서 확인했으며 가로 넘침과 콘솔 오류·경고는 0건이었다.
 
 - Androguard 4.1.4와 공식 테스트 APK로 바이너리 Manifest 해석 성공
 - 패키지명 `tests.androguard`, 상태 `available`, 원문 SHA-256 생성 확인
@@ -489,7 +491,6 @@ npm audit --audit-level=high
 - 실 Android Clipboard의 대상 앱 귀속 검증과 FLAG_SECURE/background snapshot 검증
 - high·blocked UI 동작의 자동 실행(의도적으로 `manual_required`)과 Live 상태 변경 API 재전송(의도적으로 금지)
 - Live API 테스트 계정의 실제 귀속 검증(현재는 비밀번호 없는 계정 참조와 허용 서버 범위만 구조화)
-- NVIDIA/Claude UI 탐색 Candidate ranking(국내 판정 증적 선택 연동은 구현됐으며 자동 탐색 순위는 로컬 결정론적 정책)
 - 프로젝트별 retention 설정과 Raw 데이터 열람 전용 UI
 - 장시간 Logcat·화면 녹화 스트리밍 제어 UI
 - 조직용 인증·역할·감사 로그
@@ -515,12 +516,11 @@ npm audit --audit-level=high
 
 사용자가 별도 우선순위를 주지 않으면 다음 순서가 합리적이다.
 
-1. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
-2. NVIDIA/Claude UI 탐색 후보 순위와 로컬 위험 정책 실행기의 연동
-3. 프로젝트 retention·Raw 열람 UX와 저장 데이터 보호 확장
-4. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
-5. Burp/Fiddler 세션 연동과 장시간 수집의 취소·재연결 제어
-6. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
+1. 프로젝트 retention·Raw 열람 UX와 저장 데이터 보호 확장
+2. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
+3. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
+4. Burp/Fiddler 세션 연동과 장시간 수집의 취소·재연결 제어
+5. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
 
 ## 13. 참고 문서
 

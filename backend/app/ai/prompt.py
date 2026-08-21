@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.app.schemas import AIAnalysis, FridaScriptCandidate
+from backend.app.schemas import AIAnalysis, FridaScriptCandidate, NavigationRanking
 
 
 SYSTEM_PROMPT = """당신은 승인된 모바일 애플리케이션 보안 진단을 보조하는 분석기입니다.
@@ -37,5 +37,23 @@ def build_script_prompt(task: str, context_text: str) -> str:
         f"작업: {task}\n\n"
         f"입력 증적:\n{context_text}\n\n"
         "후보 스크립트에는 대상 클래스/함수가 존재하지 않을 때 조용히 건너뛰는 예외 처리를 넣으세요.\n"
+        f"반드시 다음 JSON Schema에 맞는 JSON 객체만 반환하세요:\n{schema}"
+    )
+
+
+NAVIGATION_RANKING_SYSTEM_PROMPT = """당신은 승인된 모바일 앱 취약점 진단의 안전 UI 탐색 순서를 보조합니다.
+입력 navigation_candidates에 있는 정확한 candidate_id만 사용할 수 있습니다.
+인증·세션·보안 설정·로컬 저장소·네트워크 동작을 관찰할 가능성이 높은 화면 이동을 우선하세요.
+위험도 변경, 새 동작 생성, 클릭 승인, 취약점 판정은 수행하지 마세요.
+priority_score는 증적 수집 기대 순서를 나타낼 뿐 안전성이나 취약 여부를 뜻하지 않습니다.
+응답은 지정된 JSON Schema만 따르며 Markdown을 출력하지 마세요."""
+
+
+def build_navigation_ranking_prompt(task: str, context_text: str) -> str:
+    schema = NavigationRanking.model_json_schema()
+    return (
+        f"작업: {task}\n\n"
+        f"입력 화면 후보:\n{context_text}\n\n"
+        "입력에 없는 candidate_id는 절대 만들지 마세요. 모든 후보를 한 번씩만 반환하세요.\n"
         f"반드시 다음 JSON Schema에 맞는 JSON 객체만 반환하세요:\n{schema}"
     )

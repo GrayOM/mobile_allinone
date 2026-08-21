@@ -3026,7 +3026,7 @@ a:hover {
 
 .navigation-ledger {
   display: grid;
-  grid-template-columns: 0.9fr 1.55fr repeat(2, 0.75fr);
+  grid-template-columns: 0.9fr 1.45fr repeat(3, 0.72fr);
   color: #d7e6e4;
   background: #132f37;
   border-bottom: 1px solid #2d4c53;
@@ -3071,6 +3071,96 @@ a:hover {
 
 .navigation-ledger .health-warn strong {
   color: #ff9a6c;
+}
+
+.navigation-ledger .health-ok strong {
+  color: #78d4c7;
+}
+
+.navigation-ranking-rail {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.42fr) minmax(0, 1.58fr);
+  min-width: 0;
+  background: #f3f0e8;
+  border-bottom: 1px solid var(--line-strong);
+  box-shadow: inset 4px 0 0 var(--signal);
+}
+
+.navigation-ranking-rail__head {
+  min-width: 0;
+  padding: 10px 14px 10px 17px;
+  border-right: 1px solid var(--line);
+}
+
+.navigation-ranking-rail__head span,
+.navigation-ranking-rail__head small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navigation-ranking-rail__head span {
+  color: var(--signal-dark);
+  font: 700 8px "Cascadia Mono", monospace;
+  letter-spacing: 0.06em;
+}
+
+.navigation-ranking-rail__head small {
+  margin-top: 5px;
+  color: var(--slate-500);
+  font: 7px "Cascadia Mono", monospace;
+}
+
+.navigation-ranking-rail__route {
+  display: flex;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 7px 10px;
+}
+
+.navigation-ranking-rail__route > div {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(80px, 1fr) auto;
+  align-items: center;
+  flex: 1 0 150px;
+  min-width: 150px;
+  gap: 6px;
+  padding: 7px 10px;
+  border-right: 1px solid var(--line);
+}
+
+.navigation-ranking-rail__route > div:last-child {
+  border-right: 0;
+}
+
+.navigation-ranking-rail__route span,
+.navigation-ranking-rail__route small {
+  color: var(--slate-500);
+  font: 7px "Cascadia Mono", monospace;
+  white-space: nowrap;
+}
+
+.navigation-ranking-rail__route span {
+  color: var(--signal-dark);
+  font-weight: 700;
+}
+
+.navigation-ranking-rail__route strong {
+  overflow: hidden;
+  color: var(--ink-800);
+  font: 700 8px "Cascadia Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navigation-ranking-rail__route p {
+  align-self: center;
+  margin: 0;
+  padding: 0 8px;
+  color: var(--slate-500);
+  font: 8px "Cascadia Mono", monospace;
 }
 
 .navigation-body {
@@ -5986,6 +6076,15 @@ a:hover {
 
   .navigation-ledger {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .navigation-ranking-rail {
+    grid-template-columns: 1fr;
+  }
+
+  .navigation-ranking-rail__head {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
   }
 
   .storage-ledger {

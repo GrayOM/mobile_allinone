@@ -6,17 +6,24 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from backend.app.ai.base import AIProvider, AIProviderResult, AIScriptResult
+from backend.app.ai.base import (
+    AINavigationRankingResult,
+    AIProvider,
+    AIProviderResult,
+    AIScriptResult,
+)
 from backend.app.ai.masking import mask_context
 from backend.app.ai.prompt import (
     SCRIPT_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
+    NAVIGATION_RANKING_SYSTEM_PROMPT,
+    build_navigation_ranking_prompt,
     build_prompt,
     build_script_prompt,
 )
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus
-from backend.app.schemas import AIAnalysis, FridaScriptCandidate
+from backend.app.schemas import AIAnalysis, FridaScriptCandidate, NavigationRanking
 
 
 class ClaudeAIProvider(AIProvider):
@@ -103,6 +110,89 @@ class ClaudeAIProvider(AIProvider):
                 f"Claude JSON Schema 검증 실패: {exc}",
                 raw_response=locals().get("raw"),
                 fallback_reason="schema_validation_failed",
+                masked=masked,
+            )
+
+    async def rank_navigation_candidates(
+        self, task: str, context: dict[str, Any], *, masked: bool = True
+    ) -> AINavigationRankingResult:
+        if not self.settings.claude_api_key:
+            return AINavigationRankingResult(
+                CapabilityStatus.NOT_CONFIGURED,
+                self.name,
+                self.model,
+                "ANTHROPIC_API_KEY가 설정되지 않았습니다.",
+                fallback_reason="missing_api_key",
+                masked=masked,
+            )
+        context_text, _ = (
+            mask_context(context, self.settings.ai_sensitive_keys)
+            if masked
+            else (json.dumps(context, ensure_ascii=False, default=str), [])
+        )
+        payload = {
+            "model": self.model,
+            "max_tokens": 1400,
+            "temperature": 0.05,
+            "system": NAVIGATION_RANKING_SYSTEM_PROMPT,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": build_navigation_ranking_prompt(task, context_text),
+                }
+            ],
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": NavigationRanking.model_json_schema(),
+                }
+            },
+        }
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    f"{self.settings.claude_base_url.rstrip('/')}/messages",
+                    headers={
+                        "x-api-key": self.settings.claude_api_key,
+                        "anthropic-version": "2023-06-01",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+                body = response.json()
+            raw = next(
+                block["text"] for block in body["content"] if block.get("type") == "text"
+            )
+            ranking = NavigationRanking.model_validate_json(raw)
+            return AINavigationRankingResult(
+                CapabilityStatus.AVAILABLE,
+                self.name,
+                self.model,
+                "Claude AI가 안전 UI 탐색 후보 순위를 제안했습니다.",
+                ranking=ranking,
+                raw_response=raw,
+                quality_score=ranking.confidence,
+                masked=masked,
+            )
+        except ValidationError as exc:
+            return AINavigationRankingResult(
+                CapabilityStatus.FAILED,
+                self.name,
+                self.model,
+                f"Claude UI 순위 JSON Schema 검증 실패: {exc}",
+                raw_response=locals().get("raw"),
+                fallback_reason="schema_validation_failed",
+                masked=masked,
+            )
+        except (httpx.HTTPError, KeyError, StopIteration, TypeError, json.JSONDecodeError) as exc:
+            return AINavigationRankingResult(
+                CapabilityStatus.FAILED,
+                self.name,
+                self.model,
+                f"Claude UI 순위 응답 처리 실패: {type(exc).__name__}: {exc}",
+                raw_response=locals().get("raw"),
+                fallback_reason=type(exc).__name__,
                 masked=masked,
             )
 

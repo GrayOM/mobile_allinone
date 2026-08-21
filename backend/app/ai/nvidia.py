@@ -6,17 +6,24 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from backend.app.ai.base import AIProvider, AIProviderResult, AIScriptResult
+from backend.app.ai.base import (
+    AINavigationRankingResult,
+    AIProvider,
+    AIProviderResult,
+    AIScriptResult,
+)
 from backend.app.ai.masking import mask_context
 from backend.app.ai.prompt import (
     SCRIPT_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
+    NAVIGATION_RANKING_SYSTEM_PROMPT,
+    build_navigation_ranking_prompt,
     build_prompt,
     build_script_prompt,
 )
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus
-from backend.app.schemas import AIAnalysis, FridaScriptCandidate
+from backend.app.schemas import AIAnalysis, FridaScriptCandidate, NavigationRanking
 
 
 class NvidiaAIProvider(AIProvider):
@@ -113,6 +120,90 @@ class NvidiaAIProvider(AIProvider):
         if cleaned.startswith("```"):
             cleaned = re_fence(cleaned)
         return AIAnalysis.model_validate_json(cleaned)
+
+    async def rank_navigation_candidates(
+        self, task: str, context: dict[str, Any], *, masked: bool = True
+    ) -> AINavigationRankingResult:
+        if context.get("simulate_nvidia_failure"):
+            return AINavigationRankingResult(
+                CapabilityStatus.FAILED,
+                self.name,
+                self.model,
+                "요청된 NVIDIA 장애 모의가 활성화되었습니다.",
+                fallback_reason="simulated_failure",
+                masked=masked,
+            )
+        if not self.settings.nvidia_api_key:
+            return AINavigationRankingResult(
+                CapabilityStatus.NOT_CONFIGURED,
+                self.name,
+                self.model,
+                "NVIDIA_API_KEY가 설정되지 않았습니다.",
+                fallback_reason="missing_api_key",
+                masked=masked,
+            )
+        context_text, _ = (
+            mask_context(context, self.settings.ai_sensitive_keys)
+            if masked
+            else (json.dumps(context, ensure_ascii=False, default=str), [])
+        )
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": NAVIGATION_RANKING_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": build_navigation_ranking_prompt(task, context_text),
+                },
+            ],
+            "temperature": 0.05,
+            "max_tokens": 1400,
+            "stream": False,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    f"{self.settings.nvidia_base_url.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.settings.nvidia_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+                body = response.json()
+            raw = body["choices"][0]["message"]["content"]
+            ranking = NavigationRanking.model_validate_json(re_fence(raw.strip()))
+            return AINavigationRankingResult(
+                CapabilityStatus.AVAILABLE,
+                self.name,
+                self.model,
+                "NVIDIA AI가 안전 UI 탐색 후보 순위를 제안했습니다.",
+                ranking=ranking,
+                raw_response=raw,
+                quality_score=ranking.confidence,
+                masked=masked,
+            )
+        except ValidationError as exc:
+            return AINavigationRankingResult(
+                CapabilityStatus.FAILED,
+                self.name,
+                self.model,
+                f"NVIDIA UI 순위 JSON Schema 검증 실패: {exc}",
+                raw_response=locals().get("raw"),
+                fallback_reason="schema_validation_failed",
+                masked=masked,
+            )
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            return AINavigationRankingResult(
+                CapabilityStatus.FAILED,
+                self.name,
+                self.model,
+                f"NVIDIA UI 순위 응답 처리 실패: {type(exc).__name__}: {exc}",
+                raw_response=locals().get("raw"),
+                fallback_reason=type(exc).__name__,
+                masked=masked,
+            )
 
     async def generate_frida_script(
         self, task: str, context: dict[str, Any], *, masked: bool = True

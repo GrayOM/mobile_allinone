@@ -475,6 +475,30 @@ export interface PendingNavigationAction {
   executed_at?: string;
 }
 
+export interface NavigationAIRankingRecommendation {
+  candidate_id: string;
+  label: string;
+  priority_score: number;
+  confidence: number;
+  rationale: string;
+}
+
+export interface NavigationAIRanking {
+  state_fingerprint: string;
+  activity: string;
+  provider: string;
+  model: string;
+  status: CapabilityStatus;
+  message: string;
+  recommendations: NavigationAIRankingRecommendation[];
+  effective_order: string[];
+  local_candidate_count: number;
+  ignored_ai_candidate_count: number;
+  decision_policy: "advisory_order_local_safety_authoritative";
+  generated_at: string;
+  synthetic: boolean;
+}
+
 export interface NavigationSummary {
   status: CapabilityStatus;
   message: string;
@@ -483,6 +507,8 @@ export interface NavigationSummary {
   actions: NavigationActionSummary[];
   pending_approval: PendingNavigationAction[];
   approved_actions?: PendingNavigationAction[];
+  ai_rankings?: NavigationAIRanking[];
+  ai_ranking_policy?: string;
   state_count: number;
   action_count: number;
   graph_evidence_id?: string;

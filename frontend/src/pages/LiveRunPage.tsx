@@ -300,6 +300,9 @@ export default function LiveRunPage() {
   const currentNavigationState = navigation
     ? resolveCurrentNavigationState(navigation)
     : null;
+  const latestNavigationRanking = navigation?.ai_rankings?.length
+    ? navigation.ai_rankings[navigation.ai_rankings.length - 1]
+    : null;
   const storage = readStorage(run.options.storage);
   const networkTesting = readNetworkTesting(run.options.network_testing);
   const controlValidation = readControlValidation(run.options.control_validation);
@@ -609,7 +612,33 @@ export default function LiveRunPage() {
               <strong>{navigation?.pending_approval.length ?? 0}</strong>
               <small>자동 실행 차단</small>
             </div>
+            <div className={latestNavigationRanking?.status === "available" ? "health-ok" : ""}>
+              <span>AI ORDER</span>
+              <strong>{latestNavigationRanking?.status.toUpperCase() ?? (run.options.ai_rank_navigation ? "WAITING" : "LOCAL")}</strong>
+              <small>{latestNavigationRanking ? `${latestNavigationRanking.provider} · advisory` : "local policy only"}</small>
+            </div>
           </div>
+          {Boolean(latestNavigationRanking || run.options.ai_rank_navigation) && (
+            <div className="navigation-ranking-rail">
+              <div className="navigation-ranking-rail__head">
+                <span>AI SAFE ROUTE · LOCAL POLICY AUTHORITATIVE</span>
+                <small>
+                  {latestNavigationRanking
+                    ? `${latestNavigationRanking.synthetic ? "SYNTHETIC MOCK · " : ""}${latestNavigationRanking.activity || "current screen"}`
+                    : "안전 후보가 수집되면 순서를 제안합니다."}
+                </small>
+              </div>
+              <div className="navigation-ranking-rail__route">
+                {latestNavigationRanking?.recommendations.length ? latestNavigationRanking.recommendations.slice(0, 6).map((item, index) => (
+                  <div key={item.candidate_id} title={item.rationale}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <strong>{item.label}</strong>
+                    <small>{item.priority_score} · {Math.round(item.confidence * 100)}%</small>
+                  </div>
+                )) : <p>AI가 실행 후보를 만들지 않으며 기존 로컬 순서를 유지합니다.</p>}
+              </div>
+            </div>
+          )}
           <div className="navigation-body">
             <div className="navigation-state-strip">
               {navigation?.states.length ? navigation.states.slice(0, 12).map((state, index) => (

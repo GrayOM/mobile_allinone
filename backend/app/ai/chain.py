@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.app.ai.base import AIProviderResult, AIScriptResult
+from backend.app.ai.base import (
+    AINavigationRankingResult,
+    AIProviderResult,
+    AIScriptResult,
+)
 from backend.app.ai.claude import ClaudeAIProvider
 from backend.app.ai.nvidia import NvidiaAIProvider
 from backend.app.core.config import AppSettings, get_settings
@@ -56,6 +60,30 @@ class AIProviderChain:
         ):
             return primary, attempts
         fallback = await self.claude.generate_frida_script(
+            task, context, masked=masked
+        )
+        attempts.append(fallback)
+        if fallback.status == CapabilityStatus.AVAILABLE:
+            fallback.fallback_reason = (
+                primary.fallback_reason
+                or f"primary_quality_below_{self.settings.ai_min_quality}"
+            )
+        return fallback, attempts
+
+    async def rank_navigation_candidates(
+        self, task: str, context: dict[str, Any], *, masked: bool = True
+    ) -> tuple[AINavigationRankingResult, list[AINavigationRankingResult]]:
+        attempts: list[AINavigationRankingResult] = []
+        primary = await self.nvidia.rank_navigation_candidates(
+            task, context, masked=masked
+        )
+        attempts.append(primary)
+        if (
+            primary.status == CapabilityStatus.AVAILABLE
+            and (primary.quality_score or 0) >= self.settings.ai_min_quality
+        ):
+            return primary, attempts
+        fallback = await self.claude.rank_navigation_candidates(
             task, context, masked=masked
         )
         attempts.append(fallback)

@@ -184,7 +184,8 @@ MSW_MASK_EXTERNAL_AI_DATA=true
 14. 보안통제 우회 AI는 `security_bypass_preparation`에서 안전 일시정지된 Run의 제한된 정적 신호·로그만 사용한다. 서버가 결과를 `high`와 `pending_approval`로 강제하고 Run별 호출 이력을 남긴다.
 15. 실제 단말이 없어도 앱 분석 기준선에서 AI 사전 진단을 실행할 수 있다. 결과는 앱 SHA-256과 선택 프로필에 고정하고 모두 `needs_review`로 저장한다.
 16. Run의 AI 증적 우선순위는 확정·양호·해당없음 항목을 제외하고 미판정 항목만 정렬한다. 승인·범위·판정 원장은 AI 입력에서 제외하며, 추천 ID는 서버의 로컬 증적 정책을 통과해야 화면에 표시된다.
-16. 정적 신호로 만든 우회 후보는 대상 앱 ID에 묶는다. 다른 앱의 Run에서는 승인·실행할 수 없고, 실제 성공 여부는 추후 Live 단말 증적으로만 판정한다.
+17. 선택형 AI UI 순위화는 로컬 위험 정책이 `low`로 허용한 현재 화면 후보만 NVIDIA→Claude 또는 Mock Provider에 전달한다. 서버는 응답의 정확한 현재 후보 ID만 받아 순서를 바꾸며, 새 동작·좌표·위험도·승인·취약 판정을 AI가 만들 수 없다. 모든 호출과 유효·무효 추천 수를 Run에 기록하고 Provider 실패 시 로컬 순서를 유지한다.
+18. 정적 신호로 만든 우회 후보는 대상 앱 ID에 묶는다. 다른 앱의 Run에서는 승인·실행할 수 없고, 실제 성공 여부는 추후 Live 단말 증적으로만 판정한다.
 
 NVIDIA 연동은 OpenAI 호환 `POST /v1/chat/completions`, Claude 연동은 Messages `POST /v1/messages`와 JSON Schema `output_config`를 사용한다.
 
