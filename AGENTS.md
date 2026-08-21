@@ -1,6 +1,6 @@
 # Mobile Security Workbench — 세션 인수인계
 
-> 최종 갱신: 2026-08-20
+> 최종 갱신: 2026-08-21
 > 작업 위치: `/mnt/c/Users/PSM/Desktop/project/mobile_allinone`
 > 새 세션에서는 이 파일을 먼저 읽고, 완료된 기능을 처음부터 다시 만들지 않는다.
 
@@ -8,10 +8,10 @@
 
 - 기본 브랜치: `main` (`origin/main` = `b82be7d`)
 - 개발·검증 브랜치: `test/approved-control-validation`
-- 최신 원격 기능 기준점: `c5bdecc` (Run별 취약 판정 작업·필수 증적 선택·양호 무증적 기록)
+- 최신 기능 기준점: `e70d1a5` (AI 증적 우선순위·같은 Run/현재 프로필/필수 증적 재검증)
 - Draft PR: [#1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1), base `main`, head `test/approved-control-validation`
-- `c5bdecc`은 `test/approved-control-validation`과 Draft PR #1에 푸시됐다. 푸시 전 로컬 검증은 backend 107 tests, frontend build/audit, Docker healthy와 데스크톱·모바일 UI가 통과했다.
-- 현재 작업트리에는 Run의 미판정 항목을 AI가 추천하고 같은 Run·현재 프로필·필수 증적 유형으로 재검증하는 **AI 증적 우선순위** API/UI와 관련 문서·테스트가 미커밋 상태로 있다. 추천은 화면 선택 후보일 뿐 판정·증적 영구 연결·DOCX 수록을 자동 수행하지 않는다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
+- `e70d1a5`까지 backend 108 tests, frontend build/audit, Docker health와 1440×1000·390×844 UI 검증이 통과했다.
+- AI 추천은 화면 선택 후보일 뿐 판정·증적 영구 연결·DOCX 수록을 자동 수행하지 않는다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
 
 현재 기능 변경은 프로젝트 생성 시 국내 진단 기준 하나를 고정하고, 해당 항목만 앱·Run 원장에 생성한 뒤 같은 Run의 재현 결과와 필수 원본 증적이 충족될 때만 취약점을 확정하는 흐름이다. 양호·해당없음은 상태만 기록하고 증적을 만들지 않는다. 기존 승인형 Candidate 안전 경계는 유지되며 high·blocked UI와 상태 변경 API는 실행하지 않는다. 루팅·탈옥 탐지 우회는 자동 실행하지 않고 첫 실행 전 안전 일시정지에서 코드 SHA-256과 대상 범위를 고정한 5분 만료 1회 승인으로만 직접 실행한다.
 
