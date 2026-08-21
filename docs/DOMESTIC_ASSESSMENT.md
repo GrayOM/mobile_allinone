@@ -45,6 +45,8 @@
 
 `POST /api/apps/{app-id}/ai/triage`는 앱 정적 결과와 현재 프로필 ID를 AI에 전달해 사전 후보를 만든다. 승인 범위는 제외하고 외부 전송 정책과 마스킹을 적용한다. 결과는 앱 SHA-256에 고정되며 `needs_review` 이외의 판정으로 저장하지 않는다.
 
+`POST /api/runs/{run-id}/ai/evidence-priority`는 안전 일시정지 또는 종료된 Run의 미판정 항목을 검토 순서로 정렬한다. AI에는 승인·범위·기존 판정 원장을 제외한 제한된 증적 카탈로그와 현재 프로필 항목만 전달한다. 응답의 항목 ID와 증적 ID는 서버가 현재 Run에 다시 고정하고, 로컬 정책이 필수 증적 유형과 수동 첨부의 항목 귀속을 검사한다. 확정·양호·해당없음 항목은 추천에서 제외한다. 추천 증적을 판정 화면의 임시 선택 후보로 열 수 있지만, 검토자가 원본 확인·기준 수행 확인·판정 기록을 마치기 전에는 ControlTest나 DOCX에 연결되지 않는다.
+
 루팅·탈옥 항목(`CII-MA-22`, `EFI-MA-07`)의 자동 취약 확정에는 다음 세 가지가 필요하다.
 
 1. 단말의 루팅·탈옥 상태를 보여 주는 `device_state`
@@ -85,6 +87,7 @@ GET  /api/assessment/execution-matrix
 GET  /api/apps/{app-id}/assessment/plan
 POST /api/apps/{app-id}/assessment/plan/refresh
 POST /api/apps/{app-id}/ai/triage
+POST /api/runs/{run-id}/ai/evidence-priority
 POST /api/runs/{run-id}/report/docx
 GET  /api/runs/{run-id}/report/docx
 ```

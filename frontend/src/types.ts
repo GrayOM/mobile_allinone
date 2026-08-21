@@ -271,6 +271,44 @@ export interface AIStaticTriage {
   }>;
 }
 
+export interface AIEvidencePriorityRecommendation {
+  control_test_id: string;
+  control_id: string;
+  title: string;
+  risk: string;
+  current_result: string;
+  priority_score: number;
+  priority_band: "urgent" | "high" | "medium" | "low";
+  ai_confidence: number;
+  ai_mapped: boolean;
+  selection_source: "ai_with_local_policy" | "local_policy";
+  suggested_evidence_ids: string[];
+  suggested_evidence_types: string[];
+  missing_requirements: string[][];
+  requirements_satisfied: boolean;
+  rationale: string;
+  decision_boundary: string;
+}
+
+export interface AIEvidencePriority {
+  version: number;
+  run_id: string;
+  assessment_profile: string;
+  generated_at: string;
+  generated_by: "ai_with_local_policy" | "local_policy_fallback";
+  provider: string;
+  model: string;
+  status: string;
+  message: string;
+  decision_policy: string;
+  synthetic: boolean;
+  terminal_controls_excluded: number;
+  unresolved_controls: number;
+  ai_mapped_controls: number;
+  ready_with_required_evidence: number;
+  recommendations: AIEvidencePriorityRecommendation[];
+}
+
 export type AssessmentPlanLane =
   | "ready_now"
   | "device_required"

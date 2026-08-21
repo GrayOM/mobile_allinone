@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, downloadAuthenticatedFile, post, upload } from "../api";
 import type {
+  AIEvidencePriority,
+  AIEvidencePriorityRecommendation,
   AIStaticTriage,
   AppArtifact,
   AssessmentPlan,
@@ -76,6 +78,8 @@ export default function CoveragePage() {
   const [assessmentUploadBusy, setAssessmentUploadBusy] = useState(false);
   const [assessmentMessage, setAssessmentMessage] = useState("");
   const [assessmentError, setAssessmentError] = useState("");
+  const [evidencePriority, setEvidencePriority] = useState<AIEvidencePriority | null>(null);
+  const [prioritizingEvidence, setPrioritizingEvidence] = useState(false);
 
   const project = useMemo(
     () => projects.find((item) => item.id === projectId),
@@ -91,6 +95,12 @@ export default function CoveragePage() {
   const selectedControl = useMemo(
     () => coverage?.tests.find((item) => item.id === selectedControlId) ?? null,
     [coverage, selectedControlId],
+  );
+  const selectedPriorityRecommendation = useMemo(
+    () => evidencePriority?.recommendations.find(
+      (item) => item.control_test_id === selectedControlId,
+    ) ?? null,
+    [evidencePriority, selectedControlId],
   );
 
   useEffect(() => {
@@ -152,6 +162,15 @@ export default function CoveragePage() {
   useEffect(() => {
     if (selectedControlId && !selectedControl) setSelectedControlId("");
   }, [selectedControl, selectedControlId]);
+
+  useEffect(() => {
+    const stored = selectedRun?.options.ai_evidence_priority;
+    setEvidencePriority(
+      stored && typeof stored === "object"
+        ? stored as unknown as AIEvidencePriority
+        : null,
+    );
+  }, [selectedRun]);
 
   useEffect(() => {
     const selectedApp = apps.find((item) => item.id === appId);
@@ -248,6 +267,25 @@ export default function CoveragePage() {
     }
   }
 
+  async function prioritizeRunEvidence() {
+    if (!runId || !project) return;
+    setPrioritizingEvidence(true);
+    setError("");
+    try {
+      const result = await post<AIEvidencePriority>(`/runs/${runId}/ai/evidence-priority`, {
+        use_mock: project.run_mode === "mock",
+      });
+      setEvidencePriority(result);
+      setRuns((items) => items.map((item) => item.id === runId
+        ? { ...item, options: { ...item.options, ai_evidence_priority: result } }
+        : item));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "AI 증적 우선순위를 계산하지 못했습니다.");
+    } finally {
+      setPrioritizingEvidence(false);
+    }
+  }
+
   function openAssessmentReview(test: ControlTest) {
     const recordedOutcome = ASSESSMENT_OUTCOMES.some((item) => item.value === test.result)
       ? test.result as AssessmentOutcome
@@ -266,6 +304,16 @@ export default function CoveragePage() {
     setAssessmentFile(null);
     setAssessmentMessage("");
     setAssessmentError("");
+  }
+
+  function openPriorityReview(item: AIEvidencePriorityRecommendation) {
+    const control = coverage?.tests.find((test) => test.id === item.control_test_id);
+    if (!control) return;
+    openAssessmentReview(control);
+    setSelectedEvidenceIds(item.suggested_evidence_ids);
+    setAssessmentMessage(
+      "AI 추천 ID를 같은 Run과 필수 유형으로 다시 검증해 선택했습니다. 원본을 직접 확인한 뒤 판정을 기록하세요.",
+    );
   }
 
   async function refreshRunAssessment() {
@@ -461,6 +509,20 @@ export default function CoveragePage() {
             >
               {reporting ? "DOCX 생성 중…" : "취약점만 DOCX"}
             </button>
+            <button
+              className="button button--quiet"
+              onClick={() => void prioritizeRunEvidence()}
+              disabled={
+                prioritizingEvidence
+                || !runId
+                || !selectedRun
+                || !ASSESSMENT_RECORDABLE_STATUSES.has(selectedRun.status)
+                || !project?.ai_enabled
+                || (project.run_mode === "live" && !project.external_ai_allowed)
+              }
+            >
+              {prioritizingEvidence ? "AI 우선순위 계산 중…" : "AI 증적 우선순위"}
+            </button>
           </div>
         </section>
       )}
@@ -474,6 +536,13 @@ export default function CoveragePage() {
         />
       )}
 
+      {domestic && evidencePriority && runId === evidencePriority.run_id && (
+        <EvidencePriorityBoard
+          priority={evidencePriority}
+          onOpenReview={openPriorityReview}
+        />
+      )}
+
       {selectedControl && runId && (
         <AssessmentDecisionDesk
           control={selectedControl}
@@ -483,6 +552,7 @@ export default function CoveragePage() {
           criteriaConfirmed={criteriaConfirmed}
           evidence={runEvidence}
           selectedEvidenceIds={selectedEvidenceIds}
+          priorityRecommendation={selectedPriorityRecommendation}
           file={assessmentFile}
           busy={assessmentBusy}
           uploadBusy={assessmentUploadBusy}
@@ -665,6 +735,69 @@ function AssessmentDispatch({
   );
 }
 
+function EvidencePriorityBoard({
+  priority,
+  onOpenReview,
+}: {
+  priority: AIEvidencePriority;
+  onOpenReview: (item: AIEvidencePriorityRecommendation) => void;
+}) {
+  return (
+    <section className="evidence-priority-board" aria-label="AI 증적 검토 우선순위">
+      <header>
+        <div>
+          <span>AI EVIDENCE PRIORITY / {priority.provider} · {priority.model}</span>
+          <strong>취약 판정 전 검토 순서</strong>
+          <small>AI 추천을 같은 Run·현재 기준·필수 증적 유형으로 다시 제한했습니다. 자동 판정이나 증적 연결은 하지 않습니다.</small>
+        </div>
+        <div className="evidence-priority-board__state">
+          {priority.synthetic && <b>SYNTHETIC MOCK</b>}
+          <StatusChip value={priority.status} />
+        </div>
+      </header>
+      <div className="evidence-priority-board__metrics">
+        <div><span>미판정</span><strong>{priority.unresolved_controls}</strong></div>
+        <div><span>AI 매핑</span><strong>{priority.ai_mapped_controls}</strong></div>
+        <div><span>필수 증적 준비</span><strong>{priority.ready_with_required_evidence}</strong></div>
+        <div><span>확정 항목 제외</span><strong>{priority.terminal_controls_excluded}</strong></div>
+      </div>
+      <div className="evidence-priority-list">
+        {priority.recommendations.slice(0, 10).map((item, index) => (
+          <article key={item.control_test_id}>
+            <div className={`evidence-priority-rank evidence-priority-rank--${item.priority_band}`}>
+              <span>#{String(index + 1).padStart(2, "0")}</span>
+              <strong>{item.priority_score}</strong>
+              <small>{item.priority_band}</small>
+            </div>
+            <div className="evidence-priority-copy">
+              <code>{item.control_id} · {item.selection_source.replaceAll("_", " ")}</code>
+              <strong>{item.title}</strong>
+              <p>{item.rationale}</p>
+              <small>
+                추천 증적 {item.suggested_evidence_types.join(", ") || "없음"}
+                {item.missing_requirements.length > 0
+                  ? ` · 부족 ${item.missing_requirements.map((group) => group.join(" 또는 ")).join(" + ")}`
+                  : " · 필수 유형 충족"}
+              </small>
+            </div>
+            <button
+              type="button"
+              className="button button--quiet button--small"
+              onClick={() => onOpenReview(item)}
+            >
+              추천 증적 검토
+            </button>
+          </article>
+        ))}
+      </div>
+      <footer>
+        <span>상위 {Math.min(10, priority.recommendations.length)} / {priority.unresolved_controls} · {priority.decision_policy}</span>
+        <time dateTime={priority.generated_at}>{new Date(priority.generated_at).toLocaleString()}</time>
+      </footer>
+    </section>
+  );
+}
+
 function ControlRow({
   test,
   domestic,
@@ -737,6 +870,7 @@ function AssessmentDecisionDesk({
   criteriaConfirmed,
   evidence,
   selectedEvidenceIds,
+  priorityRecommendation,
   file,
   busy,
   uploadBusy,
@@ -759,6 +893,7 @@ function AssessmentDecisionDesk({
   criteriaConfirmed: boolean;
   evidence: Evidence[];
   selectedEvidenceIds: string[];
+  priorityRecommendation: AIEvidencePriorityRecommendation | null;
   file: File | null;
   busy: boolean;
   uploadBusy: boolean;
@@ -838,6 +973,16 @@ function AssessmentDecisionDesk({
                 </div>
               ))}
             </div>
+
+            {priorityRecommendation && (
+              <div className="assessment-ai-suggestion">
+                <strong>AI 추천 · 로컬 정책 재검증 완료</strong>
+                <p>{priorityRecommendation.rationale}</p>
+                <small>
+                  화면 선택 후보 {priorityRecommendation.suggested_evidence_types.join(", ") || "없음"} · 원본 확인 전에는 저장되지 않습니다.
+                </small>
+              </div>
+            )}
 
             {outcome === "confirmed" ? (
               <>

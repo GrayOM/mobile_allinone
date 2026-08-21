@@ -9,7 +9,7 @@ from backend.app.catalog.korean_standards import (
     ELECTRONIC_FINANCIAL_CONTROLS,
 )
 from backend.app.demo import create_demo_apk
-from backend.app.database.models import ControlTest, DiagnosticRun
+from backend.app.database.models import AIInvocation, ControlTest, DiagnosticRun
 from backend.app.database.session import SessionLocal
 
 
@@ -392,3 +392,70 @@ def test_domestic_baseline_cannot_receive_run_evidence_or_decisions(client):
         },
     )
     assert decision.status_code == 409
+
+
+def test_ai_evidence_priority_is_run_bound_and_never_records_a_verdict(client):
+    demo = client.post("/api/demo/bootstrap").json()
+    started = client.post(
+        "/api/runs",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "device_id": "mock-android-01",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+        },
+    )
+    assert started.status_code == 201
+    run = _wait_for_run(client, started.json()["id"])
+    before = client.get(
+        f"/api/coverage?run_id={run['id']}&scope=run&standard=critical_infrastructure"
+    ).json()
+    before_results = {item["id"]: item["result"] for item in before["tests"]}
+    terminal_ids = {
+        item["id"]
+        for item in before["tests"]
+        if item["result"] in {"confirmed", "not_vulnerable", "not_applicable"}
+    }
+    evidence = client.get(f"/api/runs/{run['id']}/evidence").json()
+    run_evidence_ids = {item["id"] for item in evidence}
+
+    response = client.post(
+        f"/api/runs/{run['id']}/ai/evidence-priority",
+        json={"use_mock": True},
+    )
+    assert response.status_code == 200
+    priority = response.json()
+    assert priority["run_id"] == run["id"]
+    assert priority["status"] == "available"
+    assert priority["provider"] == "mock"
+    assert priority["generated_by"] == "ai_with_local_policy"
+    assert priority["decision_policy"] == "recommendation_only_no_automatic_verdict"
+    assert priority["synthetic"] is True
+    assert priority["terminal_controls_excluded"] == len(terminal_ids)
+    assert priority["recommendations"]
+    assert terminal_ids.isdisjoint(
+        item["control_test_id"] for item in priority["recommendations"]
+    )
+    assert all(
+        set(item["suggested_evidence_ids"]).issubset(run_evidence_ids)
+        for item in priority["recommendations"]
+    )
+    assert all(
+        item["decision_boundary"].startswith("추천은 증적 검토 순서만")
+        for item in priority["recommendations"]
+    )
+
+    after = client.get(
+        f"/api/coverage?run_id={run['id']}&scope=run&standard=critical_infrastructure"
+    ).json()
+    assert {item["id"]: item["result"] for item in after["tests"]} == before_results
+    persisted = client.get(f"/api/runs/{run['id']}").json()
+    assert persisted["options"]["ai_evidence_priority"]["generated_at"] == priority["generated_at"]
+    with SessionLocal() as db:
+        invocation = db.query(AIInvocation).filter_by(
+            run_id=run["id"],
+            task="assessment_evidence_priority",
+        ).one()
+        assert invocation.provider == "mock"
+        assert invocation.synthetic is True

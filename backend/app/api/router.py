@@ -33,6 +33,10 @@ from sqlalchemy.orm import Session
 from backend.app.ai import AIProviderChain, MockAIProvider
 from backend.app.ai.masking import mask_context
 from backend.app.assessment import evaluate_standard_controls, upsert_standard_finding
+from backend.app.assessment_priority import (
+    ai_eligible_evidence,
+    build_assessment_evidence_priority,
+)
 from backend.app.assessment_plan import (
     refresh_app_assessment_plan,
     stored_plan_is_current,
@@ -4124,6 +4128,174 @@ def _assert_assessment_recording_state(run: DiagnosticRun) -> None:
             409,
             "안전 일시정지 또는 종료된 Run에서만 국내 기준 증적·판정을 기록할 수 있습니다.",
         )
+
+
+class AssessmentEvidencePriorityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    use_mock: bool = False
+    simulate_nvidia_failure: bool = False
+
+
+@router.post("/runs/{run_id}/ai/evidence-priority")
+async def prioritize_assessment_evidence(
+    request: Request,
+    run_id: str,
+    payload: AssessmentEvidencePriorityRequest,
+    db: Session = Depends(get_db),
+):
+    run = _run_or_404(db, run_id)
+    _assert_assessment_recording_state(run)
+    if not run.app_id:
+        raise HTTPException(409, "대상 앱이 고정된 Run에서만 증적 우선순위를 계산할 수 있습니다.")
+    app = _app_or_404(db, run.app_id)
+    project = _project_or_404(db, run.project_id)
+    if not project.ai_enabled:
+        raise HTTPException(409, "이 프로젝트는 AI 진단 보조가 비활성화되어 있습니다.")
+    if payload.use_mock and run.run_mode != RunMode.MOCK.value:
+        raise HTTPException(422, "Live 프로젝트에서는 Mock AI를 사용할 수 없습니다.")
+    if run.run_mode == RunMode.LIVE.value and not project.external_ai_allowed:
+        raise HTTPException(409, "이 프로젝트는 외부 AI 전송이 비활성화되어 있습니다.")
+
+    profile = str(run.options.get("assessment_profile") or project.assessment_profile)
+    controls = db.scalars(
+        select(ControlTest)
+        .where(
+            ControlTest.run_id == run.id,
+            ControlTest.standard == profile,
+        )
+        .order_by(ControlTest.mastg_id)
+    ).all()
+    if not controls:
+        raise HTTPException(409, "이 Run에는 선택한 국내 기준 점검 원장이 없습니다.")
+    all_evidence = db.scalars(
+        select(Evidence)
+        .where(Evidence.run_id == run.id)
+        .order_by(Evidence.sequence)
+    ).all()
+    eligible = ai_eligible_evidence(all_evidence)
+    unresolved_controls = [
+        item
+        for item in controls
+        if item.result not in {"confirmed", "not_vulnerable", "not_applicable"}
+    ]
+    evidence_catalog = [
+        {
+            "id": item.id,
+            "type": item.evidence_type,
+            "title": item.title,
+            "sequence": item.sequence,
+            "description": item.description[:1000],
+            "inline_excerpt": (
+                "binary screenshot omitted"
+                if item.evidence_type == "screenshot"
+                else _bounded_ai_value(item.inline_data, limit=1400)
+            ),
+        }
+        for item in eligible[-80:]
+    ]
+    context = {
+        "platform": app.platform,
+        "assessment_profile": profile,
+        "target_app_sha256": app.sha256,
+        "assessment_controls": [
+            {
+                "control_id": item.mastg_id,
+                "title": item.title,
+                "criteria": item.criteria,
+                "finding_categories": item.finding_categories,
+                "evidence_requirements": item.evidence_requirements,
+                "risk": item.risk,
+            }
+            for item in unresolved_controls
+        ],
+        "evidence_ids": [item["id"] for item in evidence_catalog],
+        "evidence_catalog": evidence_catalog,
+        "simulate_nvidia_failure": payload.simulate_nvidia_failure,
+        "decision_boundary": (
+            "정확한 control_id와 같은 Run의 evidence_id만 추천합니다. "
+            "verdict는 needs_review만 허용하며 취약 판정은 수행하지 않습니다."
+        ),
+    }
+    task = (
+        "현재 Run의 국내 모바일 취약점 미판정 항목을 검토 우선순위 후보로 분류하세요. "
+        "각 후보는 입력의 정확한 control_id와 직접 관련된 evidence_id만 연결하고, "
+        "필수 증적이 부족하면 추가 점검을 적으세요. 취약 여부를 확정하지 마세요."
+    )
+    settings = _settings(request)
+    if run.run_mode == RunMode.MOCK.value:
+        selected = await MockAIProvider().analyze(task, context, masked=True)
+        attempts = [selected]
+    else:
+        selected, attempts = await AIProviderChain(settings=settings).analyze(
+            task,
+            context,
+            masked=settings.mask_external_ai_data,
+        )
+
+    for attempt in attempts:
+        raw_path = save_ai_raw_response(
+            settings,
+            f"assessment-priority-{run.id}-{uuid.uuid4()}-{attempt.provider}.json",
+            attempt.raw_response,
+        )
+        db.add(
+            AIInvocation(
+                project_id=project.id,
+                run_id=run.id,
+                provider=attempt.provider,
+                model=attempt.model,
+                task="assessment_evidence_priority",
+                status=attempt.status.value,
+                masked=attempt.masked,
+                quality_score=attempt.quality_score,
+                raw_response_path=str(raw_path) if raw_path else None,
+                error=(
+                    attempt.message
+                    if attempt.status != CapabilityStatus.AVAILABLE
+                    else None
+                ),
+                synthetic=run.synthetic,
+            )
+        )
+
+    valid_controls = {item.mastg_id for item in unresolved_controls}
+    valid_evidence = {item.id for item in eligible}
+    ai_findings: list[dict[str, Any]] = []
+    if selected.status == CapabilityStatus.AVAILABLE and selected.analysis:
+        for item in selected.analysis.findings:
+            value = item.model_dump(mode="json")
+            value["verdict"] = "needs_review"
+            value["control_ids"] = [
+                control_id
+                for control_id in dict.fromkeys(item.control_ids)
+                if control_id in valid_controls
+            ]
+            value["evidence_ids"] = [
+                evidence_id
+                for evidence_id in dict.fromkeys(item.evidence_ids)
+                if evidence_id in valid_evidence
+            ]
+            if value["control_ids"]:
+                ai_findings.append(value)
+
+    priority = build_assessment_evidence_priority(
+        run_id=run.id,
+        profile=profile,
+        controls=controls,
+        evidence=all_evidence,
+        ai_findings=ai_findings,
+        provider=selected.provider,
+        model=selected.model,
+        status=selected.status.value,
+        message=selected.message,
+        synthetic=run.synthetic,
+    )
+    options = dict(run.options)
+    options["ai_evidence_priority"] = priority
+    run.options = options
+    db.commit()
+    return priority
 
 
 @router.post("/assessment-controls/{control_test_id}/evidence")
