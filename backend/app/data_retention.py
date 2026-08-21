@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from backend.app.core.config import AppSettings
 from backend.app.database.models import (
     AIInvocation,
+    CaptureJob,
     ControlTest,
     DiagnosticRun,
     Evidence,
@@ -63,6 +64,7 @@ def _run_paths(
     run: DiagnosticRun,
     findings: Iterable[Finding],
     ai_rows: Iterable[AIInvocation],
+    capture_rows: Iterable[CaptureJob] = (),
 ) -> list[Path]:
     paths = [
         settings.evidence_dir / run.id,
@@ -79,6 +81,7 @@ def _run_paths(
         for item in ai_rows
         if item.raw_response_path
     )
+    paths.extend(settings.captures_dir / item.id for item in capture_rows)
     safe: list[Path] = []
     seen: set[Path] = set()
     for item in paths:
@@ -129,6 +132,9 @@ def project_data_inventory(
         ai_rows = db.scalars(
             select(AIInvocation).where(AIInvocation.run_id == run.id)
         ).all()
+        capture_rows = db.scalars(
+            select(CaptureJob).where(CaptureJob.run_id == run.id)
+        ).all()
         evidence_count = int(
             db.scalar(
                 select(func.count(Evidence.id)).where(Evidence.run_id == run.id)
@@ -152,7 +158,7 @@ def project_data_inventory(
         )
         disk_bytes = sum(
             _path_size(path)
-            for path in _run_paths(settings, run, findings, ai_rows)
+            for path in _run_paths(settings, run, findings, ai_rows, capture_rows)
         )
         total_disk_bytes += disk_bytes
         basis = _utc(run.finished_at or run.created_at)
@@ -172,6 +178,7 @@ def project_data_inventory(
                 "flow_count": flow_count,
                 "finding_count": len(findings),
                 "ai_invocation_count": len(ai_rows),
+                "capture_job_count": len(capture_rows),
                 "ai_raw_response_count": sum(
                     bool(item.raw_response_path) for item in ai_rows
                 ),
@@ -213,6 +220,14 @@ def purge_retention_runs(
     ).all()
     if sorted(item.id for item in runs) != expected:
         raise ValueError("정리 대상 Run이 현재 프로젝트 원장과 일치하지 않습니다.")
+    active_capture = db.scalar(
+        select(CaptureJob.id).where(
+            CaptureJob.run_id.in_(expected),
+            CaptureJob.status.in_(["queued", "running", "stop_requested"]),
+        )
+    ) if expected else None
+    if active_capture:
+        raise ValueError("정리 대상 Run에 실행 중인 장시간 캡처가 있습니다.")
 
     paths: list[Path] = []
     removed_database = {
@@ -223,6 +238,7 @@ def purge_retention_runs(
         "control_tests": 0,
         "ai_invocations": 0,
         "approvals": 0,
+        "capture_jobs": 0,
     }
     for run in runs:
         findings = db.scalars(
@@ -231,7 +247,10 @@ def purge_retention_runs(
         ai_rows = db.scalars(
             select(AIInvocation).where(AIInvocation.run_id == run.id)
         ).all()
-        paths.extend(_run_paths(settings, run, findings, ai_rows))
+        capture_rows = db.scalars(
+            select(CaptureJob).where(CaptureJob.run_id == run.id)
+        ).all()
+        paths.extend(_run_paths(settings, run, findings, ai_rows, capture_rows))
         removed_database["findings"] += len(findings)
         removed_database["evidence"] += int(
             db.scalar(
@@ -257,11 +276,14 @@ def purge_retention_runs(
         removed_database["control_tests"] += len(controls)
         removed_database["ai_invocations"] += len(ai_rows)
         removed_database["approvals"] += len(approvals)
+        removed_database["capture_jobs"] += len(capture_rows)
         for row in controls:
             db.delete(row)
         for row in ai_rows:
             db.delete(row)
         for row in approvals:
+            db.delete(row)
+        for row in capture_rows:
             db.delete(row)
         for row in tools:
             row.run_id = None

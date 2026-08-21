@@ -24,10 +24,12 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 def init_database() -> None:
     from backend.app.database import models  # noqa: F401
+    from backend.app.database.alembic_runner import legacy_tables, upgrade_to_head
     from backend.app.database.migrations import apply_migrations
 
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine, tables=legacy_tables())
     apply_migrations(engine)
+    upgrade_to_head(engine)
 
 
 def get_db() -> Generator[Session, None, None]:

@@ -456,11 +456,13 @@ class DiagnosticOrchestrator:
             return FiddlerProxyAdapter(
                 host=str(run.options.get("proxy_listen_host") or "127.0.0.1"),
                 port=int(run.options.get("proxy_port") or 8080),
+                settings=self.settings,
             )
         if adapter == "burp":
             return BurpProxyAdapter(
                 host=str(run.options.get("proxy_listen_host") or "127.0.0.1"),
                 port=int(run.options.get("proxy_port") or 8080),
+                settings=self.settings,
             )
         if adapter == "mock":
             return MockProxyAdapter()
@@ -1554,6 +1556,8 @@ class DiagnosticOrchestrator:
                             "manual_proxy_setup_confirmed": False,
                             "manual_proxy_imported": False,
                             "manual_proxy_instructions": proxy_capture.instructions,
+                            "manual_proxy_process_id": proxy_capture.process_id,
+                            "manual_proxy_process_managed": proxy_capture.process_id is not None,
                         }
                     )
                     run.options = options

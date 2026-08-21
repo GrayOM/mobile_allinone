@@ -55,3 +55,5 @@ tools:
   ideviceinstaller: ideviceinstaller
   idevicesyslog: idevicesyslog
   idevicescreenshot: idevicescreenshot
+  burp: burpsuite
+  fiddler: fiddler

@@ -130,6 +130,7 @@ Vite 개발 서버는 `/api`를 `127.0.0.1:8765`로 프록시한다.
 | aapt / apkanalyzer | APK 메타데이터 보완 | Android SDK Build/Command-line Tools |
 | frida-tools | Spawn·Attach와 스크립트 실행 | `py -m pip install frida-tools` |
 | mitmproxy | 실제 HTTP(S) 흐름 캡처 | `py -m pip install mitmproxy` |
+| Burp Suite / Fiddler | 작업대가 시작한 세션 프로세스 기동·종료, 수동 Listener 확인과 HAR 반입 | 제품 실행 파일 경로 지정 |
 | APKiD | 패커·컴파일러·난독화·anti-analysis 시그니처 | `install_oss_tools.ps1 -APKiD -AcceptCopyleftLicenses` |
 | Semgrep | JADX 코드에 로컬 Android 보안 규칙 적용 | `install_oss_tools.ps1 -Semgrep` |
 | MobSF | 별도 서버의 APK·IPA REST 분석 결과 통합 | `.env`의 `MOBSF_URL`, `MOBSF_API_KEY` |
@@ -149,6 +150,8 @@ tools:
   jadx: C:\Tools\jadx\bin\jadx.bat
   frida: C:\project\mobile_allinone\.venv\Scripts\frida.exe
   mitmdump: C:\project\mobile_allinone\.venv\Scripts\mitmdump.exe
+  burp: C:\Tools\BurpSuite\BurpSuitePro.exe
+  fiddler: C:\Tools\Fiddler\Fiddler.exe
   apkid: C:\project\mobile_allinone\.venv\Scripts\apkid.exe
   semgrep: C:\project\mobile_allinone\.venv\Scripts\semgrep.exe
   pymobiledevice3: C:\project\mobile_allinone\.venv\Scripts\pymobiledevice3.exe
@@ -290,7 +293,32 @@ ADB 명령은 shell 문자열 결합 없이 인자 배열로 실행하고, 명�
 
 ### Burp Suite / Fiddler
 
-현재 `manual_required` Adapter다. 리스너·단말 설정 안내와 HAR 가져오기 구조를 제공하며, 자동 프로세스 제어를 성공으로 위장하지 않는다.
+설정 화면에서 제품 실행 파일을 지정하면 작업대가 Run에 귀속된 제품 프로세스를 시작하고 종료한다. 작업대가 시작하지 않은 기존 제품 프로세스는 종료하지 않는다. 제품별 Listener·단말 프록시·CA 설정과 최종 HAR/JSON 반입은 제품 내부 상태를 사람이 확인해야 하므로 계속 `manual_required` 체크포인트로 남는다.
+
+## 조직 접근·감사 로그
+
+기본 loopback 단독 운영은 기존처럼 별도 로그인 없이 사용할 수 있다. 여러 운영자가 함께 쓰는 환경에서는 `.env`로 조직 인증을 활성화한다.
+
+```dotenv
+MSW_ORGANIZATION_AUTH=true
+MSW_BOOTSTRAP_ADMIN_USERNAME=admin
+MSW_BOOTSTRAP_ADMIN_PASSWORD=최초실행에만사용할12자이상비밀번호
+MSW_ORGANIZATION_SESSION_HOURS=8
+```
+
+- 비밀번호는 Argon2id 해시만 저장하고, 세션 원문은 브라우저 메모리와 로그인 응답에만 존재한다.
+- `viewer`는 조회, `operator`는 진단·캡처 작업, `admin`은 사용자·도구 경로·보존기간 작업을 수행한다.
+- 상태 변경과 접근 거부는 본문·토큰 없이 append-only 감사 원장에 기록하며 이전 항목 SHA-256과 연결한다.
+- `/access`에서 사용자와 해시 체인 검증 상태를 확인한다.
+- LAN과 함께 쓰면 `MSW_API_TOKEN`은 네트워크 경계, 조직 세션은 사용자 신원 경계로 각각 적용된다.
+
+## 장시간 로그·화면 캡처
+
+`/captures`에서 단말 로그 또는 화면 녹화를 1분~60분 백그라운드 Job으로 실행할 수 있다. 같은 단말·종류의 중복 Job은 차단하며 중지, 서버 재시작 복구, SHA-256, 크기와 실행자를 DB에 보존한다. Android 화면 녹화는 `screenrecord` 제한을 고려한 15초 세그먼트 ZIP이며, iOS에서 자동화할 수 없는 화면 녹화는 `manual_required`로 표시한다. 원본 다운로드는 프로젝트의 **Raw 원본 열람 허용**이 켜진 경우에만 가능하다.
+
+## 데이터베이스 마이그레이션
+
+기존 명시적 SQLite V1~V7 마이그레이션은 호환 기준선으로 유지하고, 신규 V8부터 Alembic revision을 사용한다. 기존 DB는 V8 적용 전 `data/backups/`에 백업하고 `alembic_version`을 기록한다. 일부 관리 테이블만 존재하는 불완전 상태는 자동 보정하지 않고 시작을 중단한다.
 
 ## Frida 라이브러리
 

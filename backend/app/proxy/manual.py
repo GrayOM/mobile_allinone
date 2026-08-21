@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from backend.app.core.config import AppSettings, get_settings
+from backend.app.core.process import subprocess_group_options, terminate_process_tree
 from backend.app.core.status import CapabilityStatus
 from backend.app.proxy.base import ProxyAdapter, ProxyCapture, ProxyFlowData
 from backend.app.proxy.detection import detect_sensitive
@@ -12,10 +15,22 @@ from backend.app.proxy.detection import detect_sensitive
 class ManualProxyAdapter(ProxyAdapter):
     product_name = "Proxy"
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8080):
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8080,
+        *,
+        settings: AppSettings | None = None,
+    ):
         self.host = host
         self.port = port
+        self.settings = settings or get_settings()
         self._imports: dict[str, list[ProxyFlowData]] = {}
+        self._processes: dict[str, asyncio.subprocess.Process] = {}
+
+    @property
+    def executable(self) -> str | None:
+        return self.settings.resolved_tool(self.name)
 
     def _instructions(self) -> list[str]:
         return [
@@ -27,21 +42,79 @@ class ManualProxyAdapter(ProxyAdapter):
         ]
 
     async def status(self) -> ProxyCapture:
+        executable = self.executable
         return ProxyCapture(
             CapabilityStatus.MANUAL_REQUIRED,
-            f"{self.product_name}는 수동 연동 설정이 필요합니다.",
+            (
+                f"{self.product_name} 실행 파일이 확인되었습니다. 작업대에서 세션 프로세스를 시작할 수 있지만 리스너 확인과 캡처 반입은 수동입니다."
+                if executable
+                else f"{self.product_name} 실행 파일을 설정하면 세션 기동·종료를 제어할 수 있습니다. 현재는 완전 수동 연동입니다."
+            ),
             self.host,
             self.port,
             instructions=self._instructions(),
         )
 
     async def start(self, run_id: str) -> ProxyCapture:
-        return await self.status()
-
-    async def stop(self, run_id: str) -> ProxyCapture:
+        existing = self._processes.get(run_id)
+        if existing and existing.returncode is None:
+            status = await self.status()
+            status.process_id = existing.pid
+            status.message = f"{self.product_name} 세션 프로세스가 이미 실행 중입니다. 리스너 설정을 확인하세요."
+            return status
+        executable = self.executable
+        if not executable:
+            return await self.status()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                executable,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                **subprocess_group_options(),
+            )
+        except OSError as exc:
+            return ProxyCapture(
+                CapabilityStatus.FAILED,
+                f"{self.product_name} 세션 프로세스를 시작하지 못했습니다: {type(exc).__name__}",
+                self.host,
+                self.port,
+                instructions=self._instructions(),
+            )
+        self._processes[run_id] = process
+        await asyncio.sleep(0.1)
+        if process.returncode is not None:
+            self._processes.pop(run_id, None)
+            return ProxyCapture(
+                CapabilityStatus.MANUAL_REQUIRED,
+                f"{self.product_name} 실행기가 종료되었습니다. 제품 창과 리스너 상태를 직접 확인하세요.",
+                self.host,
+                self.port,
+                instructions=self._instructions(),
+            )
         return ProxyCapture(
             CapabilityStatus.MANUAL_REQUIRED,
-            f"{self.product_name}에서 캡처를 수동으로 중지하세요.",
+            f"{self.product_name} 세션 프로세스를 시작했습니다. 리스너·단말 프록시 설정 확인 후 계속하세요.",
+            self.host,
+            self.port,
+            process_id=process.pid,
+            instructions=self._instructions(),
+        )
+
+    async def stop(self, run_id: str) -> ProxyCapture:
+        process = self._processes.pop(run_id, None)
+        if process and process.returncode is None:
+            await terminate_process_tree(process)
+            return ProxyCapture(
+                CapabilityStatus.AVAILABLE,
+                f"작업대가 시작한 {self.product_name} 세션 프로세스를 종료했습니다.",
+                self.host,
+                self.port,
+                process_id=process.pid,
+            )
+        return ProxyCapture(
+            CapabilityStatus.MANUAL_REQUIRED,
+            f"작업대가 관리하는 {self.product_name} 프로세스가 없습니다. 제품에서 캡처를 직접 중지하세요.",
             self.host,
             self.port,
         )

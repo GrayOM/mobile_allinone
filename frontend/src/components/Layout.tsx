@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useLocation } from "../router";
 import { useEffect, useState } from "react";
+import { getCurrentIdentity, logoutOrganization, type OrganizationIdentity } from "../api";
 
 const navigation = [
   { to: "/", label: "대시보드", mark: "D", end: true },
@@ -9,6 +10,8 @@ const navigation = [
   { to: "/findings", label: "발견항목", mark: "F" },
   { to: "/coverage", label: "통제 커버리지", mark: "V" },
   { to: "/data", label: "데이터 보존", mark: "A" },
+  { to: "/captures", label: "장시간 캡처", mark: "L" },
+  { to: "/access", label: "접근·감사", mark: "U" },
   { to: "/scripts", label: "Frida 라이브러리", mark: "S" },
   { to: "/settings", label: "설정", mark: "C" },
 ];
@@ -21,6 +24,8 @@ const titles: Record<string, string> = {
   "/findings": "발견항목",
   "/coverage": "보안통제 커버리지",
   "/data": "원본 데이터 보존",
+  "/captures": "장시간 캡처 제어",
+  "/access": "조직 접근과 감사",
   "/scripts": "Frida 스크립트 라이브러리",
   "/settings": "도구와 AI 설정",
 };
@@ -28,6 +33,7 @@ const titles: Record<string, string> = {
 export default function Layout() {
   const location = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [identity, setIdentity] = useState<OrganizationIdentity | null>(getCurrentIdentity);
   const title =
     titles[location.pathname] ??
     (location.pathname.startsWith("/runs/")
@@ -37,6 +43,11 @@ export default function Layout() {
         : "Mobile Security Workbench");
 
   useEffect(() => setMobileOpen(false), [location.pathname]);
+  useEffect(() => {
+    const refresh = () => setIdentity(getCurrentIdentity());
+    window.addEventListener("msw-auth-updated", refresh);
+    return () => window.removeEventListener("msw-auth-updated", refresh);
+  }, []);
 
   return (
     <div className="app-shell">
@@ -70,9 +81,10 @@ export default function Layout() {
         <div className="sidebar__foot">
           <span className="pulse-dot" />
           <div>
-            <strong>Local only</strong>
-            <small>127.0.0.1</small>
+            <strong>{identity ? identity.display_name : "Local only"}</strong>
+            <small>{identity ? `${identity.username} · ${identity.role}` : "127.0.0.1"}</small>
           </div>
+          {identity && <button className="sidebar__logout" onClick={() => void logoutOrganization()} aria-label="로그아웃">↪</button>}
         </div>
       </aside>
       {mobileOpen && (

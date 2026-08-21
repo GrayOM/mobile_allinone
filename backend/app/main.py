@@ -12,14 +12,22 @@ from sqlalchemy import select
 
 from backend.app.analyzers import ensure_assessment_baseline
 from backend.app.analyzers.locks import AnalysisLeaseManager
+from backend.app.api.auth_router import router as auth_router
+from backend.app.api.capture_router import router as capture_router
 from backend.app.api.router import router
+from backend.app.auth import AuditService, OrganizationAuthService
+from backend.app.capture import CaptureJobManager
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.network import (
     approval_matches_destination,
     check_mobsf_transport_compatibility,
     inspect_mobsf_destination,
 )
-from backend.app.core.security import ApiSecurityMiddleware, WebSocketTicketStore
+from backend.app.core.security import (
+    ApiSecurityMiddleware,
+    SecurityHeadersMiddleware,
+    WebSocketTicketStore,
+)
 from backend.app.core.status import RunStatus
 from backend.app.database.base import utcnow
 from backend.app.database.models import AppArtifact, DiagnosticRun, Project
@@ -81,6 +89,8 @@ async def lifespan(app: FastAPI):
     if not transport_compatible:
         raise RuntimeError(transport_message)
     init_database()
+    app.state.organization_auth.bootstrap()
+    app.state.capture_manager.recover_interrupted()
     with SessionLocal() as db:
         interrupted = db.scalars(
             select(DiagnosticRun).where(
@@ -115,6 +125,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await app.state.capture_manager.shutdown()
         await app.state.orchestrator.shutdown()
 
 
@@ -130,8 +141,14 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json" if settings.enable_api_docs else None,
     )
     ticket_store = WebSocketTicketStore()
+    auth_service = OrganizationAuthService(settings)
+    audit_service = AuditService()
+    capture_manager = CaptureJobManager(settings)
     app.state.ws_tickets = ticket_store
     app.state.analysis_leases = AnalysisLeaseManager()
+    app.state.organization_auth = auth_service
+    app.state.audit_service = audit_service
+    app.state.capture_manager = capture_manager
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -148,11 +165,16 @@ def create_app() -> FastAPI:
         ApiSecurityMiddleware,
         settings=settings,
         ticket_store=ticket_store,
+        auth_service=auth_service,
+        audit_service=audit_service,
     )
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=settings.effective_trusted_hosts,
     )
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.include_router(auth_router)
+    app.include_router(capture_router)
     app.include_router(router)
 
     @app.get("/healthz", include_in_schema=False)

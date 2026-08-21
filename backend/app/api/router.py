@@ -86,6 +86,7 @@ from backend.app.database.models import (
     AIInvocation,
     AnalysisRun,
     AppArtifact,
+    CaptureJob,
     DiagnosticRun,
     Evidence,
     Finding,
@@ -665,10 +666,19 @@ def delete_project(
     )
     if active:
         raise HTTPException(409, "실행 중인 진단을 중지한 뒤 프로젝트를 삭제하세요.")
+    active_capture = db.scalar(
+        select(CaptureJob.id).where(
+            CaptureJob.project_id == project_id,
+            CaptureJob.status.in_(["queued", "running", "stop_requested"]),
+        ).limit(1)
+    )
+    if active_capture:
+        raise HTTPException(409, "실행 중인 장시간 캡처를 중지한 뒤 프로젝트를 삭제하세요.")
     settings = _settings(request)
     apps = list(project.apps)
     runs = list(project.runs)
     findings = list(project.findings)
+    capture_jobs = list(project.capture_jobs)
     ai_rows = db.scalars(
         select(AIInvocation).where(AIInvocation.project_id == project_id)
     ).all()
@@ -677,6 +687,7 @@ def delete_project(
         settings.data_dir / "analysis" / Path(app.stored_path).stem for app in apps
     )
     directory_targets.extend(settings.evidence_dir / run.id for run in runs)
+    directory_targets.extend(settings.captures_dir / job.id for job in capture_jobs)
     file_targets = [settings.reports_dir / f"{finding.id}.html" for finding in findings]
     file_targets.extend(settings.data_dir / "proxy" / f"{run.id}.jsonl" for run in runs)
     file_targets.extend(
@@ -4016,8 +4027,8 @@ async def proxy_adapters(request: Request):
     adapters = [
         MockProxyAdapter(),
         MitmProxyAdapter(settings),
-        FiddlerProxyAdapter(),
-        BurpProxyAdapter(),
+        FiddlerProxyAdapter(settings=settings),
+        BurpProxyAdapter(settings=settings),
     ]
     statuses = await asyncio.gather(*(item.status() for item in adapters))
     return [
@@ -4739,6 +4750,8 @@ def read_settings(request: Request):
         "ideviceinstaller": "libimobiledevice Windows 빌드의 ideviceinstaller.exe",
         "idevicesyslog": "libimobiledevice Windows 빌드의 idevicesyslog.exe",
         "idevicescreenshot": "libimobiledevice Windows 빌드의 idevicescreenshot.exe",
+        "burp": "Burp Suite 실행 파일 경로 지정(리스너·HAR 반입은 수동 확인)",
+        "fiddler": "Fiddler 실행 파일 경로 지정(리스너·HAR 반입은 수동 확인)",
     }
     tools = []
     for name in settings.tools.model_fields:
@@ -4763,6 +4776,8 @@ def read_settings(request: Request):
             "max_upload_mb": settings.max_upload_mb,
             "lan_access": settings.lan_access,
             "authentication_required": settings.lan_access,
+            "organization_auth_enabled": settings.organization_auth,
+            "organization_session_hours": settings.organization_session_hours,
             "api_docs_enabled": settings.enable_api_docs,
             "trusted_hosts": settings.effective_trusted_hosts,
         },

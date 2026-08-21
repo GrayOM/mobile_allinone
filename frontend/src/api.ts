@@ -2,7 +2,25 @@ const API_BASE = "/api";
 
 let accessToken = "";
 let adminToken = "";
-let authenticationRequired = false;
+let organizationToken = "";
+let organizationMode = false;
+let currentIdentity: OrganizationIdentity | null = null;
+let authenticationRequired: AuthenticationRequirement = null;
+
+export type AuthenticationRequirement = "lan" | "organization" | null;
+
+export interface AuthConfig {
+  enabled: boolean;
+  lan_access: boolean;
+  session_hours: number;
+}
+
+export interface OrganizationIdentity {
+  id: string;
+  username: string;
+  display_name: string;
+  role: "viewer" | "operator" | "admin";
+}
 
 export function configureLanSession(value: string): void {
   const [nextAccess, nextAdmin, ...extra] = value.trim().split("|");
@@ -11,22 +29,69 @@ export function configureLanSession(value: string): void {
   }
   accessToken = nextAccess;
   adminToken = nextAdmin;
-  authenticationRequired = false;
+  authenticationRequired = null;
   window.dispatchEvent(new Event("msw-auth-updated"));
 }
 
-export function isAuthenticationRequired(): boolean {
+export function getAuthenticationRequirement(): AuthenticationRequirement {
   return authenticationRequired;
 }
 
-function requestAuthentication(): void {
-  authenticationRequired = true;
+export function getCurrentIdentity(): OrganizationIdentity | null {
+  return currentIdentity;
+}
+
+export function isOrganizationMode(): boolean {
+  return organizationMode;
+}
+
+function requestAuthentication(kind?: Exclude<AuthenticationRequirement, null>): void {
+  authenticationRequired = kind ?? (organizationMode ? "organization" : "lan");
   window.setTimeout(() => window.dispatchEvent(new Event("msw-auth-required")), 0);
 }
 
 function applySecurityHeaders(headers: Headers): void {
-  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
-  if (adminToken) headers.set("X-MSW-Admin-Token", adminToken);
+  if (accessToken) headers.set("X-MSW-Network-Token", accessToken);
+  if (organizationToken) headers.set("Authorization", `Bearer ${organizationToken}`);
+  else if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  if (adminToken && !organizationMode) headers.set("X-MSW-Admin-Token", adminToken);
+}
+
+export async function loadAuthConfig(): Promise<AuthConfig> {
+  const config = await api<AuthConfig>("/auth/config");
+  organizationMode = config.enabled;
+  if (organizationMode && !organizationToken) requestAuthentication("organization");
+  if (!organizationMode) {
+    organizationToken = "";
+    currentIdentity = null;
+  }
+  return config;
+}
+
+export async function loginOrganization(
+  username: string,
+  password: string,
+): Promise<OrganizationIdentity> {
+  const result = await api<{ token: string; expires_at: string; user: OrganizationIdentity }>(
+    "/auth/login",
+    { method: "POST", body: JSON.stringify({ username, password }) },
+  );
+  organizationToken = result.token;
+  currentIdentity = result.user;
+  authenticationRequired = null;
+  window.dispatchEvent(new Event("msw-auth-updated"));
+  return result.user;
+}
+
+export async function logoutOrganization(): Promise<void> {
+  try {
+    if (organizationToken) await post<{ status: string }>("/auth/logout");
+  } finally {
+    organizationToken = "";
+    currentIdentity = null;
+    if (organizationMode) requestAuthentication("organization");
+    window.dispatchEvent(new Event("msw-auth-updated"));
+  }
 }
 
 export class ApiError extends Error {
@@ -145,8 +210,10 @@ export async function upload<T>(
     const data = new FormData();
     data.append("file", file);
     request.open("POST", `${API_BASE}${path}`);
-    if (accessToken) request.setRequestHeader("Authorization", `Bearer ${accessToken}`);
-    if (adminToken) request.setRequestHeader("X-MSW-Admin-Token", adminToken);
+    if (accessToken) request.setRequestHeader("X-MSW-Network-Token", accessToken);
+    if (organizationToken) request.setRequestHeader("Authorization", `Bearer ${organizationToken}`);
+    else if (accessToken) request.setRequestHeader("Authorization", `Bearer ${accessToken}`);
+    if (adminToken && !organizationMode) request.setRequestHeader("X-MSW-Admin-Token", adminToken);
     request.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
     };

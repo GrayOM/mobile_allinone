@@ -1,6 +1,11 @@
 import { FormEvent, useEffect, useState } from "react";
 import { Route, Routes } from "./router";
-import { configureLanSession, isAuthenticationRequired } from "./api";
+import {
+  configureLanSession,
+  getAuthenticationRequirement,
+  loadAuthConfig,
+  loginOrganization,
+} from "./api";
 import Layout from "./components/Layout";
 import DashboardPage from "./pages/DashboardPage";
 import ProjectsPage from "./pages/ProjectsPage";
@@ -13,14 +18,16 @@ import ScriptsPage from "./pages/ScriptsPage";
 import SettingsPage from "./pages/SettingsPage";
 import CoveragePage from "./pages/CoveragePage";
 import DataManagementPage from "./pages/DataManagementPage";
+import AccessControlPage from "./pages/AccessControlPage";
+import CapturesPage from "./pages/CapturesPage";
 
 export default function App() {
-  const [authRequired, setAuthRequired] = useState(isAuthenticationRequired);
+  const [authRequired, setAuthRequired] = useState(getAuthenticationRequirement);
   const [authVersion, setAuthVersion] = useState(0);
   useEffect(() => {
-    const required = () => setAuthRequired(true);
+    const required = () => setAuthRequired(getAuthenticationRequirement());
     const updated = () => {
-      setAuthRequired(false);
+      setAuthRequired(getAuthenticationRequirement());
       setAuthVersion((value) => value + 1);
     };
     window.addEventListener("msw-auth-required", required);
@@ -30,6 +37,11 @@ export default function App() {
       window.removeEventListener("msw-auth-updated", updated);
     };
   }, []);
+  useEffect(() => {
+    void loadAuthConfig()
+      .then(() => setAuthRequired(getAuthenticationRequirement()))
+      .catch(() => setAuthRequired(getAuthenticationRequirement()));
+  }, [authVersion]);
   return (
     <>
       <Routes key={authVersion}>
@@ -43,12 +55,54 @@ export default function App() {
           <Route path="findings/:findingId" element={<FindingDetailPage />} />
           <Route path="coverage" element={<CoveragePage />} />
           <Route path="data" element={<DataManagementPage />} />
+          <Route path="captures" element={<CapturesPage />} />
+          <Route path="access" element={<AccessControlPage />} />
           <Route path="scripts" element={<ScriptsPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Routes>
-      {authRequired && <LanSessionPrompt />}
+      {authRequired === "lan" && <LanSessionPrompt />}
+      {authRequired === "organization" && <OrganizationLoginPrompt />}
     </>
+  );
+}
+
+function OrganizationLoginPrompt() {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await loginOrganization(username, password);
+      setPassword("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "조직 사용자 인증 실패");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="auth-gate" role="dialog" aria-modal="true" aria-labelledby="organization-login-title">
+      <form className="panel auth-gate__panel auth-gate__panel--organization" onSubmit={submit}>
+        <span className="eyebrow">ORGANIZATION ACCESS CONTROL</span>
+        <h2 id="organization-login-title">운영자 신원 확인</h2>
+        <p>세션은 브라우저 메모리에만 유지됩니다. 역할에 따라 조회·진단 실행·관리 작업이 서버에서 구분됩니다.</p>
+        <div className="field">
+          <label htmlFor="organization-username">사용자명</label>
+          <input id="organization-username" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} autoFocus required />
+        </div>
+        <div className="field">
+          <label htmlFor="organization-password">비밀번호</label>
+          <input id="organization-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required />
+        </div>
+        {error && <div className="inline-alert">{error}</div>}
+        <button className="button button--signal" disabled={busy}>{busy ? "확인 중…" : "워크벤치 접속"}</button>
+      </form>
+    </div>
   );
 }
 

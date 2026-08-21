@@ -59,6 +59,104 @@ class Project(Base, TimestampMixin):
     approvals: Mapped[list["OperationApproval"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
+    capture_jobs: Mapped[list["CaptureJob"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+
+
+class OrganizationUser(Base, TimestampMixin):
+    __tablename__ = "organization_users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str | None] = mapped_column(String(36))
+
+
+class OrganizationSession(Base):
+    __tablename__ = "organization_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("organization_users.id"), index=True, nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    client_host: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_agent_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    actor_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    actor_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_role: Mapped[str] = mapped_column(String(20), nullable=False)
+    action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    method: Mapped[str] = mapped_column(String(12), nullable=False)
+    path: Mapped[str] = mapped_column(String(500), nullable=False)
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    client_host: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    resource_type: Mapped[str | None] = mapped_column(String(50), index=True)
+    resource_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    previous_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    entry_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+
+
+class CaptureJob(Base):
+    __tablename__ = "capture_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id"), nullable=False, index=True
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("diagnostic_runs.id"), index=True
+    )
+    device_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    device_adapter: Mapped[str] = mapped_column(String(50), nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    max_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_path: Mapped[str | None] = mapped_column(Text)
+    mime_type: Mapped[str | None] = mapped_column(String(100))
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    started_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False, index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    project: Mapped["Project"] = relationship(back_populates="capture_jobs")
+    run: Mapped["DiagnosticRun | None"] = relationship(back_populates="capture_jobs")
 
 
 class AppArtifact(Base, TimestampMixin):
@@ -140,6 +238,7 @@ class DiagnosticRun(Base, TimestampMixin):
     flows: Mapped[list["ProxyFlow"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
+    capture_jobs: Mapped[list["CaptureJob"]] = relationship(back_populates="run")
 
 
 class Finding(Base, TimestampMixin):

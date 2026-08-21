@@ -137,9 +137,31 @@ export interface ProjectDataRunInventory {
   flow_count: number;
   finding_count: number;
   ai_invocation_count: number;
+  capture_job_count: number;
   ai_raw_response_count: number;
   has_frida_transcript: boolean;
   disk_bytes: number;
+}
+
+export interface CaptureJob {
+  id: string;
+  project_id: string;
+  run_id: string | null;
+  device_id: string;
+  device_adapter: string;
+  kind: "device_logs" | "screen_record";
+  status: string;
+  max_duration_seconds: number;
+  mime_type: string | null;
+  sha256: string | null;
+  size_bytes: number;
+  error: string | null;
+  started_by: string;
+  synthetic: boolean;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  download_available: boolean;
 }
 
 export interface ProjectDataInventory {

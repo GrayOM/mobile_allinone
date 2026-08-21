@@ -62,6 +62,8 @@ class ToolPaths(BaseModel):
     ideviceinstaller: str = "ideviceinstaller"
     idevicesyslog: str = "idevicesyslog"
     idevicescreenshot: str = "idevicescreenshot"
+    burp: str = "burpsuite"
+    fiddler: str = "fiddler"
 
 
 class AppSettings(BaseModel):
@@ -74,6 +76,10 @@ class AppSettings(BaseModel):
     admin_token: str | None = None
     trusted_hosts: list[str] = Field(default_factory=list)
     enable_api_docs: bool = False
+    organization_auth: bool = False
+    bootstrap_admin_username: str = "admin"
+    bootstrap_admin_password: str | None = None
+    organization_session_hours: int = Field(default=8, ge=1, le=24)
     data_dir: Path = ROOT_DIR / "data"
     database_url: str = f"sqlite:///{(ROOT_DIR / 'data' / 'workbench.db').as_posix()}"
     frontend_dist: Path = ROOT_DIR / "frontend" / "dist"
@@ -127,6 +133,16 @@ class AppSettings(BaseModel):
     storage_sqlite_timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
     network_analysis_max_flows: int = Field(default=500, ge=1, le=5_000)
     network_candidate_max_count: int = Field(default=1_000, ge=1, le=10_000)
+    capture_segment_max_bytes: int = Field(
+        default=128 * 1_024 * 1_024,
+        ge=1 * 1_024 * 1_024,
+        le=512 * 1_024 * 1_024,
+    )
+    capture_total_max_bytes: int = Field(
+        default=1 * 1_024 * 1_024 * 1_024,
+        ge=10 * 1_024 * 1_024,
+        le=10 * 1_024 * 1_024 * 1_024,
+    )
     mobsf_url: str | None = None
     mobsf_api_key: str | None = None
     mobsf_allowed_networks: list[str] = Field(
@@ -145,8 +161,10 @@ class AppSettings(BaseModel):
         if not is_loopback_host(host):
             if not self.lan_access:
                 raise ValueError("loopback 외 주소는 MSW_LAN_ACCESS=true로 명시적으로 허용해야 합니다.")
-            if len(self.api_token or "") < 32 or len(self.admin_token or "") < 32:
-                raise ValueError("LAN 실행에는 32자 이상의 임시 API 토큰과 관리자 토큰이 필요합니다.")
+            if len(self.api_token or "") < 32:
+                raise ValueError("LAN 실행에는 32자 이상의 임시 API 토큰이 필요합니다.")
+            if not self.organization_auth and len(self.admin_token or "") < 32:
+                raise ValueError("조직 인증이 없는 LAN 실행에는 32자 이상의 관리자 토큰도 필요합니다.")
         return self
 
     @property
@@ -174,6 +192,10 @@ class AppSettings(BaseModel):
     def analysis_dir(self) -> Path:
         return self.data_dir / "analysis"
 
+    @property
+    def captures_dir(self) -> Path:
+        return self.data_dir / "captures"
+
     def ensure_directories(self) -> None:
         for path in (
             self.data_dir,
@@ -182,6 +204,7 @@ class AppSettings(BaseModel):
             self.reports_dir,
             self.ai_raw_dir,
             self.analysis_dir,
+            self.captures_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -229,6 +252,20 @@ def get_settings() -> AppSettings:
         ] or values.get("trusted_hosts", []),
         "enable_api_docs": _env_bool(
             "MSW_ENABLE_API_DOCS", values.get("enable_api_docs", False)
+        ),
+        "organization_auth": _env_bool(
+            "MSW_ORGANIZATION_AUTH", values.get("organization_auth", False)
+        ),
+        "bootstrap_admin_username": os.getenv(
+            "MSW_BOOTSTRAP_ADMIN_USERNAME",
+            values.get("bootstrap_admin_username", "admin"),
+        ),
+        "bootstrap_admin_password": os.getenv("MSW_BOOTSTRAP_ADMIN_PASSWORD"),
+        "organization_session_hours": int(
+            os.getenv(
+                "MSW_ORGANIZATION_SESSION_HOURS",
+                values.get("organization_session_hours", 8),
+            )
         ),
         "default_mock_mode": _env_bool(
             "MSW_DEFAULT_MOCK_MODE", values.get("default_mock_mode", False)

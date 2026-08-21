@@ -4,7 +4,12 @@ import asyncio
 import re
 from pathlib import Path
 
-from backend.app.core.command import CommandResult, run_binary_command, run_command
+from backend.app.core.command import (
+    CommandResult,
+    run_binary_command,
+    run_command,
+    stream_command_to_file_for_duration,
+)
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus, Platform
 from backend.app.core.targets import is_valid_app_identifier
@@ -208,8 +213,13 @@ class AndroidDeviceAdapter(DeviceAdapter):
             timeout=min(max(duration_seconds + 15, 30), 210),
         )
         if not record or not record.ok:
-            return self._operation(record, "화면 녹화를 완료했습니다.")
-        return await self.pull_file(device_id, remote, destination)
+            result = self._operation(record, "화면 녹화를 완료했습니다.")
+        else:
+            result = await self.pull_file(device_id, remote, destination)
+        cleanup = await self._adb(device_id, "shell", "rm", "-f", "--", remote)
+        if cleanup and not cleanup.ok:
+            result.message += " 단말 임시 녹화 파일 정리는 확인이 필요합니다."
+        return result
 
     async def collect_logs(
         self, device_id: str, destination: Path, duration_seconds: int = 5
@@ -217,10 +227,15 @@ class AndroidDeviceAdapter(DeviceAdapter):
         if not self.adb:
             return self._missing()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        result = await self._adb(device_id, "logcat", "-d", "-v", "threadtime", timeout=30)
+        result = await stream_command_to_file_for_duration(
+            [self.adb, "-s", device_id, "logcat", "-v", "threadtime"],
+            destination,
+            duration_seconds=max(1, min(duration_seconds, 60)),
+            max_bytes=self.settings.capture_segment_max_bytes,
+            shutdown_timeout=10,
+        )
         op = self._operation(result, "Logcat을 수집했습니다.")
-        if result.ok:
-            destination.write_text(result.stdout, encoding="utf-8")
+        if result.ok and destination.is_file():
             op.file_path = str(destination)
         return op
 

@@ -405,7 +405,14 @@ class IOSDeviceAdapter(DeviceAdapter):
         self, device_id: str, destination: Path, duration_seconds: int = 5
     ) -> DeviceOperation:
         if device_id.startswith("ios-ssh:"):
-            return await self._ssh("log", "show", "--last", f"{duration_seconds}s")
+            operation = await self._ssh(
+                "log", "show", "--last", f"{max(1, min(duration_seconds, 60))}s"
+            )
+            if operation.status == CapabilityStatus.AVAILABLE:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(operation.output, encoding="utf-8")
+                operation.file_path = str(destination)
+            return operation
         if not self.idevicesyslog:
             return self._manual("idevicesyslog 또는 SSH 로그 수집 도구를 설정하세요.")
         destination.parent.mkdir(parents=True, exist_ok=True)

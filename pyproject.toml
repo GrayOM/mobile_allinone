@@ -21,6 +21,8 @@ dependencies = [
   "androguard>=4.1,<5",
   "cryptography>=46.0.6,<48",
   "psutil>=6.1,<8",
+  "alembic>=1.14,<2",
+  "argon2-cffi>=23.1,<26",
 ]
 
 [project.optional-dependencies]

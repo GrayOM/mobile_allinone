@@ -8,10 +8,12 @@
 
 - 기본 브랜치: `main` (`origin/main` = `b82be7d`)
 - 개발·검증 브랜치: `test/approved-control-validation`
-- 최신 기능 기준점: `1879858` (프로젝트별 보존정책·Raw 전용 열람·명시적 만료 Run 정리)
+- 최신 배포 기준점: 이 문서를 포함한 `test/approved-control-validation` HEAD
 - Draft PR: [#1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1), base `main`, head `test/approved-control-validation`
-- `1879858`까지 backend 112 tests, frontend build/audit, Docker health와 1440×1000·390×844 UI 검증이 통과했다. 직전 `1b20704`에는 AI 안전 UI 탐색 순위화가 포함된다.
+- 이번 배포에는 조직 인증·역할·감사, 장시간 캡처, Burp/Fiddler 귀속 프로세스, Alembic V8 전환이 포함되며 backend 117 tests, frontend build/audit, Docker health와 1440×1000·390×844 UI 검증이 통과했다.
 - AI 추천은 화면 선택 후보일 뿐 판정·증적 영구 연결·DOCX 수록을 자동 수행하지 않는다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
+
+범용 비실기기 구현 범위는 이 배포로 완료했다. 이후 남은 작업은 실제 승인 단말 증적, 고객 환경에 고정되는 제조사 RASP·보안키패드 및 Burp/Fiddler 제품별 Adapter, macOS IPA 작업과 의도적으로 수동 유지하는 파괴적 검증뿐이다.
 
 현재 기능 변경은 프로젝트 생성 시 국내 진단 기준 하나를 고정하고, 해당 항목만 앱·Run 원장에 생성한 뒤 같은 Run의 재현 결과와 필수 원본 증적이 충족될 때만 취약점을 확정하는 흐름이다. 양호·해당없음은 상태만 기록하고 증적을 만들지 않는다. 기존 승인형 Candidate 안전 경계는 유지되며 high·blocked UI와 상태 변경 API는 실행하지 않는다. 루팅·탈옥 탐지 우회는 자동 실행하지 않고 첫 실행 전 안전 일시정지에서 코드 SHA-256과 대상 범위를 고정한 5분 만료 1회 승인으로만 직접 실행한다.
 
@@ -85,6 +87,9 @@ tests/               단위·API·Mock E2E 테스트
 - 취약점별 HTML 증적 설명서
 - Windows 로컬 웹 실행
 - 주요정보통신기반시설 27개·전자금융기반시설 56개 분리 프로필과 증적 기반 판정 원장
+- 선택형 조직 사용자 인증·viewer/operator/admin 권한·해시 체인 감사 원장
+- Run과 독립 실행 가능한 장시간 단말 로그·분할 화면 녹화 Job 및 전용 UI
+- 설정된 Burp/Fiddler 실행 파일의 Run 귀속 프로세스 기동·종료
 
 ### 운영 안전 경계
 
@@ -94,6 +99,7 @@ tests/               단위·API·Mock E2E 테스트
 - 단말별 활성 Run 하나만 허용하고, mitmproxy 포트는 실행마다 동적 할당·임대한다.
 - 중지·실패·서버 종료 시 외부 프로세스 트리를 정리하고, 재시작 시 활성 Run을 `interrupted`로 복구한다.
 - 실행 중인 Run이 있는 프로젝트 삭제는 409로 차단한다.
+- 실행 중인 장시간 캡처가 있는 프로젝트 삭제와 만료 Run 정리는 409로 차단한다.
 - 장시간 외부 작업 전 DB transaction을 commit해 SQLite 잠금을 유지하지 않는다.
 - 앱·단말 Adapter·Frida 스크립트 플랫폼이 다르면 API와 Orchestrator 양쪽에서 실행을 차단한다.
 - Live Run은 `app_id`와 검증된 package name/Bundle ID가 필수이며 기본 대상값으로 대체하지 않는다.
@@ -101,6 +107,7 @@ tests/               단위·API·Mock E2E 테스트
 - 고위험 직접 작업은 DB에 해시로 저장한 5분 만료 1회 승인 토큰과 증적을 사용한다. 수동 작업 Task가 살아 있는 동안 자동 Run 재개와 일반 중지를 409로 차단하고, 서버 종료는 해당 Task와 Frida 세션을 먼저 정리한 뒤 단말 Lease를 해제한다.
 - 서버는 기본 loopback 전용이다. 특정 LAN IP 실행은 프로세스별 API·관리자 토큰과 Trusted Host를 강제하며 API 문서는 기본 비활성화한다.
 - Docker Compose는 `.env` 전체를 전달하지 않고 `127.0.0.1` 포트 공개와 loopback Host 검증을 함께 만족할 때만 Docker bridge의 API 접근을 허용한다.
+- 선택형 조직 인증은 Argon2id 비밀번호, DB에는 SHA-256만 저장하는 불투명 세션, 5회 실패 잠금, viewer/operator/admin 서버 권한을 사용한다. 브라우저 세션은 메모리에만 두고 상태 변경·거부를 요청 본문 없이 이전 SHA-256에 연결한 감사 원장에 기록한다.
 - WebSocket은 접근 토큰 대신 Bearer 인증으로 발급한 30초 만료·Run/IP 범위·1회용 Ticket을 사용한다. LAN 토큰은 URL이나 브라우저 저장소에 넣지 않는다.
 - 증적 이미지·원본 다운로드·HTML 보고서는 인증된 Fetch로 Blob을 받은 뒤 짧은 수명의 브라우저 Object URL로 표시한다. LAN 모드에서도 인증 없는 일반 `/api` URL을 DOM에 넣지 않는다.
 - 프로젝트별 `retention_days`와 `raw_access_enabled` 정책이 있다. 일반 Run 화면은 항상 마스킹 흐름을 사용하고 Raw 인덱스·패킷은 전용 `/data` 화면과 활성화된 프로젝트 정책에서만 연다. 만료는 자동 삭제가 아니며 프로젝트 이름·복구 불가 확인·미리 본 정확한 Run ID를 서버가 재계산한 뒤에만 종료 Run의 DB·로컬 원본을 정리한다. 활성 Run, 앱 업로드, 앱별 정적 분석 기준선은 제외한다.
@@ -207,7 +214,7 @@ tests/               단위·API·Mock E2E 테스트
 
 - mitmproxy는 실제 `mitmdump` 프로세스와 addon으로 JSON Lines 흐름을 수집한다.
 - 요청·응답, Header/Body, Status와 민감정보 후보를 저장한다.
-- Burp/Fiddler는 현재 프로세스 제어가 아닌 수동 연동 Adapter다. 먼저 `proxy_manual_setup`에서 Listener·단말 프록시 설정을 확인한 뒤 앱 설치·실행·동적 작업을 수행하고, 마지막 `proxy_capture_import` 안전 지점에서 캡처를 종료해 HAR/JSON을 Import해야 재개할 수 있다.
+- Burp/Fiddler는 설정된 실행 파일을 작업대가 Run 귀속 프로세스로 시작·종료한다. 기존 사용자 프로세스는 건드리지 않는다. 먼저 `proxy_manual_setup`에서 Listener·단말 프록시 설정을 확인한 뒤 앱 설치·실행·동적 작업을 수행하고, 마지막 `proxy_capture_import` 안전 지점에서 캡처를 종료해 HAR/JSON을 Import해야 재개할 수 있다.
 - HAR/JSON은 크기·구조·Header·Body·URL·상태 코드를 제한하고 1개 이상의 흐름을 확인한 뒤 원본과 최종 패킷 증적으로 연결한다.
 - POST·PUT·PATCH·DELETE 요청을 자동 재전송하지 않는다.
 - mitmproxy는 특정 Windows LAN IP에만 바인딩하고 진단 단말의 출발지 IP만 addon에서 허용한다.
@@ -245,6 +252,9 @@ tests/               단위·API·Mock E2E 테스트
 - `operation_approvals`: 직접 작업의 승인 범위·승인자·만료·소비 상태와 토큰 SHA-256
 - `analysis_runs`: 정적 분석 시도별 상태·출력 경로·결과·SHA-256·활성화 시각
 - `projects.retention_days`, `projects.raw_access_enabled`: 프로젝트별 만료 계산과 Raw 전용 열람 정책
+- `organization_users`, `organization_sessions`: 역할 사용자와 해시 저장 세션
+- `audit_logs`: 이전 항목 SHA-256에 연결된 상태 변경·접근 거부 원장
+- `capture_jobs`: 장시간 로그·화면 녹화 상태·원본·SHA-256·실행자
 
 `app_artifacts.active_analysis_run_id`는 현재 활성 분석 결과를 가리킨다. `20260804_analysis_runs_v4` migration이 기존 DB를 백업한 뒤 이 컬럼을 추가하며, 신규 `analysis_runs` 테이블은 `create_all`로 생성한다.
 
@@ -252,7 +262,7 @@ tests/               단위·API·Mock E2E 테스트
 
 `20260821_project_data_policy_v7` migration은 프로젝트 보존기간과 Raw 열람 정책을 기존 SQLite 백업 후 추가한다.
 
-현재 Alembic은 사용하지 않는다. 안전 경계 컬럼은 `schema_migrations`와 시작 전 DB 백업을 사용하는 명시적 SQLite migration으로 추가한다. 이후 스키마 변경도 `create_all`만 믿지 말고 같은 방식 또는 Alembic 도입 후 진행한다.
+기존 V1~V7은 `schema_migrations`와 시작 전 DB 백업을 사용하는 명시적 SQLite migration으로 유지한다. V8부터 Alembic을 사용하며 `20260821_0001` transitional baseline 뒤 `20260821_0002`가 조직 사용자·세션·감사·장시간 캡처 테이블을 생성한다. 기존 DB는 V8 적용 전 백업하고 일부 Alembic 관리 테이블만 존재하면 자동 보정하지 않고 중단한다.
 
 분석 출력 디렉터리는 DB의 artifact ID가 아니라 업로드 파일의 UUID stem을 사용한다.
 
@@ -264,6 +274,7 @@ data/
 │  ├─ latest.json
 │  └─ runs/<analysis-run-id>/
 ├─ evidence/<run-id>/
+├─ captures/<capture-job-id>/
 ├─ proxy/
 ├─ ai_raw/
 └─ reports/
@@ -335,6 +346,8 @@ data/
 - 국내 기준 판정 원장과 MASTG 보조 커버리지
 - 설정과 OSS Adapter 상태
 - 프로젝트별 원본 데이터 보존·Raw 전용 열람·만료 Run 정리 원장
+- 장시간 캡처 실행·중지·분할 원본 다운로드 원장
+- 조직 사용자·역할·감사 해시 체인 원장
 - 대시보드 첫 실행 안내: Mock 데모 → 결과·증적 확인 → 실제 진단 준비
 - 진단 설정의 4단계 준비도: 프로젝트·대상 앱·단말 연결·캡처 범위
 - 발견항목의 결과 해석 안내: 심각도·판정·합성 데이터 분리 및 `needs_review` 필터
@@ -425,7 +438,7 @@ MSW_ENABLE_API_DOCS=false
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          112 passed
+pytest -q                          117 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -450,6 +463,11 @@ npm audit --audit-level=high      0 vulnerabilities
 - AI 증적 우선순위는 확정 항목을 제외하고 같은 Run의 증적 ID·필수 유형·수동 첨부 귀속을 재검증하며 ControlTest 판정을 변경하지 않는 회귀 테스트를 확인했다. Docker Mock Run에서 26개 미판정 중 AI 매핑 1개·필수 증적 준비 9개를 산출했고, 추천 증적 검토 화면과 `SYNTHETIC MOCK` 표식을 확인했다. 1440×1000·390×844 headless Firefox에서 가로 넘침과 콘솔 오류·경고는 0건이었다.
 - AI UI 탐색 순위화는 로컬 `low` 후보만 Provider에 전달하고 미지 ID를 무시하며 NVIDIA→Claude fallback과 Mock 적용 순서를 회귀 테스트로 확인했다. Docker Mock Run에서 추천 1순위와 실제 첫 안전 동작이 일치했고 `advisory_order_local_safety_authoritative` 정책·AIInvocation을 보존했다. 실시간 순위 rail과 설정 옵션을 1440×1000·390×844 headless Firefox에서 확인했으며 가로 넘침과 콘솔 오류·경고는 0건이었다.
 - 프로젝트별 보존기간·Raw 열람 기본 잠금, path-free 원본 인덱스, 정확한 프로젝트명·복구 불가 확인·최신 Run ID 재검증을 요구하는 만료 정리를 회귀 테스트로 확인했다. Docker 기존 DB는 V7 적용 전 백업됐고 `/data` 원장을 1440×1000·390×844 headless Firefox에서 확인했으며 가로 넘침과 콘솔 오류·경고는 0건이었다. 실제 저장 데이터 정리는 실행하지 않았다.
+- 선택형 조직 인증의 Argon2id 비밀번호, 5회 실패 잠금, IP·User-Agent 고정 세션, viewer/operator/admin 서버 권한, CORS preflight와 감사 원장 SHA-256 체인을 회귀 테스트로 확인했다.
+- 장시간 로그·분할 화면 녹화 Job의 단말·종류별 중복 차단, 중지, 재시작 복구, 크기 제한, 원자적 파일 저장과 프로젝트 Raw 정책 기반 다운로드 차단을 회귀 테스트로 확인했다.
+- 설정된 Burp 실행 파일은 작업대가 시작한 프로세스만 종료하고 기존 사용자 프로세스는 건드리지 않는 것을 회귀 테스트로 확인했다. 제품 내부 Listener·CA·내보내기는 명시적으로 `manual_required`다.
+- 기존 Docker DB를 백업한 뒤 Alembic `20260821_0002`까지 적용하고 재시작 시 중복 변경 없이 정상 기동함을 확인했다. `/healthz`는 healthy이며 V8 관리 테이블 4개가 생성됐다.
+- 조직 접근·장시간 캡처 화면을 1440×1000·390×844 headless Chromium에서 확인했으며 가로 넘침과 콘솔 오류·경고는 0건이었다. 조직 인증이 켜진 별도 임시 서버에서도 관리자 로그인·사용자 원장·감사 체인 검증을 확인했다.
 
 - Androguard 4.1.4와 공식 테스트 APK로 바이너리 Manifest 해석 성공
 - 패키지명 `tests.androguard`, 상태 `available`, 원문 SHA-256 생성 확인
@@ -491,7 +509,7 @@ npm audit --audit-level=high
 
 다음 항목은 완료된 것처럼 처리하면 안 된다.
 
-- Fiddler/Burp 프로세스 API 자동 제어
+- Burp/Fiddler 제품 내부 Listener·CA·내보내기 API 자동 제어(공통 안정 API가 없어 `manual_required`; 세션 프로세스 기동·종료는 구현됨)
 - 제조사별 보안 솔루션·보안 키패드·RASP 전용 검증 Adapter
 - 국내 기준 83개 중 상태 변경·공격성 재현이 필요한 항목의 자동 실행(항목은 원장에 있으며 `manual_required`로 판정)
 - macOS가 필요한 IPA 서명·재서명
@@ -500,8 +518,6 @@ npm audit --audit-level=high
 - 실 Android Clipboard의 대상 앱 귀속 검증과 FLAG_SECURE/background snapshot 검증
 - high·blocked UI 동작의 자동 실행(의도적으로 `manual_required`)과 Live 상태 변경 API 재전송(의도적으로 금지)
 - Live API 테스트 계정의 실제 귀속 검증(현재는 비밀번호 없는 계정 참조와 허용 서버 범위만 구조화)
-- 장시간 Logcat·화면 녹화 스트리밍 제어 UI
-- 조직용 인증·역할·감사 로그
 
 실제 Live 검증을 재개하려면 고객사 승인 범위가 적용된 Android/iOS 단말, 테스트 계정 참조, 허용 테스트 서버 목록과 유효한 승인 만료 시각이 필요하다. Android 우선 검증에서는 ADB 연결·루팅 권한·Frida/프록시 준비 상태를 확인한 뒤 실제 화면·Logcat·프로세스·프록시·저장소 증적을 수집한다. 앱이 루팅·탈옥 탐지로 차단되면 내장 고위험 우회 스크립트를 첫 실행 전 승인형 Spawn으로 시도한다. 적용되지 않는 제조사 RASP·보안 키패드는 차단 화면과 로그를 남기고 전용 Adapter 개발 전까지 `manual_required`로 처리한다.
 
@@ -526,8 +542,7 @@ npm audit --audit-level=high
 
 1. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
 2. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
-3. Burp/Fiddler 세션 연동과 장시간 수집의 취소·재연결 제어
-4. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
+3. 실제 제품 버전에 고정된 Burp/Fiddler Extension/API Adapter가 필요한 고객 환경 검증
 
 ## 13. 참고 문서
 

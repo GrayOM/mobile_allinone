@@ -409,3 +409,109 @@ async def capture_command_for_duration(
             await asyncio.gather(communicate, return_exceptions=True)
         result.finished_at = datetime.now(timezone.utc)
     return result, output
+
+
+async def stream_command_to_file_for_duration(
+    args: Sequence[str],
+    destination: Path,
+    *,
+    duration_seconds: int,
+    max_bytes: int,
+    shutdown_timeout: int = 10,
+) -> CommandResult:
+    """Stream bounded subprocess stdout to a file and always reap its process tree."""
+    command = [str(part) for part in args]
+    result = CommandResult(status=CapabilityStatus.FAILED, command=command)
+    process: asyncio.subprocess.Process | None = None
+    stdout_task: asyncio.Task[None] | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    wait_task: asyncio.Task[int] | None = None
+    limit_task: asyncio.Task[bool] | None = None
+    limit_reached = asyncio.Event()
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    async def stream_stdout(reader: asyncio.StreamReader) -> None:
+        written = 0
+        with temporary.open("wb") as output:
+            while chunk := await reader.read(64 * 1024):
+                remaining = max_bytes - written
+                if remaining > 0:
+                    accepted = chunk[:remaining]
+                    output.write(accepted)
+                    written += len(accepted)
+                if len(chunk) > remaining:
+                    limit_reached.set()
+
+    async def bounded_stderr(reader: asyncio.StreamReader) -> bytes:
+        captured = bytearray()
+        while chunk := await reader.read(16 * 1024):
+            if len(captured) < 1024 * 1024:
+                captured.extend(chunk[: 1024 * 1024 - len(captured)])
+        return bytes(captured)
+
+    try:
+        if not command or not command[0]:
+            result.status = CapabilityStatus.NOT_CONFIGURED
+            result.error = "실행 파일이 설정되지 않았습니다."
+            return result
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **subprocess_group_options(),
+        )
+        assert process.stdout is not None and process.stderr is not None
+        stdout_task = asyncio.create_task(stream_stdout(process.stdout))
+        stderr_task = asyncio.create_task(bounded_stderr(process.stderr))
+        wait_task = asyncio.create_task(process.wait())
+        limit_task = asyncio.create_task(limit_reached.wait())
+        done, _ = await asyncio.wait(
+            {wait_task, limit_task},
+            timeout=max(1, min(duration_seconds, 60)),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        stopped_after_duration = not done
+        if limit_reached.is_set() or stopped_after_duration:
+            await terminate_process_tree(process, timeout=float(shutdown_timeout))
+        await asyncio.wait_for(asyncio.shield(wait_task), timeout=shutdown_timeout)
+        await asyncio.wait_for(asyncio.shield(stdout_task), timeout=shutdown_timeout)
+        stderr = await asyncio.wait_for(asyncio.shield(stderr_task), timeout=shutdown_timeout)
+        result.return_code = 0 if stopped_after_duration else process.returncode
+        result.stderr = stderr.decode("utf-8", errors="replace")
+        if limit_reached.is_set():
+            result.error = f"수집 출력이 {max_bytes}바이트 제한을 초과해 중단했습니다."
+        elif stopped_after_duration or process.returncode == 0:
+            temporary.replace(destination)
+            result.status = CapabilityStatus.AVAILABLE
+        else:
+            result.error = result.stderr.strip() or "수집 명령이 실패했습니다."
+    except FileNotFoundError:
+        result.status = CapabilityStatus.NOT_CONFIGURED
+        result.error = f"실행 파일을 찾을 수 없습니다: {command[0] if command else ''}"
+    except asyncio.TimeoutError:
+        result.error = "수집 프로세스가 종료 제한시간 안에 끝나지 않았습니다."
+        if process is not None:
+            await terminate_process_tree(process)
+    except asyncio.CancelledError:
+        if process is not None:
+            await terminate_process_tree(process)
+        raise
+    except OSError as exc:
+        result.error = str(exc)
+        if process is not None:
+            await terminate_process_tree(process)
+    finally:
+        pending = [
+            task
+            for task in (stdout_task, stderr_task, wait_task, limit_task)
+            if task is not None and not task.done()
+        ]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        if result.status != CapabilityStatus.AVAILABLE:
+            temporary.unlink(missing_ok=True)
+        result.finished_at = datetime.now(timezone.utc)
+    return result
