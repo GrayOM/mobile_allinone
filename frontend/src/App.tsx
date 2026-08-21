@@ -12,6 +12,7 @@ import FindingDetailPage from "./pages/FindingDetailPage";
 import ScriptsPage from "./pages/ScriptsPage";
 import SettingsPage from "./pages/SettingsPage";
 import CoveragePage from "./pages/CoveragePage";
+import DataManagementPage from "./pages/DataManagementPage";
 
 export default function App() {
   const [authRequired, setAuthRequired] = useState(isAuthenticationRequired);
@@ -41,6 +42,7 @@ export default function App() {
           <Route path="findings" element={<FindingsPage />} />
           <Route path="findings/:findingId" element={<FindingDetailPage />} />
           <Route path="coverage" element={<CoveragePage />} />
+          <Route path="data" element={<DataManagementPage />} />
           <Route path="scripts" element={<ScriptsPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>

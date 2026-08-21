@@ -99,6 +99,10 @@ from backend.app.database.models import (
     ToolRun,
 )
 from backend.app.database.session import get_db
+from backend.app.data_retention import (
+    project_data_inventory,
+    purge_retention_runs,
+)
 from backend.app.demo import create_demo_apk
 from backend.app.devices import (
     AndroidDeviceAdapter,
@@ -510,6 +514,134 @@ async def update_project(
     db.commit()
     db.refresh(project)
     return project
+
+
+@router.get("/projects/{project_id}/data-inventory")
+def get_project_data_inventory(
+    request: Request,
+    project_id: str,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    project = _project_or_404(db, project_id)
+    response.headers["Cache-Control"] = "no-store"
+    return project_data_inventory(db, _settings(request), project)
+
+
+@router.get("/projects/{project_id}/runs/{run_id}/raw-index")
+def get_run_raw_index(
+    project_id: str,
+    run_id: str,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    project = _project_or_404(db, project_id)
+    if not project.raw_access_enabled:
+        raise HTTPException(
+            409,
+            "이 프로젝트의 Raw 데이터 열람 정책이 비활성화되어 있습니다.",
+        )
+    run = _run_or_404(db, run_id)
+    if run.project_id != project.id:
+        raise HTTPException(404, "현재 프로젝트에 속한 Run이 아닙니다.")
+    response.headers["Cache-Control"] = "no-store"
+    evidence = db.scalars(
+        select(Evidence)
+        .where(Evidence.run_id == run.id)
+        .order_by(Evidence.sequence, Evidence.captured_at)
+    ).all()
+    ai_rows = db.scalars(
+        select(AIInvocation)
+        .where(AIInvocation.run_id == run.id)
+        .order_by(AIInvocation.created_at)
+    ).all()
+    return {
+        "project_id": project.id,
+        "run_id": run.id,
+        "cache_policy": "no-store",
+        "sensitive_local_data": True,
+        "evidence": [
+            {
+                "id": item.id,
+                "type": item.evidence_type,
+                "title": item.title,
+                "sequence": item.sequence,
+                "mime_type": item.mime_type,
+                "sha256": item.sha256,
+                "captured_at": item.captured_at.isoformat(),
+                "download_available": bool(
+                    item.file_path and Path(item.file_path).is_file()
+                ),
+                "synthetic": item.synthetic,
+            }
+            for item in evidence
+        ],
+        "ai_invocations": [
+            {
+                "id": item.id,
+                "provider": item.provider,
+                "model": item.model,
+                "task": item.task,
+                "status": item.status,
+                "masked": item.masked,
+                "quality_score": item.quality_score,
+                "raw_response_available": bool(
+                    item.raw_response_path
+                    and Path(item.raw_response_path).is_file()
+                ),
+                "synthetic": item.synthetic,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in ai_rows
+        ],
+        "raw_flows_endpoint": f"/runs/{run.id}/flows/raw",
+    }
+
+
+class RetentionApplyRequest(BaseModel):
+    reviewed: bool = False
+    confirm_project_name: str = Field(min_length=1, max_length=200)
+    expected_run_ids: list[str] = Field(default_factory=list, max_length=1000)
+
+
+@router.post("/projects/{project_id}/retention/apply")
+def apply_project_retention(
+    request: Request,
+    project_id: str,
+    payload: RetentionApplyRequest,
+    db: Session = Depends(get_db),
+):
+    project = _project_or_404(db, project_id)
+    if not payload.reviewed:
+        raise HTTPException(422, "정리 대상과 복구 불가 경계를 먼저 검토해야 합니다.")
+    if payload.confirm_project_name != project.name:
+        raise HTTPException(422, "프로젝트 이름 확인값이 현재 프로젝트와 다릅니다.")
+    inventory = project_data_inventory(db, _settings(request), project)
+    current_ids = inventory["expired_run_ids"]
+    expected_ids = sorted(set(payload.expected_run_ids))
+    if expected_ids != current_ids:
+        raise HTTPException(
+            409,
+            {
+                "message": "미리 본 정리 대상이 현재 원장과 달라 실행하지 않았습니다.",
+                "current_expired_run_ids": current_ids,
+            },
+        )
+    try:
+        result = purge_retention_runs(
+            db,
+            _settings(request),
+            project,
+            expected_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    result["remaining_inventory"] = project_data_inventory(
+        db,
+        _settings(request),
+        project,
+    )
+    return result
 
 
 @router.delete("/projects/{project_id}")
@@ -2991,7 +3123,13 @@ def list_raw_flows(
     db: Session = Depends(get_db),
 ):
     """Explicit authenticated raw-data action; the default endpoint is masked."""
-    _run_or_404(db, run_id)
+    run = _run_or_404(db, run_id)
+    project = _project_or_404(db, run.project_id)
+    if not project.raw_access_enabled:
+        raise HTTPException(
+            409,
+            "프로젝트의 Raw 데이터 열람 정책을 전용 데이터 화면에서 활성화하세요.",
+        )
     response.headers["Cache-Control"] = "no-store"
     return db.scalars(
         select(ProxyFlow)

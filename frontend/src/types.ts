@@ -20,6 +20,8 @@ export interface Project {
   mock_mode: boolean;
   run_mode: "mock" | "live";
   assessment_profile: "critical_infrastructure" | "electronic_financial";
+  retention_days: number;
+  raw_access_enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -120,6 +122,71 @@ export interface Evidence {
   sha256: string | null;
   synthetic: boolean;
   captured_at: string;
+}
+
+export interface ProjectDataRunInventory {
+  run_id: string;
+  status: string;
+  created_at: string;
+  retention_basis_at: string;
+  expires_at: string;
+  expired: boolean;
+  synthetic: boolean;
+  evidence_count: number;
+  evidence_file_count: number;
+  flow_count: number;
+  finding_count: number;
+  ai_invocation_count: number;
+  ai_raw_response_count: number;
+  has_frida_transcript: boolean;
+  disk_bytes: number;
+}
+
+export interface ProjectDataInventory {
+  project_id: string;
+  project_name: string;
+  retention_days: number;
+  raw_access_enabled: boolean;
+  generated_at: string;
+  cutoff_at: string;
+  automatic_deletion: false;
+  confirmation_policy: string;
+  run_count: number;
+  expired_run_count: number;
+  total_disk_bytes: number;
+  expired_run_ids: string[];
+  runs: ProjectDataRunInventory[];
+}
+
+export interface RunRawIndex {
+  project_id: string;
+  run_id: string;
+  cache_policy: "no-store";
+  sensitive_local_data: true;
+  evidence: Array<{
+    id: string;
+    type: string;
+    title: string;
+    sequence: number;
+    mime_type: string | null;
+    sha256: string | null;
+    captured_at: string;
+    download_available: boolean;
+    synthetic: boolean;
+  }>;
+  ai_invocations: Array<{
+    id: string;
+    provider: string;
+    model: string;
+    task: string;
+    status: string;
+    masked: boolean;
+    quality_score: number | null;
+    raw_response_available: boolean;
+    synthetic: boolean;
+    created_at: string;
+  }>;
+  raw_flows_endpoint: string;
 }
 
 export interface ComponentValidationCandidate {

@@ -22,6 +22,8 @@ class ProjectCreate(BaseModel):
     external_analyzer_allowed: bool = False
     run_mode: RunMode = RunMode.LIVE
     assessment_profile: AssessmentProfile = AssessmentProfile.CRITICAL_INFRASTRUCTURE
+    retention_days: int = Field(default=90, ge=1, le=3650)
+    raw_access_enabled: bool = False
     mock_mode: bool | None = None
 
     @model_validator(mode="after")
@@ -41,6 +43,8 @@ class ProjectUpdate(BaseModel):
     mock_mode: bool | None = None
     run_mode: RunMode | None = None
     assessment_profile: AssessmentProfile | None = None
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
+    raw_access_enabled: bool | None = None
 
     @model_validator(mode="after")
     def normalize_legacy_mode(self):
@@ -66,6 +70,8 @@ class ProjectOut(ORMModel):
     mock_mode: bool
     run_mode: str
     assessment_profile: str
+    retention_days: int
+    raw_access_enabled: bool
     created_at: datetime
     updated_at: datetime
 

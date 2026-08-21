@@ -82,9 +82,7 @@ export default function LiveRunPage() {
   const [run, setRun] = useState<DiagnosticRun | null>(null);
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [flows, setFlows] = useState<ProxyFlow[]>([]);
-  const [evidenceView, setEvidenceView] = useState<"raw" | "masked">(
-    () => localStorage.getItem("msw.evidenceView") === "masked" ? "masked" : "raw",
-  );
+  const [evidenceView] = useState<"raw" | "masked">("masked");
   const [findings, setFindings] = useState<Finding[]>([]);
   const [componentCandidates, setComponentCandidates] = useState<ComponentValidationCandidate[]>([]);
   const [componentReview, setComponentReview] = useState<ComponentValidationCandidate | null>(null);
@@ -102,11 +100,6 @@ export default function LiveRunPage() {
   const [proxyImporting, setProxyImporting] = useState(0);
   const [actionError, setActionError] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
-
-  function selectEvidenceView(view: "raw" | "masked") {
-    localStorage.setItem("msw.evidenceView", view);
-    setEvidenceView(view);
-  }
 
   async function refresh() {
     const current = await api<DiagnosticRun>(`/runs/${runId}`);
@@ -347,8 +340,8 @@ export default function LiveRunPage() {
         </div>
         <div className="live-evidence-mode" aria-label="증적 표시 방식">
           <span>로컬 증적</span>
-          <button className={evidenceView === "raw" ? "is-active" : ""} type="button" onClick={() => selectEvidenceView("raw")}>원본</button>
-          <button className={evidenceView === "masked" ? "is-active" : ""} type="button" onClick={() => selectEvidenceView("masked")}>마스킹 보기</button>
+          <span className="is-active">기본 마스킹</span>
+          <Link className="live-evidence-mode__raw" to="/data">Raw 전용 화면</Link>
         </div>
         <div className="live-controls">
           {run.status === "safely_paused" ? (

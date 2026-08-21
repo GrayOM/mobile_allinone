@@ -149,7 +149,18 @@ responses instead of treating HTTP status as the only signal.
 
 Default flow and Frida stream views are structurally masked. Full proxy and
 Frida transcripts remain authenticated raw evidence; the explicit raw-flow API
-uses `Cache-Control: no-store`.
+uses `Cache-Control: no-store`. Project Raw access is disabled by default and
+the normal Run console no longer requests raw flows. The dedicated local data
+view requires the project policy to be enabled before it loads the path-free
+raw index and packet bodies.
+
+Each project has a bounded retention period, but expiry is a review signal and
+never an automatic delete. The inventory calculates terminal Run expiry and
+safe data-root sizes. Retention apply requires the exact previewed Run IDs,
+project-name confirmation and a non-recoverable acknowledgement; the server
+recomputes the candidate set before deleting. Active Runs, uploaded app files
+and app-scoped static analysis remain outside this operation. SQLite schema V7
+is backed up before the project data-policy columns are added.
 
 Frida callbacks enqueue serialized messages into a bounded queue. One writer
 opens the JSONL transcript once and drains it without blocking the callback;

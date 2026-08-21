@@ -33,6 +33,7 @@ from backend.app.database.migrations import (
     MIGRATION_ID_V4,
     MIGRATION_ID_V5,
     MIGRATION_ID_V6,
+    MIGRATION_ID_V7,
     apply_migrations,
 )
 from backend.app.devices import IOSDeviceAdapter
@@ -283,6 +284,7 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
     columns = {item["name"] for item in inspect(engine).get_columns("projects")}
     assert "run_mode" in columns
     assert "assessment_profile" in columns
+    assert {"retention_days", "raw_access_enabled"} <= columns
     artifact_columns = {
         item["name"] for item in inspect(engine).get_columns("app_artifacts")
     }
@@ -329,6 +331,10 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
             text("SELECT id FROM schema_migrations WHERE id = :id"),
             {"id": MIGRATION_ID_V6},
         )
+        data_policy_migration = connection.scalar(
+            text("SELECT id FROM schema_migrations WHERE id = :id"),
+            {"id": MIGRATION_ID_V7},
+        )
     assert migration.id == MIGRATION_ID
     assert migration.backup_path and Path(migration.backup_path).is_file()
     assert approval_status == "pending_approval"
@@ -336,6 +342,7 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
     assert analysis_migration == MIGRATION_ID_V4
     assert assessment_migration == MIGRATION_ID_V5
     assert frida_binding_migration == MIGRATION_ID_V6
+    assert data_policy_migration == MIGRATION_ID_V7
 
 
 def _wait_until_paused(client, run_id: str):

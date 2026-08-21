@@ -40,6 +40,12 @@ class Project(Base, TimestampMixin):
     assessment_profile: Mapped[str] = mapped_column(
         String(40), default="critical_infrastructure", nullable=False
     )
+    retention_days: Mapped[int] = mapped_column(
+        Integer, default=90, nullable=False
+    )
+    raw_access_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
 
     apps: Mapped[list["AppArtifact"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"

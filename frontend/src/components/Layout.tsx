@@ -8,6 +8,7 @@ const navigation = [
   { to: "/diagnostics/new", label: "진단 시작", mark: "R" },
   { to: "/findings", label: "발견항목", mark: "F" },
   { to: "/coverage", label: "통제 커버리지", mark: "V" },
+  { to: "/data", label: "데이터 보존", mark: "A" },
   { to: "/scripts", label: "Frida 라이브러리", mark: "S" },
   { to: "/settings", label: "설정", mark: "C" },
 ];
@@ -19,6 +20,7 @@ const titles: Record<string, string> = {
   "/diagnostics/new": "진단 설정",
   "/findings": "발견항목",
   "/coverage": "보안통제 커버리지",
+  "/data": "원본 데이터 보존",
   "/scripts": "Frida 스크립트 라이브러리",
   "/settings": "도구와 AI 설정",
 };

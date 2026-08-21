@@ -128,6 +128,13 @@ def test_mock_demo_runs_end_to_end(client):
 
     evidence = client.get(f"/api/runs/{run['id']}/evidence").json()
     flows = client.get(f"/api/runs/{run['id']}/flows").json()
+    denied_raw = client.get(f"/api/runs/{run['id']}/flows/raw")
+    assert denied_raw.status_code == 409
+    enabled_raw = client.patch(
+        f"/api/projects/{demo['project']['id']}",
+        json={"raw_access_enabled": True},
+    )
+    assert enabled_raw.status_code == 200
     raw_flows_response = client.get(f"/api/runs/{run['id']}/flows/raw")
     raw_flows = raw_flows_response.json()
     findings = client.get(f"/api/findings?run_id={run['id']}").json()

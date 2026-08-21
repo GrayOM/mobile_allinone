@@ -13,6 +13,7 @@ MIGRATION_ID_V3 = "20260804_external_destination_v3"
 MIGRATION_ID_V4 = "20260804_analysis_runs_v4"
 MIGRATION_ID_V5 = "20260820_assessment_profiles_v5"
 MIGRATION_ID_V6 = "20260820_frida_target_binding_v6"
+MIGRATION_ID_V7 = "20260821_project_data_policy_v7"
 
 
 ADDITIONS: dict[str, dict[str, str]] = {
@@ -75,6 +76,13 @@ V5_ADDITIONS: dict[str, dict[str, str]] = {
 
 V6_ADDITIONS: dict[str, dict[str, str]] = {
     "frida_scripts": {"target_app_id": "VARCHAR(36)"},
+}
+
+V7_ADDITIONS: dict[str, dict[str, str]] = {
+    "projects": {
+        "retention_days": "INTEGER NOT NULL DEFAULT 90",
+        "raw_access_enabled": "BOOLEAN NOT NULL DEFAULT 0",
+    },
 }
 
 
@@ -250,6 +258,7 @@ def apply_migrations(engine: Engine) -> None:
     _apply_v4(engine)
     _apply_v5(engine)
     _apply_v6(engine)
+    _apply_v7(engine)
 
 
 def _apply_v3(engine: Engine) -> None:
@@ -409,6 +418,45 @@ def _apply_v6(engine: Engine) -> None:
             ),
             {
                 "id": MIGRATION_ID_V6,
+                "applied_at": datetime.now(timezone.utc).isoformat(),
+                "backup": str(backup) if backup else None,
+            },
+        )
+
+
+def _apply_v7(engine: Engine) -> None:
+    with engine.begin() as connection:
+        applied = connection.scalar(
+            text("SELECT id FROM schema_migrations WHERE id = :id"),
+            {"id": MIGRATION_ID_V7},
+        )
+    if applied:
+        return
+    inspector = inspect(engine)
+    pending = {
+        table: {
+            column: definition
+            for column, definition in columns.items()
+            if column not in {item["name"] for item in inspector.get_columns(table)}
+        }
+        for table, columns in V7_ADDITIONS.items()
+        if inspector.has_table(table)
+    }
+    pending = {table: columns for table, columns in pending.items() if columns}
+    backup = _backup_sqlite_database(engine, MIGRATION_ID_V7) if pending else None
+    with engine.begin() as connection:
+        for table, columns in pending.items():
+            for column, definition in columns.items():
+                connection.execute(
+                    text(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}')
+                )
+        connection.execute(
+            text(
+                "INSERT INTO schema_migrations(id, applied_at, backup_path) "
+                "VALUES (:id, :applied_at, :backup)"
+            ),
+            {
+                "id": MIGRATION_ID_V7,
                 "applied_at": datetime.now(timezone.utc).isoformat(),
                 "backup": str(backup) if backup else None,
             },
