@@ -6,10 +6,10 @@
 
 ## 0. 현재 Git·인수인계 상태
 
-- 기본 브랜치: `main` (`origin/main` = `b82be7d`)
-- 개발·검증 브랜치: `test/approved-control-validation`
-- 최신 배포 기준점: 이 문서를 포함한 `test/approved-control-validation` HEAD
-- Draft PR: [#1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1), base `main`, head `test/approved-control-validation`
+- 기본·현재 작업 브랜치: `main`
+- 최신 배포 기준점: 이 문서를 포함한 `main` HEAD
+- 기능 검증 브랜치 `test/approved-control-validation`은 `main`에 fast-forward 반영됐다.
+- [PR #1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1)은 2026-08-21 병합 완료됐다.
 - 이번 배포에는 조직 인증·역할·감사, 장시간 캡처, Burp/Fiddler 귀속 프로세스, Alembic V8 전환이 포함되며 backend 117 tests, frontend build/audit, Docker health와 1440×1000·390×844 UI 검증이 통과했다.
 - AI 추천은 화면 선택 후보일 뿐 판정·증적 영구 연결·DOCX 수록을 자동 수행하지 않는다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
 
