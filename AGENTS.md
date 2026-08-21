@@ -15,6 +15,8 @@
 
 범용 비실기기 구현 범위는 이 배포로 완료했다. 이후 남은 작업은 실제 승인 단말 증적, 고객 환경에 고정되는 제조사 RASP·보안키패드 및 Burp/Fiddler 제품별 Adapter, macOS IPA 작업과 의도적으로 수동 유지하는 파괴적 검증뿐이다.
 
+루트 `README.md`는 제품 완성 전 공개 안내로 오해되지 않도록 의도적으로 제거했다. 완성 선언 전에는 복원하지 않는다.
+
 현재 기능 변경은 프로젝트 생성 시 국내 진단 기준 하나를 고정하고, 해당 항목만 앱·Run 원장에 생성한 뒤 같은 Run의 재현 결과와 필수 원본 증적이 충족될 때만 취약점을 확정하는 흐름이다. 양호·해당없음은 상태만 기록하고 증적을 만들지 않는다. 기존 승인형 Candidate 안전 경계는 유지되며 high·blocked UI와 상태 변경 API는 실행하지 않는다. 루팅·탈옥 탐지 우회는 자동 실행하지 않고 첫 실행 전 안전 일시정지에서 코드 SHA-256과 대상 범위를 고정한 5분 만료 1회 승인으로만 직접 실행한다.
 
 ## 1. 프로젝트 목적과 절대 원칙
@@ -525,7 +527,7 @@ npm audit --audit-level=high
 
 새 세션은 다음 순서로 시작한다.
 
-1. 이 `AGENTS.md`와 `README.md`, `docs/OSS_INTEGRATIONS.md`를 읽는다.
+1. 이 `AGENTS.md`와 `docs/OSS_INTEGRATIONS.md`를 읽는다.
 2. 사용자 요청이 기존 완료 기능인지 새 변경인지 구분한다.
 3. `rg --files`로 실제 파일을 확인하고 문서 내용만 믿지 않는다.
 4. 이 디렉터리는 현재 Git 저장소가 아닐 수 있으므로 `git status` 실패를 오류로 오인하지 않는다.
@@ -546,7 +548,6 @@ npm audit --audit-level=high
 
 ## 13. 참고 문서
 
-- `README.md`: 사용자 설치·운영 설명
 - `docs/IMPLEMENTATION_PLAN.md`: 전체 구조
 - `docs/OSS_INTEGRATIONS.md`: OSS 경계·라이선스·설치
 - `docs/DOMESTIC_ASSESSMENT.md`: 국내 2종 진단 프로필·증적 판정 정책
