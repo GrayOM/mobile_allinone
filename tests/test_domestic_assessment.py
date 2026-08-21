@@ -201,6 +201,12 @@ def test_run_generates_evidence_bound_ledger_and_manual_confirmation(client, tmp
     assert root["evidence_ids"]
     assert root["finding_ids"]
     evidence = client.get(f"/api/runs/{run['id']}/evidence").json()
+    evidence_by_id = {item["id"]: item for item in evidence}
+    root_evidence_types = {
+        evidence_by_id[item]["evidence_type"] for item in root["evidence_ids"]
+    }
+    assert root_evidence_types == {"device_state", "command_log", "screenshot"}
+    assert len(root["evidence_ids"]) == 3
     assert any(item["evidence_type"] == "vulnerability_assessment" for item in evidence)
 
     transaction = next(
@@ -333,3 +339,56 @@ def test_confirmed_manual_result_rejects_missing_evidence(client):
     evidence_after = client.get(f"/api/runs/{run_id}/evidence").json()
     assert len(evidence_after) == len(evidence_before)
     assert client.post(f"/api/runs/{run_id}/report/docx").status_code == 409
+
+    attachment = client.post(
+        f"/api/assessment-controls/{control_id}/evidence",
+        files={"file": ("review-note.txt", io.BytesIO(b"local review note"), "text/plain")},
+    )
+    assert attachment.status_code == 200
+    evidence_id = attachment.json()["evidence_id"]
+    uploaded_evidence = client.get(f"/api/runs/{run_id}/evidence").json()
+
+    not_applicable = client.post(
+        f"/api/assessment-controls/{control_id}/record",
+        json={
+            "outcome": "not_applicable",
+            "reviewer": "reviewer",
+            "summary": "이 앱에는 해당 기능이 없어 적용 대상이 아닙니다.",
+            "evidence_ids": [evidence_id],
+            "criteria_confirmed": True,
+        },
+    )
+    assert not_applicable.status_code == 200
+    assert not_applicable.json()["result"] == "not_applicable"
+    assert not_applicable.json()["evidence_ids"] == []
+    final_evidence = client.get(f"/api/runs/{run_id}/evidence").json()
+    assert len(final_evidence) == len(uploaded_evidence)
+    assert not any(
+        item["evidence_type"] == "assessment_attestation"
+        and item["inline_data"].get("control_test_id") == control_id
+        for item in final_evidence
+    )
+
+
+def test_domestic_baseline_cannot_receive_run_evidence_or_decisions(client):
+    demo = client.post("/api/demo/bootstrap").json()
+    coverage = client.get(
+        f"/api/coverage?app_id={demo['app']['id']}&standard=critical_infrastructure"
+    ).json()
+    baseline = coverage["tests"][0]
+    assert baseline["run_id"] is None
+
+    attachment = client.post(
+        f"/api/assessment-controls/{baseline['id']}/evidence",
+        files={"file": ("baseline.txt", io.BytesIO(b"not a run"), "text/plain")},
+    )
+    assert attachment.status_code == 409
+    decision = client.post(
+        f"/api/assessment-controls/{baseline['id']}/record",
+        json={
+            "outcome": "not_vulnerable",
+            "reviewer": "reviewer",
+            "summary": "앱 기준선에는 판정을 기록할 수 없어야 합니다.",
+        },
+    )
+    assert decision.status_code == 409

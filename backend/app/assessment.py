@@ -69,28 +69,63 @@ def _privileged_app_execution(
     evidence: list[Evidence],
 ) -> tuple[bool, list[str]]:
     device_rows = [item for item in evidence if item.evidence_type == "device_state"]
-    privileged = any(
-        isinstance(item.inline_data, dict)
-        and isinstance(item.inline_data.get("device"), dict)
-        and item.inline_data["device"].get("privileged") is True
+    privileged_rows = [
+        item
         for item in device_rows
-    )
+        if (
+            isinstance(item.inline_data, dict)
+            and isinstance(item.inline_data.get("device"), dict)
+            and item.inline_data["device"].get("privileged") is True
+        )
+    ]
     process_rows = [
         item
         for item in evidence
         if item.evidence_type in {"command_log", "device_log"}
         and "프로세스" in item.title
     ]
-    process_running = any(
-        isinstance(item.inline_data, dict)
-        and item.inline_data.get("status") == "available"
-        and (
-            bool((item.inline_data.get("data") or {}).get("running"))
-            or bool((item.inline_data.get("data") or {}).get("pids"))
-        )
+    running_rows = [
+        item
         for item in process_rows
+        if (
+            isinstance(item.inline_data, dict)
+            and item.inline_data.get("status") == "available"
+            and (
+                bool((item.inline_data.get("data") or {}).get("running"))
+                or bool((item.inline_data.get("data") or {}).get("pids"))
+            )
+        )
+    ]
+    preferred_process_titles = (
+        "앱 프로세스 실행 확인",
+        "Frida Spawn 후 프로세스 실행 확인",
+        "Frida Attach 후 프로세스 유지 확인",
+    )
+    representative_process = next(
+        (
+            item
+            for title in preferred_process_titles
+            for item in running_rows
+            if item.title == title
+        ),
+        running_rows[-1] if running_rows else None,
     )
     screenshots = [item for item in evidence if item.evidence_type == "screenshot"]
+    preferred_titles = (
+        "승인된 보안통제 우회 적용 후",
+        "우회 적용 후",
+        "승인된 Frida 우회 적용 후 앱 실행",
+        "앱 실행 직후",
+    )
+    representative_screen = next(
+        (
+            item
+            for title in preferred_titles
+            for item in reversed(screenshots)
+            if item.title == title
+        ),
+        screenshots[0] if screenshots else None,
+    )
     bypass_rows = [
         item
         for item in evidence
@@ -102,8 +137,13 @@ def _privileged_app_execution(
         and isinstance(item.inline_data.get("result"), dict)
         and item.inline_data["result"].get("status") == "available"
     ]
-    linked = [*device_rows, *process_rows, *screenshots, *bypass_rows]
-    return privileged and process_running and bool(screenshots), [
+    linked = [
+        *privileged_rows[-1:],
+        *([representative_process] if representative_process else []),
+        *([representative_screen] if representative_screen else []),
+        *bypass_rows[-1:],
+    ]
+    return bool(privileged_rows and running_rows and representative_screen), [
         item.id for item in linked
     ]
 

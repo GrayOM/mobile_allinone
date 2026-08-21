@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, downloadAuthenticatedFile, post } from "../api";
+import { api, downloadAuthenticatedFile, post, upload } from "../api";
 import type {
   AIStaticTriage,
   AppArtifact,
@@ -9,6 +9,7 @@ import type {
   ControlTest,
   CoverageData,
   DiagnosticRun,
+  Evidence,
   Project,
 } from "../types";
 import { EmptyState, SectionHeading, StatusChip } from "../components/UI";
@@ -18,6 +19,26 @@ const PROFILE_LABELS: Record<string, string> = {
   electronic_financial: "전자금융기반시설",
   owasp_mastg: "OWASP MASTG 보조 원장",
 };
+
+type AssessmentOutcome = "confirmed" | "needs_review" | "not_vulnerable" | "not_applicable";
+
+const ASSESSMENT_OUTCOMES: Array<{
+  value: AssessmentOutcome;
+  label: string;
+  description: string;
+}> = [
+  { value: "confirmed", label: "취약 확정", description: "재현 원본 증적과 기준 충족 확인이 필수입니다." },
+  { value: "needs_review", label: "추가 검토", description: "후보는 유지하지만 취약점으로 확정하지 않습니다." },
+  { value: "not_vulnerable", label: "양호", description: "상태만 기록하며 양호 증적은 생성하지 않습니다." },
+  { value: "not_applicable", label: "해당없음", description: "적용 대상이 아닌 사유만 기록합니다." },
+];
+
+const ASSESSMENT_RECORDABLE_STATUSES = new Set([
+  "safely_paused",
+  "completed",
+  "completed_with_gaps",
+  "manual_required",
+]);
 
 export default function CoveragePage() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -41,6 +62,20 @@ export default function CoveragePage() {
   const [reporting, setReporting] = useState(false);
   const [assessmentPlan, setAssessmentPlan] = useState<AssessmentPlan | null>(null);
   const [refreshingPlan, setRefreshingPlan] = useState(false);
+  const [runEvidence, setRunEvidence] = useState<Evidence[]>([]);
+  const [selectedControlId, setSelectedControlId] = useState("");
+  const [assessmentOutcome, setAssessmentOutcome] = useState<AssessmentOutcome>("confirmed");
+  const [assessmentReviewer, setAssessmentReviewer] = useState(
+    () => localStorage.getItem("msw.assessmentReviewer") ?? "",
+  );
+  const [assessmentSummary, setAssessmentSummary] = useState("");
+  const [criteriaConfirmed, setCriteriaConfirmed] = useState(false);
+  const [selectedEvidenceIds, setSelectedEvidenceIds] = useState<string[]>([]);
+  const [assessmentFile, setAssessmentFile] = useState<File | null>(null);
+  const [assessmentBusy, setAssessmentBusy] = useState(false);
+  const [assessmentUploadBusy, setAssessmentUploadBusy] = useState(false);
+  const [assessmentMessage, setAssessmentMessage] = useState("");
+  const [assessmentError, setAssessmentError] = useState("");
 
   const project = useMemo(
     () => projects.find((item) => item.id === projectId),
@@ -49,6 +84,14 @@ export default function CoveragePage() {
   const standard = ledger === "mastg"
     ? "owasp_mastg"
     : project?.assessment_profile ?? "critical_infrastructure";
+  const selectedRun = useMemo(
+    () => runs.find((item) => item.id === runId),
+    [runId, runs],
+  );
+  const selectedControl = useMemo(
+    () => coverage?.tests.find((item) => item.id === selectedControlId) ?? null,
+    [coverage, selectedControlId],
+  );
 
   useEffect(() => {
     void api<Project[]>("/projects")
@@ -94,6 +137,21 @@ export default function CoveragePage() {
       .then(setCoverage)
       .catch((reason: Error) => setError(reason.message));
   }, [appId, runId, standard]);
+
+  useEffect(() => {
+    if (!runId) {
+      setRunEvidence([]);
+      setSelectedControlId("");
+      return;
+    }
+    void api<Evidence[]>(`/runs/${runId}/evidence`)
+      .then(setRunEvidence)
+      .catch((reason: Error) => setError(reason.message));
+  }, [runId]);
+
+  useEffect(() => {
+    if (selectedControlId && !selectedControl) setSelectedControlId("");
+  }, [selectedControl, selectedControlId]);
 
   useEffect(() => {
     const selectedApp = apps.find((item) => item.id === appId);
@@ -187,6 +245,86 @@ export default function CoveragePage() {
       setError(reason instanceof Error ? reason.message : "취약점 DOCX 보고서를 생성하지 못했습니다.");
     } finally {
       setReporting(false);
+    }
+  }
+
+  function openAssessmentReview(test: ControlTest) {
+    const recordedOutcome = ASSESSMENT_OUTCOMES.some((item) => item.value === test.result)
+      ? test.result as AssessmentOutcome
+      : null;
+    const existingOutcome = recordedOutcome ?? "confirmed";
+    setSelectedControlId(test.id);
+    setAssessmentOutcome(existingOutcome);
+    setAssessmentSummary(recordedOutcome ? test.summary : "");
+    setCriteriaConfirmed(false);
+    setSelectedEvidenceIds(
+      test.evidence_ids.filter((id) => {
+        const evidence = runEvidence.find((item) => item.id === id);
+        return evidence?.evidence_type !== "assessment_attestation";
+      }),
+    );
+    setAssessmentFile(null);
+    setAssessmentMessage("");
+    setAssessmentError("");
+  }
+
+  async function refreshRunAssessment() {
+    if (!appId || !runId) return;
+    const query = new URLSearchParams({ run_id: runId, scope: "run", standard });
+    const [nextCoverage, nextEvidence] = await Promise.all([
+      api<CoverageData>(`/coverage?${query.toString()}`),
+      api<Evidence[]>(`/runs/${runId}/evidence`),
+    ]);
+    setCoverage(nextCoverage);
+    setRunEvidence(nextEvidence);
+  }
+
+  async function uploadAssessmentEvidence() {
+    if (!selectedControl || !assessmentFile) return;
+    setAssessmentUploadBusy(true);
+    setAssessmentError("");
+    setAssessmentMessage("");
+    try {
+      const response = await upload<{ evidence_id: string }>(
+        `/assessment-controls/${selectedControl.id}/evidence`,
+        assessmentFile,
+      );
+      setSelectedEvidenceIds((items) => [...new Set([...items, response.evidence_id])]);
+      setAssessmentFile(null);
+      await refreshRunAssessment();
+      setAssessmentMessage("원본 증적을 이 항목에 첨부했습니다. 취약 확정 전 필수 증적 충족 여부를 확인하세요.");
+    } catch (reason) {
+      setAssessmentError(reason instanceof Error ? reason.message : "원본 증적을 첨부하지 못했습니다.");
+    } finally {
+      setAssessmentUploadBusy(false);
+    }
+  }
+
+  async function recordAssessment() {
+    if (!selectedControl) return;
+    setAssessmentBusy(true);
+    setAssessmentError("");
+    setAssessmentMessage("");
+    try {
+      await post<ControlTest>(`/assessment-controls/${selectedControl.id}/record`, {
+        outcome: assessmentOutcome,
+        reviewer: assessmentReviewer.trim(),
+        summary: assessmentSummary.trim(),
+        evidence_ids: assessmentOutcome === "confirmed" ? selectedEvidenceIds : [],
+        criteria_confirmed: assessmentOutcome === "confirmed" && criteriaConfirmed,
+      });
+      localStorage.setItem("msw.assessmentReviewer", assessmentReviewer.trim());
+      await refreshRunAssessment();
+      setAssessmentMessage(
+        assessmentOutcome === "confirmed"
+          ? "취약 판정과 연결 증적을 확정 원장에 기록했습니다. 이제 취약점 전용 DOCX에 포함됩니다."
+          : "판정 상태와 검토 사유만 기록했습니다. 양호·해당없음 증적은 생성하거나 연결하지 않았습니다.",
+      );
+      setCriteriaConfirmed(false);
+    } catch (reason) {
+      setAssessmentError(reason instanceof Error ? reason.message : "판정을 기록하지 못했습니다.");
+    } finally {
+      setAssessmentBusy(false);
     }
   }
 
@@ -336,6 +474,36 @@ export default function CoveragePage() {
         />
       )}
 
+      {selectedControl && runId && (
+        <AssessmentDecisionDesk
+          control={selectedControl}
+          outcome={assessmentOutcome}
+          reviewer={assessmentReviewer}
+          summary={assessmentSummary}
+          criteriaConfirmed={criteriaConfirmed}
+          evidence={runEvidence}
+          selectedEvidenceIds={selectedEvidenceIds}
+          file={assessmentFile}
+          busy={assessmentBusy}
+          uploadBusy={assessmentUploadBusy}
+          message={assessmentMessage}
+          error={assessmentError}
+          onOutcomeChange={(value) => {
+            setAssessmentOutcome(value);
+            setAssessmentMessage("");
+            setAssessmentError("");
+          }}
+          onReviewerChange={setAssessmentReviewer}
+          onSummaryChange={setAssessmentSummary}
+          onCriteriaChange={setCriteriaConfirmed}
+          onEvidenceChange={setSelectedEvidenceIds}
+          onFileChange={setAssessmentFile}
+          onUpload={() => void uploadAssessmentEvidence()}
+          onRecord={() => void recordAssessment()}
+          onClose={() => setSelectedControlId("")}
+        />
+      )}
+
       {domestic && triage && (
         <section className="ai-precheck">
           <header>
@@ -382,6 +550,8 @@ export default function CoveragePage() {
                       test={test}
                       domestic={domestic}
                       plan={assessmentPlan?.controls.find((item) => item.control_id === (test.control_id || test.mastg_id))}
+                      onReview={test.run_id ? () => openAssessmentReview(test) : undefined}
+                      reviewDisabled={!selectedRun || !ASSESSMENT_RECORDABLE_STATUSES.has(selectedRun.status)}
                     />
                   ))}
                 </div>
@@ -495,7 +665,19 @@ function AssessmentDispatch({
   );
 }
 
-function ControlRow({ test, domestic, plan }: { test: ControlTest; domestic: boolean; plan?: AssessmentPlanControl }) {
+function ControlRow({
+  test,
+  domestic,
+  plan,
+  onReview,
+  reviewDisabled = false,
+}: {
+  test: ControlTest;
+  domestic: boolean;
+  plan?: AssessmentPlanControl;
+  onReview?: () => void;
+  reviewDisabled?: boolean;
+}) {
   const id = test.control_id || test.mastg_id;
   return (
     <article className="control-row">
@@ -529,9 +711,238 @@ function ControlRow({ test, domestic, plan }: { test: ControlTest; domestic: boo
             <p>연결 증적 {test.evidence_ids.length}건 · Finding {test.finding_ids.length}건</p>
           </details>
         )}
+        {domestic && onReview && (
+          <button
+            type="button"
+            className="button button--quiet button--small control-review-button"
+            onClick={onReview}
+            disabled={reviewDisabled}
+            title={reviewDisabled ? "안전 일시정지 또는 종료된 Run에서 판정할 수 있습니다." : "이 항목의 취약 증적과 판정을 검토합니다."}
+          >
+            취약 판정 작업
+          </button>
+        )}
       </div>
       <StatusChip value={test.status} />
       <StatusChip value={test.result} />
     </article>
+  );
+}
+
+function AssessmentDecisionDesk({
+  control,
+  outcome,
+  reviewer,
+  summary,
+  criteriaConfirmed,
+  evidence,
+  selectedEvidenceIds,
+  file,
+  busy,
+  uploadBusy,
+  message,
+  error,
+  onOutcomeChange,
+  onReviewerChange,
+  onSummaryChange,
+  onCriteriaChange,
+  onEvidenceChange,
+  onFileChange,
+  onUpload,
+  onRecord,
+  onClose,
+}: {
+  control: ControlTest;
+  outcome: AssessmentOutcome;
+  reviewer: string;
+  summary: string;
+  criteriaConfirmed: boolean;
+  evidence: Evidence[];
+  selectedEvidenceIds: string[];
+  file: File | null;
+  busy: boolean;
+  uploadBusy: boolean;
+  message: string;
+  error: string;
+  onOutcomeChange: (value: AssessmentOutcome) => void;
+  onReviewerChange: (value: string) => void;
+  onSummaryChange: (value: string) => void;
+  onCriteriaChange: (value: boolean) => void;
+  onEvidenceChange: (value: string[]) => void;
+  onFileChange: (value: File | null) => void;
+  onUpload: () => void;
+  onRecord: () => void;
+  onClose: () => void;
+}) {
+  const requiredKinds = new Set(control.evidence_requirements.flat());
+  const eligibleEvidence = evidence.filter((item) => {
+    if (item.evidence_type === "assessment_attestation") return false;
+    if (item.evidence_type === "manual_assessment_attachment") {
+      return !Array.isArray(item.inline_data)
+        && item.inline_data?.control_test_id === control.id;
+    }
+    return requiredKinds.has(item.evidence_type) || selectedEvidenceIds.includes(item.id);
+  });
+  const selectedTypes = new Set(
+    evidence
+      .filter((item) => selectedEvidenceIds.includes(item.id))
+      .map((item) => item.evidence_type),
+  );
+  const requirementStatus = control.evidence_requirements.map((group) => ({
+    group,
+    satisfied: group.some((kind) => selectedTypes.has(kind)),
+  }));
+  const requirementsSatisfied = requirementStatus.every((item) => item.satisfied);
+  const manualAttachmentAccepted = requiredKinds.has("manual_assessment_attachment");
+  const canRecord = reviewer.trim().length > 0
+    && summary.trim().length > 0
+    && (outcome !== "confirmed" || (criteriaConfirmed && requirementsSatisfied));
+
+  function toggleEvidence(id: string) {
+    onEvidenceChange(
+      selectedEvidenceIds.includes(id)
+        ? selectedEvidenceIds.filter((item) => item !== id)
+        : [...selectedEvidenceIds, id],
+    );
+  }
+
+  return (
+    <div className="consent-dialog-backdrop assessment-review-backdrop" role="presentation">
+      <section
+        className="assessment-review-desk"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="assessment-review-title"
+      >
+        <header className="assessment-review-desk__header">
+          <div>
+            <span>VULNERABILITY CASE FILE / {control.control_id || control.mastg_id}</span>
+            <h2 id="assessment-review-title">{control.title}</h2>
+            <small>같은 Run의 원본 증적으로 취약한 항목만 확정합니다.</small>
+          </div>
+          <button type="button" className="assessment-review-desk__close" onClick={onClose} aria-label="판정 작업 닫기">×</button>
+        </header>
+
+        <div className="assessment-review-desk__body">
+          <section className="assessment-evidence-bay">
+            <header>
+              <span>01 / REQUIRED EVIDENCE</span>
+              <strong>증적 충족 상태</strong>
+            </header>
+            <div className="assessment-requirements">
+              {requirementStatus.map(({ group, satisfied }) => (
+                <div className={satisfied ? "assessment-requirement assessment-requirement--ok" : "assessment-requirement"} key={group.join("|")}>
+                  <i aria-hidden="true">{satisfied ? "✓" : "!"}</i>
+                  <span>{group.join(" 또는 ")}</span>
+                  <strong>{satisfied ? "충족" : "필요"}</strong>
+                </div>
+              ))}
+            </div>
+
+            {outcome === "confirmed" ? (
+              <>
+                <div className="assessment-evidence-list">
+                  <div className="assessment-evidence-list__head">
+                    <span>같은 Run의 연결 가능한 원본</span>
+                    <strong>{selectedEvidenceIds.length} selected</strong>
+                  </div>
+                  {eligibleEvidence.length ? eligibleEvidence.map((item) => (
+                    <label className="assessment-evidence-row" key={item.id}>
+                      <input
+                        type="checkbox"
+                        checked={selectedEvidenceIds.includes(item.id)}
+                        onChange={() => toggleEvidence(item.id)}
+                      />
+                      <span><strong>{item.title}</strong><small>{item.evidence_type} · #{item.sequence}</small></span>
+                      <code>{item.sha256?.slice(0, 10) ?? "INLINE"}</code>
+                    </label>
+                  )) : (
+                    <p className="assessment-evidence-empty">필수 유형과 일치하는 원본 증적이 없습니다. 자동 수집을 실행하거나 허용된 수동 증적을 첨부하세요.</p>
+                  )}
+                </div>
+
+                {manualAttachmentAccepted && (
+                  <div className="assessment-upload">
+                    <label>
+                      <span>수동 원본 첨부</span>
+                      <input
+                        type="file"
+                        accept=".png,.jpg,.jpeg,.txt,.log,.json,.xml,.har"
+                        onChange={(event) => onFileChange(event.target.files?.[0] ?? null)}
+                      />
+                    </label>
+                    <button type="button" className="button button--primary button--small" onClick={onUpload} disabled={!file || uploadBusy}>
+                      {uploadBusy ? "첨부 중…" : "원본 첨부"}
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="assessment-no-evidence">
+                <strong>증적을 연결하지 않습니다</strong>
+                <p>양호·해당없음·추가 검토 판정은 상태와 검토 사유만 저장합니다. 취약점 보고서에도 포함되지 않습니다.</p>
+              </div>
+            )}
+          </section>
+
+          <section className="assessment-verdict-bay">
+            <header>
+              <span>02 / REVIEWER DECISION</span>
+              <strong>판정 기록</strong>
+            </header>
+            <div className="assessment-outcomes" role="radiogroup" aria-label="판정 결과">
+              {ASSESSMENT_OUTCOMES.map((item) => (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={outcome === item.value}
+                  className={outcome === item.value ? `assessment-outcome assessment-outcome--${item.value} assessment-outcome--active` : `assessment-outcome assessment-outcome--${item.value}`}
+                  key={item.value}
+                  onClick={() => onOutcomeChange(item.value)}
+                >
+                  <strong>{item.label}</strong>
+                  <small>{item.description}</small>
+                </button>
+              ))}
+            </div>
+
+            <div className="assessment-review-fields">
+              <label>
+                <span>검토자</span>
+                <input value={reviewer} maxLength={100} onChange={(event) => onReviewerChange(event.target.value)} placeholder="판정 책임자 또는 로컬 식별자" />
+              </label>
+              <label>
+                <span>{outcome === "confirmed" ? "취약 판정 근거" : "검토 사유"}</span>
+                <textarea value={summary} maxLength={4000} rows={6} onChange={(event) => onSummaryChange(event.target.value)} placeholder="재현한 취약 조건과 증적에서 확인한 사실을 기록하세요." />
+              </label>
+            </div>
+
+            {outcome === "confirmed" && (
+              <label className="assessment-criteria-check">
+                <input type="checkbox" checked={criteriaConfirmed} onChange={(event) => onCriteriaChange(event.target.checked)} />
+                <span>
+                  <strong>문서의 취약 진단 기준을 실제로 수행했습니다</strong>
+                  <small>{control.criteria.join(" ")}</small>
+                </span>
+              </label>
+            )}
+
+            {error && <div className="inline-alert">{error}</div>}
+            {message && <div className="inline-alert inline-alert--ok">{message}</div>}
+
+            <footer className="assessment-review-actions">
+              <div>
+                <span>{outcome === "confirmed" ? "확정 후 취약점 전용 DOCX 대상" : "증적·DOCX 제외"}</span>
+                <small>{outcome === "confirmed" && !requirementsSatisfied ? "필수 증적이 아직 부족합니다." : "판정 정책을 충족했습니다."}</small>
+              </div>
+              <button type="button" className="button button--quiet" onClick={onClose}>닫기</button>
+              <button type="button" className={outcome === "confirmed" ? "button button--danger" : "button button--primary"} onClick={onRecord} disabled={busy || !canRecord}>
+                {busy ? "기록 중…" : outcome === "confirmed" ? "취약점 확정 기록" : "판정 상태 기록"}
+              </button>
+            </footer>
+          </section>
+        </div>
+      </section>
+    </div>
   );
 }

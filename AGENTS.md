@@ -8,10 +8,10 @@
 
 - 기본 브랜치: `main` (`origin/main` = `b82be7d`)
 - 개발·검증 브랜치: `test/approved-control-validation`
-- 최신 기능 기준점: `c1033a3` (`219244c` 승인형 Candidate 실행 + 후속 검증 문서)
+- 최신 원격 기능 기준점: `a5d3993` (국내 기준 점검 계획·취약점 전용 보고서·승인형 보안통제 우회)
 - Draft PR: [#1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1), base `main`, head `test/approved-control-validation`
-- `c1033a3` 기준 GitHub Actions의 backend, frontend, portable-startup 중복 실행이 모두 통과했다. Backend는 98 tests, frontend audit은 high 취약점 0건이다.
-- 현재 작업트리에는 주요정보통신기반시설 27개·전자금융기반시설 56개 진단 프로필, 83개 항목 실행 경계 매트릭스, 앱 SHA-256 고정 점검 계획·배차판, 취약 확정 전용 증적·DOCX 보고서, 승인형 Android 루팅·iOS 탈옥 탐지 우회, 앱 정적 AI 사전 진단과 대상 앱 고정 우회 후보, 수동 증적·판정 API/UI와 Docker loopback bridge 수정이 미커밋 상태로 있다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
+- `a5d3993`은 `test/approved-control-validation`과 Draft PR #1에 푸시됐다. 푸시 전 로컬 검증은 backend 106 tests, frontend build/audit, Docker healthy와 데스크톱·모바일 UI가 통과했다.
+- 현재 작업트리에는 Run별 **취약 판정 작업** UI, 같은 Run의 필수 증적 선택·항목 고정 수동 첨부, 양호·해당없음 무증적 기록, 루팅·탈옥 판정의 대표 증적 3건 제한과 관련 문서·테스트가 미커밋 상태로 있다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
 
 현재 기능 변경은 프로젝트 생성 시 국내 진단 기준 하나를 고정하고, 해당 항목만 앱·Run 원장에 생성한 뒤 같은 Run의 재현 결과와 필수 원본 증적이 충족될 때만 취약점을 확정하는 흐름이다. 양호·해당없음은 상태만 기록하고 증적을 만들지 않는다. 기존 승인형 Candidate 안전 경계는 유지되며 high·blocked UI와 상태 변경 API는 실행하지 않는다. 루팅·탈옥 탐지 우회는 자동 실행하지 않고 첫 실행 전 안전 일시정지에서 코드 SHA-256과 대상 범위를 고정한 5분 만료 1회 승인으로만 직접 실행한다.
 
@@ -158,6 +158,7 @@ tests/               단위·API·Mock E2E 테스트
 - Run 종료 시 취약 확정 항목이 있을 때만 `vulnerability_assessment`를 생성하고 Live 미판정 항목은 품질 Gap과 `completed_with_gaps`로 남긴다. 양호·해당없음은 상태만 기록하고 증적을 요구하지 않는다.
 - 수동 취약 확정은 허용된 원본 형식·SHA-256·검토자·판정 기준을 `manual_assessment_attachment`와 `assessment_attestation`으로 보존한다.
 - `/coverage`의 국내 원장이 주 판정 화면이며 MASTG는 국제 보조 기준 스위치로 제공한다.
+- 안전 일시정지 또는 종료된 Run 원장에서는 항목별 **취약 판정 작업**을 열 수 있다. `confirmed`만 같은 Run의 필수 증적을 선택하고 문서 기준 확인·검토자·근거를 요구한다. 양호·해당없음·추가 검토는 증적을 생성·연결하지 않는다.
 
 ### MASTG 통제 커버리지
 
@@ -414,7 +415,7 @@ MSW_ENABLE_API_DOCS=false
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          106 passed
+pytest -q                          107 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -434,6 +435,8 @@ npm audit --audit-level=high      0 vulnerabilities
 - 실행 경계 원장과 AI 사전진단을 1440×1000·390×844 headless Firefox에서 확인하고 Frida 정적 사전 분석 앱 선택기를 열어 검증했다. 가로 넘침과 콘솔 오류·경고는 0건이었다.
 - APK·IPA 업로드·재분석 활성화 시 앱 ID·SHA-256·프로필에 고정된 점검 계획이 생성되고, NOW 후보 선별과 DEVICE/SERVER/MANUAL 대기가 분리되는 회귀 테스트를 확인했다. 정적 후보 부재는 양호로 바뀌지 않고 취약 확정도 자동 생성하지 않는다.
 - Docker Mock API에서 NOW 2/2 선별, DEVICE 5, SERVER 20과 취약·양호 자동 판정 0건을 확인했다. 앱 점검 배차판의 NOW 필터는 2개 행만 표시했고 1440×1000·390×844 headless Firefox에서 가로 넘침과 콘솔 오류·경고가 0건이었다.
+- 종료된 Mock Run의 항목별 취약 판정 데스크에서 필수 증적 충족, 같은 Run 원본 선택, 양호 전환 시 증적·DOCX 제외를 확인했다. 1440×1000·390×844 headless Firefox에서 가로 넘침과 콘솔 오류·경고가 0건이었다.
+- 루팅·탈옥 자동 판정은 Run의 모든 화면을 연결하지 않고 privileged 단말 상태, 대상 앱 실행 프로세스, 대표 앱 화면의 3개 증적만 연결한다. Docker Mock Run과 회귀 테스트에서 유형·건수를 확인했다.
 
 - Androguard 4.1.4와 공식 테스트 APK로 바이너리 Manifest 해석 성공
 - 패키지명 `tests.androguard`, 상태 `available`, 원문 SHA-256 생성 확인
