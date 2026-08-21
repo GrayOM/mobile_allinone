@@ -8,9 +8,9 @@
 
 - 기본 브랜치: `main` (`origin/main` = `b82be7d`)
 - 개발·검증 브랜치: `test/approved-control-validation`
-- 최신 기능 기준점: `e70d1a5` (AI 증적 우선순위·같은 Run/현재 프로필/필수 증적 재검증)
+- 최신 기능 기준점: `1879858` (프로젝트별 보존정책·Raw 전용 열람·명시적 만료 Run 정리)
 - Draft PR: [#1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1), base `main`, head `test/approved-control-validation`
-- `e70d1a5`까지 backend 108 tests, frontend build/audit, Docker health와 1440×1000·390×844 UI 검증이 통과했다.
+- `1879858`까지 backend 112 tests, frontend build/audit, Docker health와 1440×1000·390×844 UI 검증이 통과했다. 직전 `1b20704`에는 AI 안전 UI 탐색 순위화가 포함된다.
 - AI 추천은 화면 선택 후보일 뿐 판정·증적 영구 연결·DOCX 수록을 자동 수행하지 않는다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
 
 현재 기능 변경은 프로젝트 생성 시 국내 진단 기준 하나를 고정하고, 해당 항목만 앱·Run 원장에 생성한 뒤 같은 Run의 재현 결과와 필수 원본 증적이 충족될 때만 취약점을 확정하는 흐름이다. 양호·해당없음은 상태만 기록하고 증적을 만들지 않는다. 기존 승인형 Candidate 안전 경계는 유지되며 high·blocked UI와 상태 변경 API는 실행하지 않는다. 루팅·탈옥 탐지 우회는 자동 실행하지 않고 첫 실행 전 안전 일시정지에서 코드 SHA-256과 대상 범위를 고정한 5분 만료 1회 승인으로만 직접 실행한다.
@@ -103,6 +103,7 @@ tests/               단위·API·Mock E2E 테스트
 - Docker Compose는 `.env` 전체를 전달하지 않고 `127.0.0.1` 포트 공개와 loopback Host 검증을 함께 만족할 때만 Docker bridge의 API 접근을 허용한다.
 - WebSocket은 접근 토큰 대신 Bearer 인증으로 발급한 30초 만료·Run/IP 범위·1회용 Ticket을 사용한다. LAN 토큰은 URL이나 브라우저 저장소에 넣지 않는다.
 - 증적 이미지·원본 다운로드·HTML 보고서는 인증된 Fetch로 Blob을 받은 뒤 짧은 수명의 브라우저 Object URL로 표시한다. LAN 모드에서도 인증 없는 일반 `/api` URL을 DOM에 넣지 않는다.
+- 프로젝트별 `retention_days`와 `raw_access_enabled` 정책이 있다. 일반 Run 화면은 항상 마스킹 흐름을 사용하고 Raw 인덱스·패킷은 전용 `/data` 화면과 활성화된 프로젝트 정책에서만 연다. 만료는 자동 삭제가 아니며 프로젝트 이름·복구 불가 확인·미리 본 정확한 Run ID를 서버가 재계산한 뒤에만 종료 Run의 DB·로컬 원본을 정리한다. 활성 Run, 앱 업로드, 앱별 정적 분석 기준선은 제외한다.
 - Run 종료 상태는 `completed`, `completed_with_gaps`, `manual_required`, `failed`로 나뉜다. 앱 프로세스·화면·로그·선택 Frida·프록시 흐름/사용자 확인을 점검하고 누락된 필수 Stage를 `options.failed_required_stages`에 보존한다.
 - 승인된 통제 검증 모드는 승인 참조·승인자·만료·현재 단말 ID·테스트 계정 참조·허용 서버를 구조화한다. 실행 시작과 프록시 종료 시 범위를 재검증하며, mitmproxy는 범위 밖 호스트를 upstream 전에 HTTP 451로 차단한다. 수동 프록시를 포함해 범위 이탈이 있으면 이후 자동 네트워크 테스트·AI 판정을 수행하지 않고 `manual_required`로 종료한다. 승인·집행 증적은 외부 AI 카탈로그에서 제외한다.
 
@@ -243,10 +244,13 @@ tests/               단위·API·Mock E2E 테스트
 - `ai_invocations`: AI Provider·모델·상태·원문 기록
 - `operation_approvals`: 직접 작업의 승인 범위·승인자·만료·소비 상태와 토큰 SHA-256
 - `analysis_runs`: 정적 분석 시도별 상태·출력 경로·결과·SHA-256·활성화 시각
+- `projects.retention_days`, `projects.raw_access_enabled`: 프로젝트별 만료 계산과 Raw 전용 열람 정책
 
 `app_artifacts.active_analysis_run_id`는 현재 활성 분석 결과를 가리킨다. `20260804_analysis_runs_v4` migration이 기존 DB를 백업한 뒤 이 컬럼을 추가하며, 신규 `analysis_runs` 테이블은 `create_all`로 생성한다.
 
 `20260820_assessment_profiles_v5` migration은 프로젝트 진단 프로필과 `control_tests`의 기준·진단 조건·증적 조건·Finding 연결 컬럼을 백업 후 추가한다.
+
+`20260821_project_data_policy_v7` migration은 프로젝트 보존기간과 Raw 열람 정책을 기존 SQLite 백업 후 추가한다.
 
 현재 Alembic은 사용하지 않는다. 안전 경계 컬럼은 `schema_migrations`와 시작 전 DB 백업을 사용하는 명시적 SQLite migration으로 추가한다. 이후 스키마 변경도 `create_all`만 믿지 말고 같은 방식 또는 Alembic 도입 후 진행한다.
 
@@ -270,6 +274,9 @@ data/
 ```text
 /api/projects
 /api/projects/{id}/apps/upload
+/api/projects/{id}/data-inventory
+/api/projects/{id}/runs/{run-id}/raw-index
+/api/projects/{id}/retention/apply
 /api/apps/{id}/reanalyze
 /api/apps/{id}/analysis/overview
 
@@ -327,6 +334,7 @@ data/
 - Frida 라이브러리
 - 국내 기준 판정 원장과 MASTG 보조 커버리지
 - 설정과 OSS Adapter 상태
+- 프로젝트별 원본 데이터 보존·Raw 전용 열람·만료 Run 정리 원장
 - 대시보드 첫 실행 안내: Mock 데모 → 결과·증적 확인 → 실제 진단 준비
 - 진단 설정의 4단계 준비도: 프로젝트·대상 앱·단말 연결·캡처 범위
 - 발견항목의 결과 해석 안내: 심각도·판정·합성 데이터 분리 및 `needs_review` 필터
@@ -417,7 +425,7 @@ MSW_ENABLE_API_DOCS=false
 
 ```text
 python3 -m compileall -q backend   통과
-pytest -q                          111 passed
+pytest -q                          112 passed
 npm run build                     통과
 npm audit --audit-level=high      0 vulnerabilities
 ```
@@ -441,6 +449,7 @@ npm audit --audit-level=high      0 vulnerabilities
 - 루팅·탈옥 자동 판정은 Run의 모든 화면을 연결하지 않고 privileged 단말 상태, 대상 앱 실행 프로세스, 대표 앱 화면의 3개 증적만 연결한다. Docker Mock Run과 회귀 테스트에서 유형·건수를 확인했다.
 - AI 증적 우선순위는 확정 항목을 제외하고 같은 Run의 증적 ID·필수 유형·수동 첨부 귀속을 재검증하며 ControlTest 판정을 변경하지 않는 회귀 테스트를 확인했다. Docker Mock Run에서 26개 미판정 중 AI 매핑 1개·필수 증적 준비 9개를 산출했고, 추천 증적 검토 화면과 `SYNTHETIC MOCK` 표식을 확인했다. 1440×1000·390×844 headless Firefox에서 가로 넘침과 콘솔 오류·경고는 0건이었다.
 - AI UI 탐색 순위화는 로컬 `low` 후보만 Provider에 전달하고 미지 ID를 무시하며 NVIDIA→Claude fallback과 Mock 적용 순서를 회귀 테스트로 확인했다. Docker Mock Run에서 추천 1순위와 실제 첫 안전 동작이 일치했고 `advisory_order_local_safety_authoritative` 정책·AIInvocation을 보존했다. 실시간 순위 rail과 설정 옵션을 1440×1000·390×844 headless Firefox에서 확인했으며 가로 넘침과 콘솔 오류·경고는 0건이었다.
+- 프로젝트별 보존기간·Raw 열람 기본 잠금, path-free 원본 인덱스, 정확한 프로젝트명·복구 불가 확인·최신 Run ID 재검증을 요구하는 만료 정리를 회귀 테스트로 확인했다. Docker 기존 DB는 V7 적용 전 백업됐고 `/data` 원장을 1440×1000·390×844 headless Firefox에서 확인했으며 가로 넘침과 콘솔 오류·경고는 0건이었다. 실제 저장 데이터 정리는 실행하지 않았다.
 
 - Androguard 4.1.4와 공식 테스트 APK로 바이너리 Manifest 해석 성공
 - 패키지명 `tests.androguard`, 상태 `available`, 원문 SHA-256 생성 확인
@@ -491,7 +500,6 @@ npm audit --audit-level=high
 - 실 Android Clipboard의 대상 앱 귀속 검증과 FLAG_SECURE/background snapshot 검증
 - high·blocked UI 동작의 자동 실행(의도적으로 `manual_required`)과 Live 상태 변경 API 재전송(의도적으로 금지)
 - Live API 테스트 계정의 실제 귀속 검증(현재는 비밀번호 없는 계정 참조와 허용 서버 범위만 구조화)
-- 프로젝트별 retention 설정과 Raw 데이터 열람 전용 UI
 - 장시간 Logcat·화면 녹화 스트리밍 제어 UI
 - 조직용 인증·역할·감사 로그
 
@@ -516,11 +524,10 @@ npm audit --audit-level=high
 
 사용자가 별도 우선순위를 주지 않으면 다음 순서가 합리적이다.
 
-1. 프로젝트 retention·Raw 열람 UX와 저장 데이터 보호 확장
-2. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
-3. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
-4. Burp/Fiddler 세션 연동과 장시간 수집의 취소·재연결 제어
-5. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
+1. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
+2. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
+3. Burp/Fiddler 세션 연동과 장시간 수집의 취소·재연결 제어
+4. 범용 SQLite/Alembic migration 체계와 조직용 인증·감사 로그
 
 ## 13. 참고 문서
 
