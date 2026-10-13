@@ -244,3 +244,15 @@ async def _bounded_stream_scenario(tmp_path: Path) -> None:
 
 def test_streaming_capture_is_atomic_and_size_bounded(tmp_path: Path):
     asyncio.run(_bounded_stream_scenario(tmp_path))
+
+
+def test_alembic_config_accepts_percent_encoded_database_urls(tmp_path):
+    from sqlalchemy import create_engine
+
+    from backend.app.database.alembic_runner import _config
+
+    database = tmp_path / "C%3A-style" / "workbench.db"
+    database.parent.mkdir()
+    engine = create_engine(f"sqlite:///{database.as_posix()}")
+    config = _config(engine)
+    assert config.get_main_option("sqlalchemy.url").endswith("C%3A-style/workbench.db")

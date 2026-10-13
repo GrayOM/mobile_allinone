@@ -38,7 +38,12 @@ def _config(engine: Engine) -> Config:
         "script_location",
         str(ROOT_DIR / "backend" / "app" / "database" / "alembic"),
     )
-    config.set_main_option("sqlalchemy.url", engine.url.render_as_string(hide_password=False))
+    # Alembic stores options in configparser, which treats "%" as interpolation.
+    # SQLAlchemy 2.1 renders Windows drive colons as "%3A", so escape it.
+    config.set_main_option(
+        "sqlalchemy.url",
+        engine.url.render_as_string(hide_password=False).replace("%", "%%"),
+    )
     config.attributes["connection"] = engine
     return config
 
