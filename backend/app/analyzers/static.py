@@ -709,7 +709,11 @@ class StaticAnalyzer:
         result.structure["scanned_bytes"] = scanned
 
     def _extract_candidates(self, text: str, location: str) -> Iterable[Candidate]:
-        url_pattern = re.compile(r"https?://[^\s\"'<>\\]{4,500}", re.I)
+        # Only RFC 3986 URL characters: Mach-O/DEX binaries embed DER
+        # certificate bytes right after "http://", which must not become URLs.
+        url_pattern = re.compile(
+            r"https?://[A-Za-z0-9][A-Za-z0-9\-._~:/?#\[\]@!$&()*+,;=%]{3,499}", re.I
+        )
         ip_pattern = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
         secret_patterns = {
             "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b"),

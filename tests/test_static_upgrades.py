@@ -104,3 +104,14 @@ async def test_ios_ats_exception_domains_and_frameworks(tmp_path: Path):
     assert "secure.example.test" not in rules["ios.ats.exception_insecure_http"].rationale
     assert "ios.ats.web_content_exception" in rules
     assert {item["id"] for item in result.structure["frameworks"]} == {"react_native"}
+
+
+def test_url_candidates_ignore_binary_bytes_after_scheme(tmp_path: Path):
+    analyzer = StaticAnalyzer(_settings(tmp_path))
+    text = (
+        "http://\x16\x06\x03U\x1d junk "
+        "http://ocsp.apple.com/ocsp03-wwdrg3110\x02 "
+        "https://api.example.test/v1/login?x=1"
+    )
+    urls = [item.value for item in analyzer._extract_candidates(text, "binary") if item.kind == "url"]
+    assert urls == ["http://ocsp.apple.com/ocsp03-wwdrg3110", "https://api.example.test/v1/login?x=1"]
