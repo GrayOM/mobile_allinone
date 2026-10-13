@@ -9,6 +9,34 @@
 
 항목명과 진단 기준은 사용자가 제공한 두 DOCX 권고안에서 실행 정책에 필요한 부분을 요약한 것이다. 원문 전체를 복제하지 않는다. 프로젝트 생성 시 한 프로필을 선택하며 앱 또는 진단 이력이 생긴 뒤에는 변경할 수 없다.
 
+## 권고안 원문 지침
+
+두 DOCX의 항목별 취약점 설명·위협 요소·진단 기준·진단 예시·조치 방안·플랫폼별 조치 예시(Android/iOS 소스코드 예시 포함)는 저장소에 넣지 않는다. 공개 저장소이고 원문 전체를 복제하지 않는 원칙 때문이다. 각 작업 PC에서 보유한 DOCX로 한 번 생성한다.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\extract_korean_guidance.py --cii "<주요정보통신기반시설 권고안>.docx" --efi "<전자금융기반시설 권고안>.docx"
+```
+
+스크립트는 83개 항목의 ID·제목이 카탈로그와 모두 일치할 때만 `backend/app/catalog/data/korean_standard_guidance.json`(gitignore 대상)을 쓴다. 다른 경로는 `MSW_KOREAN_GUIDANCE_PATH`로 지정한다. 파일이 있으면 원장 행의 **보안 권고안 원문 기준 보기**, `GET /api/assessment/guidance/{profile}/{control-id}`, 취약점 DOCX의 위협 요소·권고안 진단 기준·조치 권고가 이를 사용한다. 없으면 기존 카탈로그 요약과 일반 조치 권고로 동작한다. 판정 정책은 항상 `korean_standards.py`가 결정한다.
+
+## 기준 외 예외 검사와 범위 제외
+
+프로젝트 기준은 생성 후 고정하되, 프로젝트 화면의 **진단 범위 · 기준 외 예외 검사**에서 두 가지 조정을 기록할 수 있다.
+
+- **기준 외 예외 검사(`CUS-MA-NN`)**: 선택한 권고안에 없는 고객 요청 검사를 추가한다. 이름·분류·적용 플랫폼(Android·iOS·양쪽)·판정 방식·실행 방식·작업 위험도·심각도·취약 판정 기준·점검 절차·참조·추가 사유·기록자를 저장한다. 필수 증적 그룹은 사용자가 정하지 않고 선택한 판정 방식의 카탈로그 정책을 그대로 사용하므로, 같은 판정 방식의 권고안 항목보다 약한 증적으로 확정할 수 없다. 정적 실행 방식은 정적 분석 검토 판정과만 함께 쓸 수 있다.
+- **범위 제외**: 고객과 합의한 범위 밖의 권고안 항목을 5자 이상의 사유와 기록자로 제외한다. 제외 항목은 원장에서 사라지지 않고 `excluded` / `not_applicable`과 사유를 표시한다. 제외 항목에는 증적 첨부·판정 기록이 409로 차단된다.
+
+두 조정은 앱 기준선(`run_id IS NULL`)과 새 Run에만 반영된다. 이미 생성된 Run 원장은 수정하지 않는다. Run에 사용된 예외 검사는 삭제할 수 없고 비활성화만 가능하며, 비활성화된 정의도 과거 Run 원장과 DOCX에서 계속 해석된다. 앱 점검 계획은 범위 지문(`scope_sha256`)이 바뀌면 다시 계산되며 제외 항목은 `excluded` 큐 상태로 표시된다. AI 사전 분류에는 제외 항목을 빼고 활성 예외 검사를 포함한다.
+
+```text
+GET    /api/projects/{id}/assessment-scope
+POST   /api/projects/{id}/custom-controls
+PATCH  /api/projects/{id}/custom-controls/{CUS-MA-NN}      {enabled}
+DELETE /api/projects/{id}/custom-controls/{CUS-MA-NN}      Run 사용 시 409
+PUT    /api/projects/{id}/control-exclusions/{control-id}  {reason, recorded_by}
+DELETE /api/projects/{id}/control-exclusions/{control-id}
+```
+
 ## 판정 규칙
 
 `ControlTest`는 `not_tested`, `needs_review`, `confirmed`, `not_vulnerable`, `not_applicable` 판정을 보존한다.
@@ -46,6 +74,8 @@
 `POST /api/apps/{app-id}/ai/triage`는 앱 정적 결과와 현재 프로필 ID를 AI에 전달해 사전 후보를 만든다. 승인 범위는 제외하고 외부 전송 정책과 마스킹을 적용한다. 결과는 앱 SHA-256에 고정되며 `needs_review` 이외의 판정으로 저장하지 않는다.
 
 `POST /api/runs/{run-id}/ai/evidence-priority`는 안전 일시정지 또는 종료된 Run의 미판정 항목을 검토 순서로 정렬한다. AI에는 승인·범위·기존 판정 원장을 제외한 제한된 증적 카탈로그와 현재 프로필 항목만 전달한다. 응답의 항목 ID와 증적 ID는 서버가 현재 Run에 다시 고정하고, 로컬 정책이 필수 증적 유형과 수동 첨부의 항목 귀속을 검사한다. 확정·양호·해당없음 항목은 추천에서 제외한다. 추천 증적을 판정 화면의 임시 선택 후보로 열 수 있지만, 검토자가 원본 확인·기준 수행 확인·판정 기록을 마치기 전에는 ControlTest나 DOCX에 연결되지 않는다.
+
+HTTPS 항목(`EFI-MA-41`~`44`)은 `tls_configuration` 판정 방식을 사용한다. 승인 서버 범위 안에서 실행한 같은 Run의 `tls_scan` 증적이 권고안의 INSECURE 조건을 보여 줄 때만 자동 확정하고, 점검이 일부라도 미완료이면 양호로 바꾸지 않는다. 판정 방식이 `tls_configuration`인 예외 검사는 네 항목 중 하나라도 취약하면 확정된다.
 
 루팅·탈옥 항목(`CII-MA-22`, `EFI-MA-07`)의 자동 취약 확정에는 다음 세 가지가 필요하다.
 

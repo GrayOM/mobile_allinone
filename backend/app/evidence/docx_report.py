@@ -16,7 +16,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.ai.masking import mask_context
-from backend.app.catalog import control_by_id, execution_plan
+from backend.app.assessment_scope import custom_row_for, resolve_definition
+from backend.app.catalog import execution_plan
+from backend.app.catalog.guidance import guidance_for
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.database.models import (
     AppArtifact,
@@ -99,6 +101,8 @@ class VulnerabilityDocxReportRenderer:
         for index, control in enumerate(controls, start=1):
             self._control_section(
                 document,
+                db=db,
+                platform=app.platform,
                 index=index,
                 control=control,
                 findings=[findings[item] for item in control.finding_ids if item in findings],
@@ -213,6 +217,8 @@ class VulnerabilityDocxReportRenderer:
         self,
         document: Document,
         *,
+        db: Session,
+        platform: str,
         index: int,
         control: ControlTest,
         findings: list[Finding],
@@ -220,7 +226,12 @@ class VulnerabilityDocxReportRenderer:
     ) -> None:
         document.add_paragraph(f"VULNERABILITY {index:02d}", style="Subtitle")
         document.add_heading(f"{control.mastg_id}  {control.title}", level=1)
-        definition = control_by_id(control.standard, control.mastg_id)
+        definition = resolve_definition(
+            db,
+            project_id=control.project_id,
+            standard=control.standard,
+            control_id=control.mastg_id,
+        )
         plan = execution_plan(definition) if definition else {}
         facts = document.add_table(rows=2, cols=4)
         facts.style = "Table Grid"
@@ -243,16 +254,37 @@ class VulnerabilityDocxReportRenderer:
             if finding.rationale and finding.rationale != control.summary:
                 document.add_paragraph(finding.rationale)
 
+        guidance = guidance_for(control.standard, control.mastg_id)
+        custom = custom_row_for(
+            db, project_id=control.project_id, control_id=control.mastg_id
+        )
+        if guidance and guidance["threats"]:
+            document.add_heading("위협 요소", level=2)
+            for line in guidance["threats"]:
+                document.add_paragraph(line, style="List Bullet")
+
         document.add_heading("취약 판정 기준", level=2)
         for criterion in control.criteria:
             document.add_paragraph(criterion, style="List Bullet")
+        if guidance and guidance["diagnostic_criteria"]:
+            document.add_paragraph("보안 권고안 진단 기준", style="Caption")
+            for line in guidance["diagnostic_criteria"][:20]:
+                document.add_paragraph(line, style="List Bullet 2")
+        if custom is not None:
+            document.add_paragraph(
+                f"기준 외 사용자 정의 검사 · 등록 {custom.recorded_by} · 사유: {custom.reason}",
+                style="Caption",
+            )
+            if custom.reference:
+                document.add_paragraph(f"참조: {custom.reference}")
 
         document.add_heading("재현 절차", level=2)
         reproduction = list(
             dict.fromkeys(
                 item for finding in findings for item in finding.reproduction if item
             )
-        ) or list(control.criteria)
+        ) or list(custom.procedure if custom is not None and custom.procedure else [])
+        reproduction = reproduction or list(control.criteria)
         for step in reproduction:
             document.add_paragraph(step, style="List Number")
 
@@ -263,9 +295,24 @@ class VulnerabilityDocxReportRenderer:
             self._evidence(document, position, item)
 
         document.add_heading("조치 권고", level=2)
-        document.add_paragraph(
-            str(plan.get("remediation") or "문서의 보안 권고안에 따라 취약 조건을 제거하고 동일 절차로 재점검합니다.")
-        )
+        if guidance and guidance["remediation"]:
+            for line in guidance["remediation"]:
+                document.add_paragraph(line, style="List Bullet")
+            platform_key = "Android" if str(platform).endswith("android") else "iOS"
+            examples = [
+                name
+                for name in guidance["remediation_examples"]
+                if platform_key.lower() in name.lower()
+            ]
+            if examples:
+                document.add_paragraph(
+                    "보안 권고안의 " + ", ".join(examples) + "를 함께 참고합니다.",
+                    style="Caption",
+                )
+        else:
+            document.add_paragraph(
+                str(plan.get("remediation") or "문서의 보안 권고안에 따라 취약 조건을 제거하고 동일 절차로 재점검합니다.")
+            )
 
     def _evidence(self, document: Document, position: int, item: Evidence) -> None:
         document.add_heading(f"E-{position:02d}  {item.title}", level=3)

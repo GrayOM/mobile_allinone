@@ -28,6 +28,7 @@ from backend.app.control_validation import (
     active_control_scope,
     evaluate_network_scope,
 )
+from backend.app.assessment_scope import sync_app_baseline
 from backend.app.database.models import (
     AIInvocation,
     AppArtifact,
@@ -111,6 +112,27 @@ class ManualActionInProgress(Exception):
 
 class DiagnosticManualRequired(Exception):
     pass
+
+
+def resolved_resigned_ipa(app: AppArtifact) -> Path:
+    """Return the verified re-signed IPA chosen for installation."""
+    if normalize_platform(app.platform) != "ios":
+        raise DiagnosticManualRequired("재서명 IPA 설치는 iOS 앱에서만 사용할 수 있습니다.")
+    record = (app.analysis_result or {}).get("ios_resigned")
+    if not isinstance(record, dict) or not record.get("file_name") or not record.get("sha256"):
+        raise DiagnosticManualRequired("재서명된 IPA가 없습니다. 앱 화면에서 IPA 재서명을 먼저 실행하세요.")
+    if record.get("source_sha256") != app.sha256:
+        raise DiagnosticManualRequired("재서명 IPA가 현재 업로드 원본과 일치하지 않습니다. 다시 재서명하세요.")
+    path = Path(app.stored_path).parent / "resigned" / Path(str(record["file_name"])).name
+    if not path.is_file():
+        raise DiagnosticManualRequired("재서명 IPA 파일을 찾을 수 없습니다.")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != record["sha256"]:
+        raise DiagnosticManualRequired("재서명 IPA의 SHA-256이 기록과 달라 설치를 중단했습니다.")
+    return path
 
 
 class DiagnosticOrchestrator:
@@ -1067,6 +1089,11 @@ class DiagnosticOrchestrator:
             select(ControlTest.id).where(ControlTest.run_id == run.id).limit(1)
         ):
             return
+        project = db.get(Project, run.project_id)
+        if project is not None:
+            # Bring the baseline up to the current catalog and project scope
+            # before cloning it into the Run ledger.
+            sync_app_baseline(db, project=project, artifact=app)
         templates = db.scalars(
             select(ControlTest).where(
                 ControlTest.app_id == app.id,
@@ -1586,7 +1613,10 @@ class DiagnosticOrchestrator:
 
                 if app:
                     await self._stage(db, run, "install", 22, "대상 앱을 단말에 설치합니다.")
-                    install = await device.install_app(run.device_id, Path(app.stored_path))
+                    install_path = Path(app.stored_path)
+                    if bool(run.options.get("use_resigned_ipa")):
+                        install_path = await asyncio.to_thread(resolved_resigned_ipa, app)
+                    install = await device.install_app(run.device_id, install_path)
                     await self._record_operation(db, run.id, "앱 설치", install)
                     if install.status == CapabilityStatus.MANUAL_REQUIRED:
                         raise DiagnosticManualRequired(install.message)

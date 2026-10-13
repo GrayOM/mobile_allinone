@@ -16,7 +16,7 @@ DEVICE_EVALUATORS = {
     "ui_review",
     "dynamic_review",
 }
-NETWORK_EVALUATORS = {"network_plaintext", "network_review"}
+NETWORK_EVALUATORS = {"network_plaintext", "network_review", "tls_configuration"}
 TEST_ACCOUNT_TOKENS = {
     "authentication",
     "authorization",
@@ -111,6 +111,14 @@ def execution_plan(control: StandardControlDefinition) -> dict[str, Any]:
         capability = "prepared_waiting_for_device"
         next_action = "실제 단말 연결 전에는 Mock 연습과 외부 증적 가져오기까지만 수행합니다."
         available_now = ["mock_rehearsal", "manual_evidence_import", "ai_test_plan"]
+    elif control.evaluator == "tls_configuration":
+        lane = "server_scope_required"
+        capability = "tls_scan_ready"
+        next_action = (
+            "승인된 테스트 서버 범위가 준비되면 TLS 구성 점검(sslyze)을 실행해 "
+            "프로토콜·암호·재협상·알려진 취약점 결과를 증적으로 연결합니다."
+        )
+        available_now = ["tls_configuration_scan", "manual_evidence_import", "ai_test_plan"]
     elif server_required:
         lane = "server_scope_required"
         capability = "test_case_ready"

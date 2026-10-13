@@ -277,6 +277,15 @@ class APKiDAnalyzerAdapter(AnalyzerAdapter):
         return result.finish()
 
 
+def _metadata_confidence(value: object, default: float = 0.72) -> float:
+    """Semgrep rule metadata must be strings in current releases; accept both."""
+    try:
+        score = float(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+    return min(max(score, 0.0), 1.0)
+
+
 class SemgrepAnalyzerAdapter(AnalyzerAdapter):
     name = "semgrep"
 
@@ -324,6 +333,9 @@ class SemgrepAnalyzerAdapter(AnalyzerAdapter):
             "scan",
             "--json",
             "--metrics=off",
+            # Analysis output lives under data/, which the checkout's .gitignore
+            # excludes; without this flag Semgrep silently scans nothing.
+            "--no-git-ignore",
             "--timeout",
             "30",
             "--max-target-bytes",
@@ -365,7 +377,7 @@ class SemgrepAnalyzerAdapter(AnalyzerAdapter):
                     severity=_severity(extra.get("severity"), "medium"),
                     location=location,
                     rationale=str(extra.get("message") or "코드 규칙과 일치했습니다."),
-                    confidence=float(metadata.get("confidence_score", 0.72)),
+                    confidence=_metadata_confidence(metadata.get("confidence_score")),
                     source_tool=self.name,
                     rule_id=str(item.get("check_id") or "unknown"),
                     references={

@@ -17,6 +17,11 @@ from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus
 
 from .manager import FridaManager
+from .runtime_compat import (
+    FridaRuntimeUnavailable,
+    PreparedScript,
+    prepare_script_source,
+)
 from .target import FridaTarget
 
 
@@ -82,6 +87,7 @@ class _ActiveSession:
     writer_task: asyncio.Task[None] | None = None
     writer_error: str | None = None
     device_manager: Any = None
+    runtime_wrappers: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class FridaSessionManager:
@@ -157,6 +163,7 @@ class FridaSessionManager:
                 "detached_reason": active.detached_reason,
                 "writer_error": active.writer_error,
                 "synthetic": active.synthetic,
+                "runtime_wrappers": dict(active.runtime_wrappers),
             }
 
     @staticmethod
@@ -431,6 +438,47 @@ class FridaSessionManager:
                 stats=stopped.stats if stopped else {},
             )
 
+        cache_dir = self.settings.data_dir / "frida_bundles"
+
+        def prepare_all() -> dict[str, PreparedScript]:
+            return {
+                script.script_id: prepare_script_source(
+                    frida_module, script.content, cache_dir=cache_dir
+                )
+                for script in scripts
+            }
+
+        try:
+            prepared_sources = await asyncio.to_thread(prepare_all)
+        except FridaRuntimeUnavailable as exc:
+            stopped = await self.stop(run_id)
+            return FridaSessionResult(
+                CapabilityStatus.NOT_CONFIGURED,
+                str(exc),
+                mode,
+                target,
+                transport=resolved_target.transport,
+                device_id=resolved_target.device_id,
+                endpoint=resolved_target.endpoint,
+                transcript_path=str(transcript_path),
+                stats=stopped.stats if stopped else {},
+            )
+        except Exception as exc:
+            stopped = await self.stop(run_id)
+            return FridaSessionResult(
+                CapabilityStatus.FAILED,
+                f"Frida 17 런타임 번들 생성 실패: {type(exc).__name__}: {exc}",
+                mode,
+                target,
+                transport=resolved_target.transport,
+                device_id=resolved_target.device_id,
+                endpoint=resolved_target.endpoint,
+                transcript_path=str(transcript_path),
+                stats=stopped.stats if stopped else {},
+            )
+        for script_id, prepared in prepared_sources.items():
+            active.runtime_wrappers[script_id] = prepared.to_dict()
+
         def connect() -> None:
             if resolved_target.transport == "remote":
                 active.device_manager = frida_module.get_device_manager()
@@ -471,7 +519,9 @@ class FridaSessionManager:
                 active.session.on("detached", detached)
             try:
                 for script in scripts:
-                    loaded = active.session.create_script(script.content, name=script.name)
+                    loaded = active.session.create_script(
+                        prepared_sources[script.script_id].source, name=script.name
+                    )
                     loaded.on(
                         "message",
                         lambda message, data, script_id=script.script_id, script_name=script.name: self._record(
@@ -639,7 +689,14 @@ class FridaSessionManager:
             )
         else:
             def load() -> None:
-                loaded = active.session.create_script(script.content, name=script.name)
+                frida_module = importlib.import_module("frida")
+                prepared = prepare_script_source(
+                    frida_module,
+                    script.content,
+                    cache_dir=self.settings.data_dir / "frida_bundles",
+                )
+                active.runtime_wrappers[script.script_id] = prepared.to_dict()
+                loaded = active.session.create_script(prepared.source, name=script.name)
                 loaded.on(
                     "message",
                     lambda message, data: self._record(

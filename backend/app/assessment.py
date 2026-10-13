@@ -8,7 +8,11 @@ from urllib.parse import urlsplit
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.catalog import control_by_id
+from backend.app.assessment_scope import (
+    align_definition_fields,
+    definition_drifted,
+    resolve_definition,
+)
 from backend.app.database.models import (
     AppArtifact,
     ControlTest,
@@ -168,6 +172,24 @@ def _plaintext_transport(
     return bool(plaintext and linked), linked
 
 
+def _tls_configuration(
+    evidence: list[Evidence],
+    control_id: str,
+) -> tuple[bool, list[str]]:
+    """Confirm an HTTPS item only from a same-run TLS scan that flagged it."""
+    matched: list[str] = []
+    for item in evidence:
+        if item.evidence_type != "tls_scan" or not isinstance(item.inline_data, dict):
+            continue
+        results = item.inline_data.get("control_results") or {}
+        result = results.get(control_id)
+        if result is None and control_id.startswith("CUS-MA-"):
+            result = results.get("TLS-ANY")
+        if isinstance(result, dict) and result.get("vulnerable") is True and result.get("reasons"):
+            matched.append(item.id)
+    return bool(matched), matched
+
+
 def upsert_standard_finding(
     db: Session,
     *,
@@ -187,7 +209,12 @@ def upsert_standard_finding(
         )
         .limit(1)
     )
-    definition = control_by_id(control.standard, control.mastg_id)
+    definition = resolve_definition(
+        db,
+        project_id=control.project_id,
+        standard=control.standard,
+        control_id=control.mastg_id,
+    )
     category = (
         control.finding_categories[0]
         if control.finding_categories
@@ -279,12 +306,23 @@ def evaluate_standard_controls(
                 ai_recommendations.setdefault(control_id, []).append(item)
 
     for control in controls:
-        definition = control_by_id(profile, control.mastg_id)
+        definition = resolve_definition(
+            db,
+            project_id=control.project_id,
+            standard=profile,
+            control_id=control.mastg_id,
+        )
         if definition is None:
             control.status = "failed"
             control.result = "unknown"
             control.summary = "현재 카탈로그에서 항목 정의를 찾지 못했습니다."
             continue
+        if control.result not in TERMINAL_ASSESSMENT_RESULTS and definition_drifted(
+            control, definition
+        ):
+            # Undecided rows follow the current evidence policy; decided rows
+            # keep the policy they were judged under.
+            align_definition_fields(control, definition)
 
         if control.result in TERMINAL_ASSESSMENT_RESULTS:
             linked = [
@@ -326,6 +364,10 @@ def evaluate_standard_controls(
             deterministic_confirmed, deterministic_ids = _plaintext_transport(
                 db, run, evidence
             )
+        elif definition.evaluator == "tls_configuration":
+            deterministic_confirmed, deterministic_ids = _tls_configuration(
+                evidence, control.mastg_id
+            )
 
         if confirmed_finding:
             control.status = "completed"
@@ -336,10 +378,12 @@ def evaluate_standard_controls(
         elif deterministic_confirmed:
             control.status = "completed"
             control.result = "confirmed"
-            control.summary = (
-                "문서의 취약 판정 조건이 구조화된 단말·프로세스·화면 증적으로 재현됐습니다."
-                if definition.evaluator == "root_execution"
-                else "암호화되지 않은 HTTP 흐름을 원본 프록시 증적으로 확인했습니다."
+            control.summary = {
+                "root_execution": "문서의 취약 판정 조건이 구조화된 단말·프로세스·화면 증적으로 재현됐습니다.",
+                "tls_configuration": "같은 Run의 TLS 구성 점검 원본에서 문서의 취약 조건을 확인했습니다.",
+            }.get(
+                definition.evaluator,
+                "암호화되지 않은 HTTP 흐름을 원본 프록시 증적으로 확인했습니다.",
             )
             control.evidence_ids = list(dict.fromkeys(deterministic_ids))
             finding = upsert_standard_finding(

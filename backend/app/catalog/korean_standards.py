@@ -54,8 +54,7 @@ class StandardControlDefinition:
         return value
 
 
-def _requirements(evaluator: str) -> tuple[tuple[str, ...], ...]:
-    mapping = {
+EVIDENCE_REQUIREMENTS_BY_EVALUATOR: dict[str, tuple[tuple[str, ...], ...]] = {
         "static_review": (("static_analysis",),),
         "root_execution": (
             ("device_state",),
@@ -79,13 +78,26 @@ def _requirements(evaluator: str) -> tuple[tuple[str, ...], ...]:
         ),
         "network_plaintext": (("network_capture", "manual_proxy_import"),),
         "network_review": (("network_capture", "network_test", "manual_proxy_import"),),
+    "tls_configuration": (("tls_scan", "manual_assessment_attachment"),),
         "ui_review": (("screenshot", "ui_tree", "manual_assessment_attachment"),),
         "dynamic_review": (
             ("screenshot", "runtime_tool", "manual_assessment_attachment"),
         ),
         "manual": (("manual_assessment_attachment",),),
     }
-    return mapping.get(evaluator, (("manual_assessment_attachment",),))
+
+EVALUATOR_KEYS: tuple[str, ...] = tuple(EVIDENCE_REQUIREMENTS_BY_EVALUATOR)
+AUTOMATION_KINDS: tuple[str, ...] = ("static", "dynamic", "hybrid", "manual")
+RISK_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+SEVERITY_LEVELS: tuple[str, ...] = ("info", "low", "medium", "high", "critical")
+PLATFORM_SCOPES: tuple[str, ...] = ("any", "android", "ios")
+CUSTOM_CONTROL_PREFIX = "CUS-MA"
+
+
+def _requirements(evaluator: str) -> tuple[tuple[str, ...], ...]:
+    return EVIDENCE_REQUIREMENTS_BY_EVALUATOR.get(
+        evaluator, (("manual_assessment_attachment",),)
+    )
 
 
 def _d(
@@ -194,10 +206,10 @@ ELECTRONIC_FINANCIAL_CONTROLS: tuple[StandardControlDefinition, ...] = (
     _d(_EFI, 38, "정보 노출", "시스템 운영정보 노출 여부", "응답·오류·소스에서 서버 버전·절대경로·중요 운영정보가 노출되는지 확인한다.", "hybrid", "network_review", "low", "system_information_exposure", "medium"),
     _d(_EFI, 39, "인증·인가", "인증 오류 횟수 제한기능 제공 여부", "정해진 오류 횟수 이상 인증 실패 후 계정·인증수단이 제한되는지 확인한다.", "manual", "manual", "blocked", "authentication_rate_limit", "high"),
     _d(_EFI, 40, "세션·전송", "불충분한 세션종료 처리", "로그아웃 후 세션이 파기되고 유휴 세션이 적절한 시간 안에 만료되는지 확인한다.", "manual", "network_review", "medium", "session_management", "high"),
-    _d(_EFI, 41, "세션·전송", "취약한 HTTPS 프로토콜 이용", "SSL 3.0 이하 또는 TLS 1.2 미만 등 취약한 프로토콜을 서버가 허용하는지 확인한다.", "manual", "network_review", "medium", "weak_tls_protocol", "high"),
-    _d(_EFI, 42, "세션·전송", "취약한 HTTPS 암호 알고리즘 이용", "RC4 등 취약 판정 암호군과 보안 강도가 부족한 HTTPS 암호 알고리즘을 허용하는지 확인한다.", "manual", "network_review", "medium", "weak_tls_cipher", "high"),
-    _d(_EFI, 43, "세션·전송", "취약한 HTTPS 컴포넌트 사용", "Heartbleed·CCS Injection·POODLE·FREAK 등 알려진 HTTPS 컴포넌트 취약점이 존재하는지 확인한다.", "manual", "manual", "high", "vulnerable_tls_component", "critical"),
-    _d(_EFI, 44, "세션·전송", "취약한 HTTPS 재협상 허용", "클라이언트 시작 비보안 TLS 재협상을 서버가 허용하는지 확인한다.", "manual", "network_review", "medium", "insecure_tls_renegotiation", "high"),
+    _d(_EFI, 41, "세션·전송", "취약한 HTTPS 프로토콜 이용", "SSL 3.0 이하 또는 TLS 1.2 미만 등 취약한 프로토콜을 서버가 허용하는지 확인한다.", "hybrid", "tls_configuration", "medium", "weak_tls_protocol", "high"),
+    _d(_EFI, 42, "세션·전송", "취약한 HTTPS 암호 알고리즘 이용", "RC4 등 취약 판정 암호군과 보안 강도가 부족한 HTTPS 암호 알고리즘을 허용하는지 확인한다.", "hybrid", "tls_configuration", "medium", "weak_tls_cipher", "high"),
+    _d(_EFI, 43, "세션·전송", "취약한 HTTPS 컴포넌트 사용", "Heartbleed·CCS Injection·POODLE·FREAK 등 알려진 HTTPS 컴포넌트 취약점이 존재하는지 확인한다.", "hybrid", "tls_configuration", "high", "vulnerable_tls_component", "critical"),
+    _d(_EFI, 44, "세션·전송", "취약한 HTTPS 재협상 허용", "클라이언트 시작 비보안 TLS 재협상을 서버가 허용하는지 확인한다.", "hybrid", "tls_configuration", "medium", "insecure_tls_renegotiation", "high"),
     _d(_EFI, 45, "노출 서비스", "불필요한 웹 메서드 허용", "사용하지 않는 HTTP 메서드로 파일 생성·변경·삭제 등 임의 동작이 가능한지 확인한다.", "manual", "manual", "blocked", "unsafe_http_method", "high"),
     _d(_EFI, 46, "노출 서비스", "관리자 페이지 노출 여부", "유추 가능한 경로·관리 포트에서 관리자 화면이 노출되고 접근통제가 우회되는지 확인한다.", "manual", "network_review", "medium", "admin_page_exposure"),
     _d(_EFI, 47, "정보 노출", "불필요한 파일 노출 여부", "샘플·테스트·백업·이전 소스 등 불필요한 파일이 알려진 경로에 노출되는지 확인한다.", "manual", "network_review", "medium", "unnecessary_file_exposure"),
@@ -238,32 +250,95 @@ def control_by_id(profile: str, control_id: str) -> StandardControlDefinition | 
     )
 
 
+def is_custom_control_id(control_id: str) -> bool:
+    return str(control_id or "").startswith(f"{CUSTOM_CONTROL_PREFIX}-")
+
+
+def custom_control_definition(
+    profile: str,
+    *,
+    control_id: str,
+    group: str,
+    title: str,
+    criteria: Iterable[str],
+    automation: str,
+    evaluator: str,
+    risk: str,
+    finding_categories: Iterable[str],
+    severity: str = "medium",
+) -> StandardControlDefinition:
+    """Build a project-defined (exception) control that behaves like a catalog item.
+
+    The evidence requirement groups are derived from the chosen evaluator so a
+    custom control can never be confirmed with weaker evidence than the
+    built-in item that uses the same evaluator.
+    """
+    if profile not in PROFILE_SOURCES:
+        raise ValueError("지원하지 않는 국내 진단 기준 프로파일입니다.")
+    if not is_custom_control_id(control_id):
+        raise ValueError("사용자 정의 항목 ID는 CUS-MA- 접두사를 사용해야 합니다.")
+    if automation not in AUTOMATION_KINDS:
+        raise ValueError("지원하지 않는 실행 방식입니다.")
+    if evaluator not in EVALUATOR_KEYS:
+        raise ValueError("지원하지 않는 판정 방식입니다.")
+    if risk not in RISK_LEVELS:
+        raise ValueError("지원하지 않는 위험도입니다.")
+    if severity not in SEVERITY_LEVELS:
+        raise ValueError("지원하지 않는 심각도입니다.")
+    criteria_values = tuple(str(item).strip() for item in criteria if str(item).strip())
+    category_values = tuple(
+        dict.fromkeys(str(item).strip() for item in finding_categories if str(item).strip())
+    )
+    if not criteria_values:
+        raise ValueError("사용자 정의 항목에는 진단 기준이 1개 이상 필요합니다.")
+    return StandardControlDefinition(
+        profile=profile,
+        control_id=control_id,
+        group=group.strip() or "사용자 정의 검사",
+        title=title.strip(),
+        criteria=criteria_values,
+        automation=automation,
+        evaluator=evaluator,
+        risk=risk,
+        evidence_requirements=_requirements(evaluator),
+        finding_categories=category_values or ("custom_assessment",),
+        severity=severity,
+    )
+
+
+def evaluate_definition_baseline(
+    definition: StandardControlDefinition,
+    platform: str,
+) -> dict[str, Any]:
+    if definition.automation == "static":
+        status = "completed"
+        result = "needs_review"
+        summary = "정적 분석 결과를 수집했습니다. 문서 기준에 따른 동적 또는 전문가 검토 전에는 취약점을 확정하지 않습니다."
+    elif definition.automation == "hybrid":
+        status = "manual_required"
+        result = "not_tested"
+        summary = "정적 신호와 Live 동적 증적을 함께 확인해야 합니다."
+    else:
+        status = "manual_required"
+        result = "not_tested"
+        summary = "Live Run에서 문서의 진단 기준과 승인 범위에 따라 실행해야 합니다."
+    item = definition.to_dict()
+    item.update(
+        {
+            "platform": platform,
+            "status": status,
+            "result": result,
+            "summary": summary,
+        }
+    )
+    return item
+
+
 def evaluate_profile_baseline(
     profile: str,
     platform: str,
 ) -> list[dict[str, Any]]:
-    evaluated: list[dict[str, Any]] = []
-    for definition in controls_for_profile(profile):
-        if definition.automation == "static":
-            status = "completed"
-            result = "needs_review"
-            summary = "정적 분석 결과를 수집했습니다. 문서 기준에 따른 동적 또는 전문가 검토 전에는 취약점을 확정하지 않습니다."
-        elif definition.automation == "hybrid":
-            status = "manual_required"
-            result = "not_tested"
-            summary = "정적 신호와 Live 동적 증적을 함께 확인해야 합니다."
-        else:
-            status = "manual_required"
-            result = "not_tested"
-            summary = "Live Run에서 문서의 진단 기준과 승인 범위에 따라 실행해야 합니다."
-        item = definition.to_dict()
-        item.update(
-            {
-                "platform": platform,
-                "status": status,
-                "result": result,
-                "summary": summary,
-            }
-        )
-        evaluated.append(item)
-    return evaluated
+    return [
+        evaluate_definition_baseline(definition, platform)
+        for definition in controls_for_profile(profile)
+    ]

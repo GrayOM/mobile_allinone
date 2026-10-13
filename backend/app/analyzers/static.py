@@ -117,6 +117,66 @@ class StaticAnalysisResult:
         return data
 
 
+_FRAMEWORK_RULES: tuple[tuple[str, str, tuple[str, ...], str | None], ...] = (
+    (
+        "flutter",
+        "Flutter",
+        (r"(^|/)libflutter\.so$", r"(^|/)libapp\.so$", r"/Frameworks/Flutter\.framework/", r"/Frameworks/App\.framework/App$", r"flutter_assets/"),
+        "Flutter 앱입니다. Dart AOT 코드(libapp.so·App.framework)는 jadx·Semgrep 정적 분석 범위 밖이므로 동적 증적과 수동 검토로 보완해야 합니다.",
+    ),
+    (
+        "react_native",
+        "React Native",
+        (r"(^|/)libreactnativejni\.so$", r"(^|/)index\.android\.bundle$", r"(^|/)main\.jsbundle$", r"/Frameworks/React\.framework/", r"(^|/)libhermes\.so$", r"/hermes\.framework/"),
+        "React Native 앱입니다. Hermes 바이트코드 번들은 문자열 신호만 확인되며 로직 판정은 동적 증적으로 보완해야 합니다.",
+    ),
+    (
+        "xamarin",
+        "Xamarin / .NET MAUI",
+        (r"(^|/)libmonodroid\.so$", r"(^|/)libmonosgen-2\.0\.so$", r"(^|/)assemblies/.+\.dll$", r"(^|/)assemblies\.blob$", r"\.app/.+\.dll$"),
+        ".NET 어셈블리 기반 앱입니다. DLL 코드는 jadx 분석 범위 밖이므로 별도 .NET 디컴파일 검토가 필요합니다.",
+    ),
+    (
+        "unity",
+        "Unity",
+        (r"(^|/)libunity\.so$", r"(^|/)libil2cpp\.so$", r"/Frameworks/UnityFramework\.framework/", r"(^|/)global-metadata\.dat$"),
+        "Unity 앱입니다. IL2CPP 네이티브 코드는 jadx·Semgrep 정적 분석 범위 밖입니다.",
+    ),
+    (
+        "cordova",
+        "Cordova / Ionic / Capacitor",
+        (r"(^|/)www/cordova\.js$", r"(^|/)public/cordova\.js$", r"(^|/)capacitor\.config\.json$", r"/Frameworks/Capacitor\.framework/"),
+        None,
+    ),
+    (
+        "kotlin_multiplatform",
+        "Kotlin Multiplatform / Compose",
+        (r"/Frameworks/shared\.framework/", r"(^|/)kotlin/kotlin\.kotlin_builtins$"),
+        None,
+    ),
+)
+
+
+def detect_frameworks(names: list[str]) -> list[dict[str, Any]]:
+    """Identify cross-platform runtimes from archive paths (Android and iOS)."""
+    detected: list[dict[str, Any]] = []
+    for framework_id, label, patterns, note in _FRAMEWORK_RULES:
+        compiled = [re.compile(pattern, re.I) for pattern in patterns]
+        hits = [name for name in names if any(item.search(name) for item in compiled)]
+        if not hits:
+            continue
+        detected.append(
+            {
+                "id": framework_id,
+                "name": label,
+                "evidence": sorted(hits)[:8],
+                "evidence_count": len(hits),
+                "static_scope_note": note,
+            }
+        )
+    return detected
+
+
 class StaticAnalyzer:
     def __init__(
         self,
@@ -418,6 +478,11 @@ class StaticAnalyzer:
             for name in archive.namelist()
             if name.lower().endswith((".so", ".dylib"))
         )
+        frameworks = detect_frameworks(archive.namelist())
+        result.structure["frameworks"] = frameworks
+        for framework in frameworks:
+            if framework.get("static_scope_note"):
+                result.warnings.append(framework["static_scope_note"])
 
     def _analyze_android_archive(
         self, archive: zipfile.ZipFile, result: StaticAnalysisResult
@@ -652,7 +717,24 @@ class StaticAnalyzer:
             "generic_api_key": re.compile(
                 r"(?i)\b(?:api[_-]?key|secret|token)\b\s*[:=]\s*[\"']([A-Za-z0-9_./+=-]{12,})[\"']"
             ),
-            "private_key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+            "private_key": re.compile(
+                r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+            ),
+            "google_api_key": re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+            "google_oauth_client_secret": re.compile(r"\bGOCSPX-[0-9A-Za-z_-]{28}\b"),
+            "firebase_database_url": re.compile(
+                r"\bhttps://[a-z0-9-]+(?:-default-rtdb)?\.(?:firebaseio\.com|firebasedatabase\.app)\b",
+                re.I,
+            ),
+            "slack_token": re.compile(r"\bxox[abposr]-[0-9A-Za-z-]{10,}\b"),
+            "github_token": re.compile(r"\b(?:gh[pousr]_[0-9A-Za-z]{36}|github_pat_[0-9A-Za-z_]{40,})\b"),
+            "stripe_secret_key": re.compile(r"\b(?:sk|rk)_live_[0-9A-Za-z]{20,}\b"),
+            "aws_secret_access_key": re.compile(
+                r"(?i)\baws_?secret_?access_?key\b\s*[:=]\s*[\"']([A-Za-z0-9/+=]{40})[\"']"
+            ),
+            "password_assignment": re.compile(
+                r"(?i)\b(?:password|passwd|pwd)\b\s*[:=]\s*[\"']([^\"'\s]{6,64})[\"']"
+            ),
         }
         for match in url_pattern.finditer(text):
             value = match.group(0).rstrip(".,);]")
@@ -668,7 +750,20 @@ class StaticAnalyzer:
         for kind, pattern in secret_patterns.items():
             for match in pattern.finditer(text):
                 value = match.group(1) if match.lastindex else match.group(0)
-                severity = "high" if kind in {"private_key", "aws_access_key"} else "medium"
+                severity = (
+                    "high"
+                    if kind
+                    in {
+                        "private_key",
+                        "aws_access_key",
+                        "aws_secret_access_key",
+                        "google_oauth_client_secret",
+                        "stripe_secret_key",
+                        "github_token",
+                        "slack_token",
+                    }
+                    else "medium"
+                )
                 yield Candidate(kind, value, location, severity, self._mask(value))
 
     @staticmethod
@@ -822,7 +917,71 @@ class StaticAnalyzer:
                         ],
                     )
                 )
-        elif result.manifest.get("ats", {}).get("NSAllowsArbitraryLoads") is True:
+            if result.manifest.get("uses_cleartext_traffic") is True:
+                result.findings.append(
+                    StaticFinding(
+                        "평문 HTTP 통신 허용 설정",
+                        "transport_security",
+                        "medium",
+                        "AndroidManifest.xml / application",
+                        (
+                            "android:usesCleartextTraffic=true가 설정되어 HTTP 평문 통신이 허용됩니다. "
+                            "실제 평문 전송 여부는 프록시 증적으로 확인해야 합니다."
+                        ),
+                        0.9,
+                        rule_id="android.manifest.cleartext_traffic",
+                        reproduction=[
+                            "Manifest의 usesCleartextTraffic와 networkSecurityConfig 설정을 확인합니다.",
+                            "승인된 단말과 프록시로 앱 통신을 캡처해 http:// 요청과 전송 데이터를 확인합니다.",
+                        ],
+                        false_positive_risk=(
+                            "networkSecurityConfig가 도메인별로 평문을 다시 제한하거나 앱이 실제로 HTTP를 사용하지 않을 수 있습니다."
+                        ),
+                        additional_checks=["networkSecurityConfig의 domain-config별 cleartextTrafficPermitted 값을 확인하세요."],
+                    )
+                )
+        if result.platform == "ios":
+            ats = result.manifest.get("ats") or {}
+            insecure_domains = []
+            exception_domains = ats.get("NSExceptionDomains") if isinstance(ats, dict) else None
+            if isinstance(exception_domains, dict):
+                for domain, settings in exception_domains.items():
+                    if isinstance(settings, dict) and (
+                        settings.get("NSExceptionAllowsInsecureHTTPLoads") is True
+                        or settings.get("NSTemporaryExceptionAllowsInsecureHTTPLoads") is True
+                    ):
+                        insecure_domains.append(str(domain)[:200])
+            if insecure_domains:
+                result.findings.append(
+                    StaticFinding(
+                        "ATS 도메인별 평문 HTTP 예외",
+                        "transport_security",
+                        "medium",
+                        "Info.plist / NSAppTransportSecurity / NSExceptionDomains",
+                        "다음 도메인에 HTTP 평문 예외가 있습니다: " + ", ".join(insecure_domains[:10]),
+                        0.9,
+                        rule_id="ios.ats.exception_insecure_http",
+                        reproduction=[
+                            "Info.plist의 NSExceptionDomains 설정을 확인합니다.",
+                            "승인된 단말과 프록시로 해당 도메인 통신이 실제 HTTP로 전송되는지 확인합니다.",
+                        ],
+                        false_positive_risk="예외 도메인이 개발용이거나 실제 운영 통신에서 사용되지 않을 수 있습니다.",
+                        additional_checks=["예외 도메인으로 민감정보가 전송되는지 프록시 증적으로 확인하세요."],
+                    )
+                )
+            if isinstance(ats, dict) and ats.get("NSAllowsArbitraryLoadsInWebContent") is True:
+                result.findings.append(
+                    StaticFinding(
+                        "WebView 콘텐츠 ATS 예외",
+                        "transport_security",
+                        "low",
+                        "Info.plist / NSAppTransportSecurity",
+                        "NSAllowsArbitraryLoadsInWebContent가 활성화되어 WebView에서 평문 콘텐츠 로드를 허용합니다.",
+                        0.85,
+                        rule_id="ios.ats.web_content_exception",
+                    )
+                )
+        if result.platform == "ios" and result.manifest.get("ats", {}).get("NSAllowsArbitraryLoads") is True:
             result.findings.append(
                 StaticFinding(
                     "ATS 전체 예외 허용",

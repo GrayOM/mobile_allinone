@@ -8,6 +8,8 @@ param(
     [switch]$Objection,
     [switch]$Pymobiledevice3,
     [switch]$Drozer,
+    [switch]$SSLyze,
+    [switch]$FridaRuntime,
     [switch]$AcceptCopyleftLicenses
 )
 
@@ -28,6 +30,8 @@ if ($All) {
     $Objection = $true
     $Pymobiledevice3 = $true
     $Drozer = $true
+    $SSLyze = $true
+    $FridaRuntime = $true
 }
 
 function Install-PythonTool {
@@ -41,24 +45,49 @@ function Install-PythonTool {
     Write-Host "[$Name] 설치 완료" -ForegroundColor Green
 }
 
-if ($Frida) { Install-PythonTool "Frida" "frida-tools" }
+if ($Frida) {
+    Install-PythonTool "Frida" "frida-tools"
+    $FridaRuntime = $true
+}
+
+if ($FridaRuntime) {
+    # Frida 17+ removed the built-in Java/ObjC bridges. The workbench bundles
+    # approved scripts with these pinned bridges at load time.
+    $Runtime = Join-Path $ProjectRoot "scripts\frida\runtime"
+    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+        Write-Host "[Frida runtime] npm이 없어 브리지를 설치하지 않았습니다. Node.js 18 이상을 설치하세요." -ForegroundColor Yellow
+    } else {
+        Write-Host "[Frida runtime] Java/ObjC 브리지 설치 시도" -ForegroundColor Cyan
+        Push-Location $Runtime
+        & npm install --no-audit --no-fund --ignore-scripts --save-exact
+        $code = $LASTEXITCODE
+        Pop-Location
+        if ($code -ne 0) {
+            Write-Host "[Frida runtime] 설치 실패 — Frida 17 Live 세션은 not_configured로 표시됩니다." -ForegroundColor Yellow
+        } else {
+            Write-Host "[Frida runtime] 설치 완료" -ForegroundColor Green
+        }
+    }
+}
 if ($Mitmproxy) { Install-PythonTool "mitmproxy" "mitmproxy" }
 if ($Semgrep) { Install-PythonTool "Semgrep" "semgrep" }
 
-$CopyleftSelected = $APKiD -or $Objection -or $Pymobiledevice3 -or $Drozer
+$CopyleftSelected = $APKiD -or $Objection -or $Pymobiledevice3 -or $Drozer -or $SSLyze
 if ($CopyleftSelected -and -not $AcceptCopyleftLicenses) {
     Write-Host ""
-    Write-Host "APKiD/objection/pymobiledevice3/drozer는 별도 오픈소스 라이선스 조건이 있습니다." -ForegroundColor Yellow
+    Write-Host "APKiD/objection/pymobiledevice3/drozer/sslyze는 별도 오픈소스 라이선스 조건이 있습니다." -ForegroundColor Yellow
     Write-Host "docs\OSS_INTEGRATIONS.md와 각 프로젝트 라이선스를 검토한 뒤 -AcceptCopyleftLicenses를 추가하세요."
     $APKiD = $false
     $Objection = $false
     $Pymobiledevice3 = $false
     $Drozer = $false
+    $SSLyze = $false
 }
 
 if ($APKiD) { Install-PythonTool "APKiD" "apkid" }
 if ($Objection) { Install-PythonTool "objection" "objection" }
 if ($Pymobiledevice3) { Install-PythonTool "pymobiledevice3" "pymobiledevice3" }
+if ($SSLyze) { Install-PythonTool "sslyze (AGPL-3.0, subprocess)" "sslyze==6.3.1" }
 if ($Drozer) {
     if (-not (Get-Command pipx -ErrorAction SilentlyContinue)) {
         Write-Host "[drozer] pipx가 없어 설치하지 않았습니다. 'py -m pip install pipx' 후 다시 실행하세요." -ForegroundColor Yellow
@@ -72,5 +101,5 @@ if ($Drozer) {
 
 Write-Host ""
 Write-Host "MobSF는 이 스크립트가 자동 설치하지 않습니다. 별도 Docker 인스턴스의 URL/API 키를 .env에 설정하세요."
-Write-Host "jadx, apktool, Android SDK, libimobiledevice는 공식 배포본 경로를 설정 화면에서 지정하세요."
+Write-Host "jadx, apktool, Android SDK, libimobiledevice, zsign은 공식 배포본 경로를 설정 화면에서 지정하세요."
 Write-Host "도구별 최종 상태는 서버 재시작 후 설정 > 연결된 오픈소스 기능에서 확인하세요." -ForegroundColor Green

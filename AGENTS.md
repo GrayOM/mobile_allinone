@@ -1,6 +1,6 @@
 # Mobile Security Workbench — 세션 인수인계
 
-> 최종 갱신: 2026-08-21
+> 최종 갱신: 2026-10-13
 > 작업 위치: `/mnt/c/Users/PSM/Desktop/project/mobile_allinone`
 > 새 세션에서는 이 파일을 먼저 읽고, 완료된 기능을 처음부터 다시 만들지 않는다.
 
@@ -10,6 +10,7 @@
 - 최신 배포 기준점: 이 문서를 포함한 `main` HEAD
 - 기능 검증 브랜치 `test/approved-control-validation`은 `main`에 fast-forward 반영됐다.
 - [PR #1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1)은 2026-08-21 병합 완료됐다.
+- 2026-10-13 작업: DOCX 권고안 원문 지침 연결, 프로젝트별 기준 외 예외 검사·범위 제외, 서버 TLS 구성 점검(sslyze), Frida 17 런타임 호환, zsign IPA 재서명, 정적 분석·Semgrep 규칙 확장과 Alembic V9. backend CI 조건 150 passed·3 skipped(지침 파일·Semgrep 포함 시 153 passed), frontend build·audit, 1440×1000·390×844 UI 검증을 통과했다. 실제 단말·실서버 검증은 여전히 없다.
 - 이번 배포에는 조직 인증·역할·감사, 장시간 캡처, Burp/Fiddler 귀속 프로세스, Alembic V8 전환이 포함되며 backend 117 tests, frontend build/audit, Docker health와 1440×1000·390×844 UI 검증이 통과했다.
 - AI 추천은 화면 선택 후보일 뿐 판정·증적 영구 연결·DOCX 수록을 자동 수행하지 않는다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
 
@@ -169,6 +170,9 @@ tests/               단위·API·Mock E2E 테스트
 - 수동 취약 확정은 허용된 원본 형식·SHA-256·검토자·판정 기준을 `manual_assessment_attachment`와 `assessment_attestation`으로 보존한다.
 - `/coverage`의 국내 원장이 주 판정 화면이며 MASTG는 국제 보조 기준 스위치로 제공한다.
 - 안전 일시정지 또는 종료된 Run 원장에서는 항목별 **취약 판정 작업**을 열 수 있다. `confirmed`만 같은 Run의 필수 증적을 선택하고 문서 기준 확인·검토자·근거를 요구한다. 양호·해당없음·추가 검토는 증적을 생성·연결하지 않는다.
+- 권고안 원문 지침(83개 항목의 설명·위협·진단 기준·진단 예시·조치 방안·Android/iOS 조치 예시)은 공개 저장소에 넣지 않는다. 각 PC에서 `scripts/extract_korean_guidance.py --cii <DOCX> --efi <DOCX>`로 gitignore 대상인 `backend/app/catalog/data/korean_standard_guidance.json`을 만든다. 스크립트는 83개 ID·제목이 모두 일치할 때만 저장한다. 파일이 있으면 원장 행 펼침, `/api/assessment/guidance/{profile}/{id}`, 취약점 DOCX가 사용하고 없으면 카탈로그 요약으로 동작한다. 판정 정책은 계속 `korean_standards.py`가 결정한다.
+- 프로젝트별 **기준 외 예외 검사**(`CUS-MA-NN`)와 **범위 제외**를 `project_assessment_controls`에 사유·기록자와 함께 저장한다. 예외 검사의 필수 증적은 선택한 판정 방식의 카탈로그 정책을 그대로 쓰며 플랫폼 범위(Android·iOS·양쪽)를 가진다. 제외 항목은 `excluded`/`not_applicable`로 원장에 남고 판정·증적 첨부가 409로 막힌다. 앱 기준선과 새 Run에만 반영되고 기존 Run 원장은 바꾸지 않는다. Run에 쓰인 예외 검사는 삭제 대신 비활성화만 된다.
+- `EFI-MA-41`~`44`는 `tls_configuration` 판정 방식이다. `POST /api/runs/{id}/tls-scan`이 승인 서버 범위 안 최대 5개 대상만 sslyze로 점검하고 원본 JSON을 `tls_scan` 증적으로 남긴다. 작업대가 DNS를 한 번 해석해 `host:port{ip}`로 주소를 고정하고, 안전 일시정지 Run에서는 수동 작업 슬롯을 잡아 점검 중 재개·중지를 막으며, 점검 후 Run 상태와 승인 범위를 다시 확인한 뒤에만 기록한다. 권고안의 INSECURE 조건만 자동 확정하며 WEAK(3DES·CBC)는 관찰 정보다. Mock은 네트워크 없이 SYNTHETIC 결과를 만든다.
 
 ### MASTG 통제 커버리지
 
@@ -205,6 +209,17 @@ tests/               단위·API·Mock E2E 테스트
 - AI 응답은 여러 Finding을 생성하며, 각 Finding은 현재 Run에 속한 증적 ID만 연결한다.
 - 낮은 신뢰도 결과는 `needs_review`로 남기고 AI 원문 저장은 기본 비활성화한다.
 - 외부 AI 입력은 Header/JSON/Query/Cookie/개인정보/고엔트로피 문자열을 구조적으로 마스킹한다.
+
+### Frida 17 호환
+
+- Frida 17은 Java/ObjC 브리지와 정적 `Module.*` 조회를 제거했다. `backend/app/frida/runtime_compat.py`가 승인된 원문과 SHA-256을 바꾸지 않고, 호환 shim을 앞에 붙이거나(16 이하·브리지 미사용) `frida.Compiler`로 shim·고정 버전 브리지를 번들하고 원문은 문자열로 넣어 전역 간접 `eval`로 실행한다(17 이상·브리지 사용). 따라서 원문은 ES 모듈 엄격 모드가 아니라 Frida 16과 같은 일반 스크립트 의미로 동작한다.
+- 브리지는 `scripts/frida/runtime`에 `frida-java-bridge 7.0.13`, `frida-objc-bridge 8.0.6`으로 고정하고 `install_oss_tools.ps1 -FridaRuntime` 또는 `scripts/install_frida_runtime.sh`로 로컬 설치한다. 없으면 앱 Spawn 전에 `not_configured`로 끝난다. 실제 로드 방식과 로드 소스 SHA-256은 Run Frida health의 `runtime_wrappers`에 남는다. 상태는 `/api/frida/runtime`.
+- Frida 17.23.3 로컬 프로세스에서 번들 `Java` 객체, 복원된 `findExportByName`·`findBaseAddress`, 암묵적 전역 변수와 최상위 `this`의 비엄격 동작을 확인했다. 실제 Android/iOS 단말 로드는 아직 검증하지 않았다.
+
+### iOS IPA 재서명
+
+- `POST /api/apps/{id}/ios/resign`은 업로드 SHA-256 재확인 후 원본을 복사해 zsign으로 재서명한다. 서명 자료는 `.env`의 `MSW_IOS_SIGNING_PROVISION`과 P12+비밀번호 또는 PEM 키+인증서 경로만 사용한다. P12는 메모리에서 복호화해 비공개 임시 폴더의 PEM 쌍으로 zsign에 넘기므로 비밀번호가 프로세스 명령줄에 나타나지 않는다. 재서명 기록은 재분석 후에도 보존되며 같은 앱의 분석 Lease로 재분석과 직렬화된다. 결과 SHA-256·원본 SHA-256·요청자는 앱 분석 결과와 `tool_runs`에 남는다.
+- Run 옵션 `use_resigned_ipa`를 켜면 Orchestrator가 재서명 사본을 다시 해시해 기록과 원본이 일치할 때만 설치한다.
 
 ### 런타임 OSS Adapter
 
@@ -257,6 +272,7 @@ tests/               단위·API·Mock E2E 테스트
 - `organization_users`, `organization_sessions`: 역할 사용자와 해시 저장 세션
 - `audit_logs`: 이전 항목 SHA-256에 연결된 상태 변경·접근 거부 원장
 - `capture_jobs`: 장시간 로그·화면 녹화 상태·원본·SHA-256·실행자
+- `project_assessment_controls`: 프로젝트별 기준 외 예외 검사(`custom`)와 범위 제외(`exclusion`), 사유·기록자·정의 SHA-256
 
 `app_artifacts.active_analysis_run_id`는 현재 활성 분석 결과를 가리킨다. `20260804_analysis_runs_v4` migration이 기존 DB를 백업한 뒤 이 컬럼을 추가하며, 신규 `analysis_runs` 테이블은 `create_all`로 생성한다.
 
@@ -264,7 +280,7 @@ tests/               단위·API·Mock E2E 테스트
 
 `20260821_project_data_policy_v7` migration은 프로젝트 보존기간과 Raw 열람 정책을 기존 SQLite 백업 후 추가한다.
 
-기존 V1~V7은 `schema_migrations`와 시작 전 DB 백업을 사용하는 명시적 SQLite migration으로 유지한다. V8부터 Alembic을 사용하며 `20260821_0001` transitional baseline 뒤 `20260821_0002`가 조직 사용자·세션·감사·장시간 캡처 테이블을 생성한다. 기존 DB는 V8 적용 전 백업하고 일부 Alembic 관리 테이블만 존재하면 자동 보정하지 않고 중단한다.
+기존 V1~V7은 `schema_migrations`와 시작 전 DB 백업을 사용하는 명시적 SQLite migration으로 유지한다. V8부터 Alembic을 사용하며 `20260821_0001` transitional baseline 뒤 `20260821_0002`가 조직 사용자·세션·감사·장시간 캡처 테이블을, `20260821_0003`(V9)이 `project_assessment_controls`를 생성한다. 기존 DB는 Alembic revision이 올라가기 전마다 백업하고, 일부 Alembic 관리 테이블만 존재하면 자동 보정하지 않고 중단한다.
 
 분석 출력 디렉터리는 DB의 artifact ID가 아니라 업로드 파일의 UUID stem을 사용한다.
 
@@ -331,6 +347,16 @@ data/
 /api/ws-ticket
 /api/ai/test
 /api/settings
+
+/api/projects/{id}/assessment-scope
+/api/projects/{id}/custom-controls[/{CUS-MA-NN}]
+/api/projects/{id}/control-exclusions/{control-id}
+/api/assessment/guidance[/{profile}/{control-id}]
+/api/assessment/tls-scanner
+/api/runs/{id}/tls-scan
+/api/frida/runtime
+/api/ios/signing
+/api/apps/{id}/ios/resign
 ```
 
 ## 6. UI 상태
@@ -354,6 +380,7 @@ data/
 - 진단 설정의 4단계 준비도: 프로젝트·대상 앱·단말 연결·캡처 범위
 - 발견항목의 결과 해석 안내: 심각도·판정·합성 데이터 분리 및 `needs_review` 필터
 - 발견항목 원장은 앱 취약점과 모바일 보안통제 신호를 분리하며, 정적 확인·동적 재검증 필요·실행 증적 확인 상태를 표시한다.
+- 프로젝트 화면의 진단 범위·기준 외 예외 검사 원장, iOS 앱의 IPA 재서명 패널, 국내 원장의 CUSTOM·OUT OF SCOPE 표식과 권고안 원문 기준 펼침, Run 원장의 서버 TLS 구성 점검 패널, 설정 화면의 Frida 17 런타임·sslyze·zsign 상태가 연결되어 있다.
 
 디자인 방향은 산업용 로컬 보안 워크벤치다.
 
@@ -402,10 +429,11 @@ cd ..
 
 ```powershell
 .\install_oss_tools.ps1 -Frida -Mitmproxy -Semgrep
-.\install_oss_tools.ps1 -APKiD -Objection -Pymobiledevice3 -Drozer -AcceptCopyleftLicenses
+.\install_oss_tools.ps1 -APKiD -Objection -Pymobiledevice3 -Drozer -SSLyze -AcceptCopyleftLicenses
+.\install_oss_tools.ps1 -FridaRuntime
 ```
 
-MobSF, jadx, apktool, Android SDK와 libimobiledevice는 URL 또는 실행 파일 경로를 설정한다. 설치 실패를 성공으로 처리하면 안 된다.
+`-Frida`는 Frida 17 런타임 브리지도 함께 설치한다. Linux·macOS는 `scripts/install_frida_runtime.sh`를 사용한다. MobSF, jadx, apktool, Android SDK, libimobiledevice, zsign은 URL 또는 실행 파일 경로를 설정한다. 설치 실패를 성공으로 처리하면 안 된다.
 
 Androguard 4.1.x와 다른 보안 도구의 호환성을 위해 `cryptography>=46.0.6,<48`로 제한되어 있다. 특별한 근거 없이 이 상한을 제거하지 않는다.
 
@@ -436,14 +464,24 @@ MSW_ENABLE_API_DOCS=false
 
 ## 9. 현재 검증 결과
 
-마지막 검증(2026-08-21):
+마지막 검증(2026-10-13, WSL Ubuntu·Python 3.12):
 
 ```text
-python3 -m compileall -q backend   통과
-pytest -q                          117 passed
-npm run build                     통과
-npm audit --audit-level=high      0 vulnerabilities
+python -m compileall -q backend    통과
+pytest                             150 passed, 3 skipped (지침 파일·semgrep 없음, CI 조건) / 모두 있을 때 153 passed
+semgrep 1.180 포함 실행             표본 9개 신규 규칙 탐지, 오류 0
+npm run build                      통과
+npm audit --audit-level=high       0 vulnerabilities (새 고위험 권고로 source-map-js 1.2.1→1.2.2 잠금 갱신)
 ```
+
+2026-10-13 추가 검증:
+
+- DOCX 두 종에서 83개 항목 지침을 추출했고 모든 카탈로그 ID·제목과 일치함을 확인했다. 지침 파일은 커밋하지 않으므로 원문 비교 테스트는 파일이 있는 PC에서만 실행되고, CI는 합성 DOCX로 추출기를 검증한다.
+- 예외 검사 생성·플랫폼 범위·범위 제외·기준선 동기화·Run 복제·제외 항목 판정 차단·필수 증적 없는 확정 거부·DOCX 수록·사용 중 삭제 차단·비활성화·제외 해제·과거 Run 보존을 회귀 테스트로 확인했다.
+- sslyze 6.3.1을 로컬 루프백 TLS 서버에만 실행해 실제 JSON 구조를 픽스처로 고정했다. 권고안 판정 규칙, 미완료 점검의 양호 처리 금지, 승인 범위 밖 대상 403, Mock 합성 결과와 EFI-MA-41 자동 확정을 확인했다. 외부 호스트는 스캔하지 않았다.
+- 기존 결함 2건을 수정했다. 현재 Semgrep은 float 메타데이터를 거부해 규칙 묶음 전체가 실행되지 않았고, 저장소 안에서는 `data/`가 gitignore 대상이라 JADX 결과 탐지가 0건이었다. 점수를 문자열로 바꾸고 `--no-git-ignore`를 추가했다.
+- 코드 리뷰(high) 지적 10건을 모두 반영했다: 카탈로그 정책이 바뀐 기준선·미판정 Run 행 재정렬과 Run 생성 전 기준선 동기화, TLS 점검 후 상태·승인 재검증과 DNS 고정, Frida 17 비엄격 실행, P12 비밀번호 명령줄 노출 제거, `use_resigned_ipa` 생성 시 검증, 재분석 시 재서명 기록 보존·Lease 직렬화, 이벤트 루프 차단 파일 작업 이동, 삭제된 예외 검사 ID 재사용 금지와 동시 생성 409, 범위 조회 중복 제거.
+- 1440×1000·390×844 headless Chromium에서 프로젝트·국내 원장·진단 설정·설정 화면을 확인했다. 가로 넘침·콘솔 오류·경고·실패 API 응답은 0건이었고 범위 제외·해제와 예외 검사 추가를 클릭으로 검증했다.
 
 추가 수동 검증:
 
@@ -514,7 +552,9 @@ npm audit --audit-level=high
 - Burp/Fiddler 제품 내부 Listener·CA·내보내기 API 자동 제어(공통 안정 API가 없어 `manual_required`; 세션 프로세스 기동·종료는 구현됨)
 - 제조사별 보안 솔루션·보안 키패드·RASP 전용 검증 Adapter
 - 국내 기준 83개 중 상태 변경·공격성 재현이 필요한 항목의 자동 실행(항목은 원장에 있으며 `manual_required`로 판정)
-- macOS가 필요한 IPA 서명·재서명
+- 실제 Apple 인증서·프로비저닝 프로파일로 zsign 재서명한 IPA의 실단말 설치(가짜 zsign으로만 검증, 실제 서명 결과는 미검증)
+- Frida 17 브리지 번들의 실제 Android·iOS 단말 로드(로컬 Linux 프로세스로만 검증)
+- 실제 승인 서버 대상 sslyze 점검(로컬 루프백과 Mock으로만 검증)
 - 모든 iOS 버전/단말 조합의 파일·화면 수집 보장
 - iOS Keychain 구조화 뷰어와 Android app-specific external storage 수집
 - 실 Android Clipboard의 대상 앱 귀속 검증과 FLAG_SECURE/background snapshot 검증
@@ -550,7 +590,8 @@ npm audit --audit-level=high
 
 - `docs/IMPLEMENTATION_PLAN.md`: 전체 구조
 - `docs/OSS_INTEGRATIONS.md`: OSS 경계·라이선스·설치
-- `docs/DOMESTIC_ASSESSMENT.md`: 국내 2종 진단 프로필·증적 판정 정책
+- `docs/DOMESTIC_ASSESSMENT.md`: 국내 2종 진단 프로필·증적 판정 정책·예외 검사·범위 제외
+- `docs/VALIDATION_LAB.md`: 고객 앱 없이 쓰는 공개 연습 앱과 검증 순서
 - `THIRD_PARTY_NOTICES.md`: 제3자 고지
 - `.env.example`, `config.example.yaml`: 설정 예시
 

@@ -49,6 +49,8 @@ tools:
   semgrep: semgrep
   objection: objection
   drozer: drozer
+  sslyze: sslyze
+  zsign: zsign
   pymobiledevice3: pymobiledevice3
   idevice_id: idevice_id
   ideviceinfo: ideviceinfo
