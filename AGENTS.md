@@ -10,7 +10,9 @@
 - 최신 배포 기준점: 이 문서를 포함한 `main` HEAD
 - 기능 검증 브랜치 `test/approved-control-validation`은 `main`에 fast-forward 반영됐다.
 - [PR #1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1)은 2026-08-21 병합 완료됐다.
-- 2026-10-14 작업: PR #2 병합 뒤 Android 앱 전용 외부 저장소 Before/After, Clipboard 대상 앱 귀속, 백그라운드 화면 보호(FLAG_SECURE·최근 화면·Task 스냅샷) 관찰을 추가했다. `EFI-MA-50`은 `background_screen` 판정 방식으로 바뀌었고 자동 확정은 없다. backend 167 passed·1 skipped, frontend build·audit, 1440×1000·390×844 UI 검증을 통과했다. 실제 단말 검증은 여전히 없다.
+- 2026-10-14 설계 결정(사용자 인터뷰): Claude Code 세션이 MCP 브리지로 작업대를 조작하고 승인은 터미널에서 사용자가 준다. 진단 기준은 전자금융·주요정보통신기반시설·**ALL(자유 진단, 고정 항목 없음)** 3종이다. 실단말은 Android 14(Magisk)와 iOS 16.7.10(palera1n)이며 호스트는 WSL2다. 벤더 증빙 보고서는 취약 확정 항목 + 재현 스크린샷만 담는다. NVIDIA AI는 `needs_review` 추천까지만 맡는다. 보안솔루션은 앱마다 달라 정적 식별 뒤 선택하며 내장 우회의 승인은 Run 시작 시 포괄 승인으로 바꾸기로 했다(미구현).
+- 2026-10-14 작업(PR #4): `backend/app/mcp_server.py` MCP 브리지(`msw_get/msw_post/msw_upload/msw_download/msw_wait_run`, `msw://routes`)와 `.mcp.json`, `free_assessment`(ALL) 프로필, `POST /api/findings`·`POST /api/findings/{id}/record` 수동 발견항목 판정, ALL용 확정 발견항목 DOCX, `docs/CLAUDE_CODE_OPERATION.md`를 추가했다.
+- 2026-10-14 작업(PR #3 병합):  Android 앱 전용 외부 저장소 Before/After, Clipboard 대상 앱 귀속, 백그라운드 화면 보호(FLAG_SECURE·최근 화면·Task 스냅샷) 관찰을 추가했다. `EFI-MA-50`은 `background_screen` 판정 방식으로 바뀌었고 자동 확정은 없다. backend 167 passed·1 skipped, frontend build·audit, 1440×1000·390×844 UI 검증을 통과했다. 실제 단말 검증은 여전히 없다.
 - 2026-10-13 작업: DOCX 권고안 원문 지침 연결, 프로젝트별 기준 외 예외 검사·범위 제외, 서버 TLS 구성 점검(sslyze), Frida 17 런타임 호환, zsign IPA 재서명, 정적 분석·Semgrep 규칙 확장과 Alembic V9. backend CI 조건 150 passed·3 skipped(지침 파일·Semgrep 포함 시 153 passed), frontend build·audit, 1440×1000·390×844 UI 검증을 통과했다. 실제 단말·실서버 검증은 여전히 없다.
 - 이번 배포에는 조직 인증·역할·감사, 장시간 캡처, Burp/Fiddler 귀속 프로세스, Alembic V8 전환이 포함되며 backend 117 tests, frontend build/audit, Docker health와 1440×1000·390×844 UI 검증이 통과했다.
 - AI 추천은 화면 선택 후보일 뿐 판정·증적 영구 연결·DOCX 수록을 자동 수행하지 않는다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
@@ -37,6 +39,7 @@
 - MobSF 앱 원본 전송은 프로젝트의 `external_analyzer_allowed`와 목적지 허용목록을 모두 따른다.
 - 프로젝트 실행 모드는 `mock | live`로 분리하며 Live에서 Mock Adapter로 fallback하지 않는다.
 - Mock에서 생성한 앱·실행·증적·패킷·발견항목·AI 결과에는 `synthetic=true`를 영구 보존한다.
+- MCP 브리지는 REST를 그대로 전달하는 얇은 클라이언트이며 승인·상태 검사·범위 검증은 모두 서버에 남긴다. Claude Code는 고위험 작업 전에 대상·SHA-256·범위를 사용자에게 보여 주고 확인을 받은 뒤 `/api/approvals` 토큰을 쓴다.
 - 국내 기준의 정적 신호는 `needs_review`까지만 허용하며 같은 Run의 필수 증적 또는 증적을 고정한 승인 수동 판정 없이는 `confirmed`로 만들지 않는다.
 - 기존 사용자 파일과 관련 없는 변경은 건드리지 않는다.
 
@@ -162,7 +165,7 @@ tests/               단위·API·Mock E2E 테스트
 
 ### 국내 취약점 진단 프로필
 
-- `backend/app/catalog/korean_standards.py`에 주요정보통신기반시설 27개(`CII-MA-*`)와 전자금융기반시설 56개(`EFI-MA-*`) 기준선이 있다.
+- `backend/app/catalog/korean_standards.py`에 주요정보통신기반시설 27개(`CII-MA-*`)와 전자금융기반시설 56개(`EFI-MA-*`) 기준선이 있다. 세 번째 프로필 `free_assessment`(ALL)는 카탈로그가 비어 있어 판정 원장 행을 만들지 않으며, 취약점은 `POST /api/findings`로 Run에 묶어 만든 발견항목을 `POST /api/findings/{id}/record`로 확정해 기록한다. 확정에는 같은 Run의 증적과 `EvidencePolicyEngine` 범주별 필수 증적(예: `local_storage`→`storage_snapshot|storage_diff`)이 필요하고 `assessment_attestation` 증적을 남긴다. ALL의 DOCX는 확정 발견항목만 수록한다. 기준 외 예외 검사(`CUS-MA-NN`)는 ALL에서도 추가할 수 있다.
 - 프로젝트의 `assessment_profile`은 생성 시 선택하며 앱·Run 이력이 생긴 뒤 변경을 409로 차단한다.
 - 앱 분석과 Run은 선택 프로필 항목만 `ControlTest`로 생성한다. MASTG는 별도 보조 기준으로 유지한다.
 - 정적 신호 단독으로 취약점을 확정하지 않는다. 같은 Run의 confirmed Finding과 필수 증적 또는 필수 원본 증적에 대한 승인 수동 판정이 필요하다.
@@ -359,6 +362,10 @@ data/
 /api/frida/runtime
 /api/ios/signing
 /api/apps/{id}/ios/resign
+/api/findings (POST, 수동 발견항목)
+/api/findings/{id}/record
+
+MCP: python -m backend.app.mcp_server (.mcp.json, docs/CLAUDE_CODE_OPERATION.md)
 ```
 
 ## 6. UI 상태
@@ -610,6 +617,7 @@ npm audit --audit-level=high
 - `docs/OSS_INTEGRATIONS.md`: OSS 경계·라이선스·설치
 - `docs/DOMESTIC_ASSESSMENT.md`: 국내 2종 진단 프로필·증적 판정 정책·예외 검사·범위 제외
 - `docs/VALIDATION_LAB.md`: 고객 앱 없이 쓰는 공개 연습 앱과 검증 순서
+- `docs/CLAUDE_CODE_OPERATION.md`: Claude Code MCP 조작 흐름과 WSL2 실단말(Android 14·iOS 16.7.10) 연결
 - `THIRD_PARTY_NOTICES.md`: 제3자 고지
 - `.env.example`, `config.example.yaml`: 설정 예시
 
