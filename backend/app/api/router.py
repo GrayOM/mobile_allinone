@@ -57,6 +57,7 @@ from backend.app.assessment_scope import (
     scope_row_to_dict,
     set_custom_control_enabled,
     set_exclusion,
+    sync_app_baseline,
 )
 from backend.app.catalog.guidance import guidance_for, guidance_source, guidance_summary
 from backend.app.ios_signing import ZsignAdapter, resigned_record
@@ -853,6 +854,8 @@ async def reanalyze_app(
 ):
     artifact = _app_or_404(db, app_id)
     project = _project_or_404(db, artifact.project_id)
+    if _is_device_registered(artifact):
+        raise HTTPException(409, "단말 설치본으로 등록한 앱은 바이너리가 없어 재분석할 수 없습니다. APK/IPA를 업로드하세요.")
     source_path = Path(artifact.stored_path)
     if not source_path.is_file():
         raise HTTPException(404, "등록된 앱 원본 파일을 찾을 수 없습니다.")
@@ -1013,6 +1016,9 @@ def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
         "catalog_source": CATALOG_SOURCE,
         "assessment_profile": artifact.project.assessment_profile,
         "assessment_source": PROFILE_SOURCES[artifact.project.assessment_profile],
+        "security_solutions": (
+            (artifact.analysis_result or {}).get("structure") or {}
+        ).get("security_solutions", []),
         "tool_runs": [
             {
                 "id": item.id,
@@ -1310,6 +1316,110 @@ async def upload_app(
         settings=settings,
         db=db,
     )
+
+
+class RegisterInstalledAppRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    device_adapter: Literal["android_adb", "ios_windows"]
+    device_id: str = Field(min_length=1, max_length=255)
+    package_name: str = Field(min_length=1, max_length=255)
+
+
+DEVICE_REGISTERED_SOURCE = "device_installed"
+
+
+def _is_device_registered(artifact: AppArtifact) -> bool:
+    return (artifact.analysis_result or {}).get("source") == DEVICE_REGISTERED_SOURCE
+
+
+@router.post(
+    "/projects/{project_id}/apps/register-installed",
+    response_model=AppArtifactOut,
+    status_code=201,
+)
+async def register_installed_app(
+    request: Request,
+    project_id: str,
+    payload: RegisterInstalledAppRequest,
+    db: Session = Depends(get_db),
+):
+    """Register an app that is already installed on the device without its binary.
+
+    Store/TestFlight builds often cannot be re-installed from a file; this
+    records the device's own app metadata so a Live run can use
+    ``reuse_installed_app``. Static analysis stays ``not_configured`` until a
+    binary is uploaded separately.
+    """
+    project = _project_or_404(db, project_id)
+    if project.run_mode != RunMode.LIVE.value:
+        raise HTTPException(422, "설치된 앱 등록은 Live 프로젝트에서만 사용할 수 있습니다.")
+    platform = "android" if payload.device_adapter == "android_adb" else "ios"
+    if not is_valid_app_identifier(platform, payload.package_name):
+        raise HTTPException(422, "앱 식별자 형식이 올바르지 않습니다.")
+    settings = _settings(request)
+    if payload.device_adapter == "android_adb":
+        adapter = AndroidDeviceAdapter(settings)
+    else:
+        if payload.device_id.startswith("ios-ssh:"):
+            raise HTTPException(422, "SSH 프로필 단말은 USB 단말 ID로 등록하세요.")
+        adapter = IOSDeviceAdapter(settings)
+    listed = await adapter.list_packages(payload.device_id)
+    packages = listed.data.get("packages") or []
+    if listed.status != CapabilityStatus.AVAILABLE:
+        raise HTTPException(409, f"단말 앱 목록을 조회하지 못했습니다: {listed.message}")
+    if payload.package_name not in packages:
+        raise HTTPException(404, "선택한 단말에 설치되어 있지 않은 앱입니다.")
+    existing = db.scalar(
+        select(AppArtifact).where(
+            AppArtifact.project_id == project.id,
+            AppArtifact.package_name == payload.package_name,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(409, "같은 식별자의 앱이 이미 프로젝트에 등록되어 있습니다.")
+    manifest = {
+        "source": DEVICE_REGISTERED_SOURCE,
+        "status": "not_configured",
+        "platform": platform,
+        "package_name": payload.package_name,
+        "device_id": payload.device_id,
+        "device_adapter": payload.device_adapter,
+        "registered_at": datetime.now(timezone.utc).isoformat(),
+        "note": (
+            "단말에 설치된 앱의 식별자만 등록했습니다. 바이너리가 없어 정적 분석은 "
+            "수행하지 않았으며 Run은 reuse_installed_app으로 설치를 건너뜁니다."
+        ),
+        "findings": [],
+        "signals": {},
+        "candidates": [],
+        "list_command": listed.command,
+    }
+    target_dir = settings.uploads_dir / project.id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{uuid.uuid4()}.installed.json"
+    encoded = json.dumps(manifest, ensure_ascii=False, indent=1).encode("utf-8")
+    target.write_bytes(encoded)
+    artifact = AppArtifact(
+        project_id=project.id,
+        original_name=f"{payload.package_name}.installed.json",
+        stored_path=str(target),
+        sha256=hashlib.sha256(encoded).hexdigest(),
+        size_bytes=len(encoded),
+        platform=platform,
+        app_name=payload.package_name,
+        package_name=payload.package_name,
+        version=None,
+        analysis_status="not_configured",
+        analysis_result=manifest,
+        synthetic=False,
+    )
+    db.add(artifact)
+    db.flush()
+    sync_app_baseline(db, project=project, artifact=artifact)
+    db.commit()
+    db.refresh(artifact)
+    return artifact
 
 
 @router.post("/demo/bootstrap")
@@ -2857,9 +2967,14 @@ async def create_run(
     pause_for_security_bypass = options.get("pause_for_security_bypass", False)
     if not isinstance(pause_for_security_bypass, bool):
         raise HTTPException(422, "pause_for_security_bypass는 boolean이어야 합니다.")
+    reuse_installed_app = options.get("reuse_installed_app", False)
+    if not isinstance(reuse_installed_app, bool):
+        raise HTTPException(422, "reuse_installed_app는 boolean이어야 합니다.")
     use_resigned_ipa = options.get("use_resigned_ipa", False)
     if not isinstance(use_resigned_ipa, bool):
         raise HTTPException(422, "use_resigned_ipa는 boolean이어야 합니다.")
+    if use_resigned_ipa and reuse_installed_app:
+        raise HTTPException(422, "재서명 IPA 설치와 설치된 앱 재사용은 함께 선택할 수 없습니다.")
     if use_resigned_ipa:
         if app is None or app_platform != "ios":
             raise HTTPException(422, "재서명 IPA 설치는 iOS 앱 Run에서만 선택할 수 있습니다.")
@@ -2879,6 +2994,7 @@ async def create_run(
     options.update(
         {
             "use_resigned_ipa": use_resigned_ipa,
+            "reuse_installed_app": reuse_installed_app,
             "assessment_profile": project.assessment_profile,
             "frida_script_ids": selected_script_ids,
             "auto_select_frida": payload.auto_select_frida,
@@ -3919,6 +4035,7 @@ async def execute_frida_script(
         frida_target = _orchestrator(request).frida_target_for_device(
             device_adapter, run.device_id
         )
+        await _orchestrator(request).prepare_frida_transport(device_adapter, run.device_id)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     action_scope = f"execute:{script.id}"
@@ -5689,6 +5806,8 @@ async def resign_ios_app(
 ):
     app = _app_or_404(db, app_id)
     project = _project_or_404(db, app.project_id)
+    if _is_device_registered(app):
+        raise HTTPException(409, "단말 설치본으로 등록한 앱은 바이너리가 없어 재서명할 수 없습니다.")
     try:
         platform = normalize_platform(app.platform)
     except ValueError as exc:

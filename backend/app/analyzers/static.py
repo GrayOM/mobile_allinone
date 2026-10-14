@@ -20,6 +20,10 @@ from backend.app.core.command import run_command
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus
 from backend.app.catalog import CATALOG_SOURCE, evaluate_controls
+from backend.app.analyzers.security_solutions import (
+    identify_security_solutions,
+    solution_pattern,
+)
 from backend.app.analyzers.adapters import (
     APKiDAnalyzerAdapter,
     AndroguardAnalyzerAdapter,
@@ -636,8 +640,10 @@ class StaticAnalyzer:
             "debugger_detection": [],
             "integrity_signature": [],
             "obfuscation": [],
+            "security_solution": [],
         }
         patterns = {
+            "security_solution": solution_pattern(),
             "webview": re.compile(r"\b(?:WebView|WKWebView|setJavaScriptEnabled)\b", re.I),
             "javascript_interface": re.compile(
                 r"\b(?:addJavascriptInterface|WKScriptMessageHandler)\b", re.I
@@ -707,6 +713,11 @@ class StaticAnalyzer:
                         break
         result.signals = {key: values for key, values in signals.items() if values}
         result.structure["scanned_bytes"] = scanned
+        result.structure["security_solutions"] = identify_security_solutions(
+            platform=result.platform,
+            matches=signals.get("security_solution") or [],
+            native_libraries=result.native_libraries,
+        )
 
     def _extract_candidates(self, text: str, location: str) -> Iterable[Candidate]:
         # Only RFC 3986 URL characters: Mach-O/DEX binaries embed DER
@@ -1096,6 +1107,45 @@ class StaticAnalyzer:
                         "실제 단말에서 탐지 조건과 앱 반응을 확인하세요.",
                         "보안 솔루션 이름·버전과 정책 설정을 고객 승인 범위에서 확인하세요.",
                         "통제 검증 결과를 일반 취약점과 분리해 보고하세요.",
+                    ],
+                )
+            )
+        solutions = result.structure.get("security_solutions") or []
+        if solutions:
+            names = ", ".join(f"{item['vendor']} {item['product']}" for item in solutions[:6])
+            result.findings.append(
+                StaticFinding(
+                    f"보안솔루션 식별: {names}",
+                    "security_solution",
+                    "info",
+                    ", ".join(
+                        location
+                        for item in solutions
+                        for location in item["locations"][:2]
+                    )[:400],
+                    (
+                        f"상용 모바일 보안솔루션 지표 {len(solutions)}종을 식별했습니다. "
+                        "제품명과 지표만 기록하며 보호 기능이 실제로 동작하는지는 승인된 단말 검증에서 확인합니다."
+                    ),
+                    max(item["confidence"] for item in solutions),
+                    "informational",
+                    rule_id="signal.security_solution",
+                    raw={
+                        "assessment_type": "security_control",
+                        "verification_status": "dynamic_verification_required",
+                        "security_solutions": solutions,
+                    },
+                    reproduction=[
+                        "식별된 패키지·라이브러리·문자열 지표의 위치를 확인합니다.",
+                        "승인된 단말에서 앱 실행 시 탐지·차단 동작과 차단 화면·로그를 수집합니다.",
+                        "제품별 보호 범주(무결성·난독화·보안키패드·악성앱 탐지)를 통제 검증 항목에 연결합니다.",
+                    ],
+                    false_positive_risk=(
+                        "SDK 포함만으로 보호가 활성화됐다고 단정할 수 없습니다. 미사용 모듈이나 공통 라이브러리 이름이 겹칠 수 있습니다."
+                    ),
+                    additional_checks=[
+                        "고객에게 적용 솔루션·버전·정책을 승인 범위 안에서 확인하세요.",
+                        "탐지 시 앱 반응(종료·경고·기능 제한)을 전후 화면 증적으로 남기세요.",
                     ],
                 )
             )

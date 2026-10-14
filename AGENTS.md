@@ -11,6 +11,7 @@
 - 기능 검증 브랜치 `test/approved-control-validation`은 `main`에 fast-forward 반영됐다.
 - [PR #1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1)은 2026-08-21 병합 완료됐다.
 - 2026-10-14 설계 결정(사용자 인터뷰): Claude Code 세션이 MCP 브리지로 작업대를 조작하고 승인은 터미널에서 사용자가 준다. 진단 기준은 전자금융·주요정보통신기반시설·**ALL(자유 진단, 고정 항목 없음)** 3종이다. 실단말은 Android 14(Magisk)와 iOS 16.7.10(palera1n)이며 호스트는 WSL2다. 벤더 증빙 보고서는 취약 확정 항목 + 재현 스크린샷만 담는다. NVIDIA AI는 `needs_review` 추천까지만 맡는다. 보안솔루션은 앱마다 달라 정적 식별 뒤 선택하며 내장 우회의 승인은 Run 시작 시 포괄 승인으로 바꾸기로 했다(미구현).
+- 2026-10-14 작업(PR #5, 실단말): WSL2에서 Apple Windows usbmuxd를 역방향 터널(`scripts/windows/usbmuxd_reverse_tunnel.py`)로 노출해 iPhone 8(iOS 16.7.10, palera1n, frida-server 16.2.1)을 작업대가 인식·조작했다. `ios_usbmux_address`·`ios_frida_forward_port` 설정, DVT 기반 iOS Adapter, `reuse_installed_app` Run 옵션, `POST /api/projects/{id}/apps/register-installed`(바이너리 없는 설치 앱 등록)를 추가했고 설치 앱으로 Live Run을 `completed_with_gaps`까지 완료했다(실행·프로세스·화면·syslog·승인 범위 집행·Frida 16 Spawn 관찰 스크립트). cyberone.ipa·DVIA-v2 설치는 단말용 서명이 없어 iOS가 거부했다(AppSync Unified 또는 재서명 필요). UnCrackable1/2는 32비트라 iOS 16에서 실행 불가.
 - 2026-10-14 작업(PR #4): `backend/app/mcp_server.py` MCP 브리지(`msw_get/msw_post/msw_upload/msw_download/msw_wait_run`, `msw://routes`)와 `.mcp.json`, `free_assessment`(ALL) 프로필, `POST /api/findings`·`POST /api/findings/{id}/record` 수동 발견항목 판정, ALL용 확정 발견항목 DOCX, `docs/CLAUDE_CODE_OPERATION.md`를 추가했다.
 - 2026-10-14 작업(PR #3 병합):  Android 앱 전용 외부 저장소 Before/After, Clipboard 대상 앱 귀속, 백그라운드 화면 보호(FLAG_SECURE·최근 화면·Task 스냅샷) 관찰을 추가했다. `EFI-MA-50`은 `background_screen` 판정 방식으로 바뀌었고 자동 확정은 없다. backend 167 passed·1 skipped, frontend build·audit, 1440×1000·390×844 UI 검증을 통과했다. 실제 단말 검증은 여전히 없다.
 - 2026-10-13 작업: DOCX 권고안 원문 지침 연결, 프로젝트별 기준 외 예외 검사·범위 제외, 서버 TLS 구성 점검(sslyze), Frida 17 런타임 호환, zsign IPA 재서명, 정적 분석·Semgrep 규칙 확장과 Alembic V9. backend CI 조건 150 passed·3 skipped(지침 파일·Semgrep 포함 시 153 passed), frontend build·audit, 1440×1000·390×844 UI 검증을 통과했다. 실제 단말·실서버 검증은 여전히 없다.
@@ -42,6 +43,7 @@
 - MCP 브리지는 REST를 그대로 전달하는 얇은 클라이언트이며 승인·상태 검사·범위 검증은 모두 서버에 남긴다. Claude Code는 고위험 작업 전에 대상·SHA-256·범위를 사용자에게 보여 주고 확인을 받은 뒤 `/api/approvals` 토큰을 쓴다.
 - 국내 기준의 정적 신호는 `needs_review`까지만 허용하며 같은 Run의 필수 증적 또는 증적을 고정한 승인 수동 판정 없이는 `confirmed`로 만들지 않는다.
 - 기존 사용자 파일과 관련 없는 변경은 건드리지 않는다.
+- **검증용 iPhone(Cyberone, iPhone 8, iOS 16.7.10, palera1n)의 iOS 버전은 절대 업데이트하지 않는다.** 탈옥 유지가 전제이며 "업데이트 필요" 안내가 떠도 iOS 업데이트를 제안·실행하지 않는다. 호환되지 않는 앱(예: 32비트 UnCrackable1)은 다른 빌드로 대체한다.
 
 ## 2. 현재 기술 구조
 
@@ -131,9 +133,9 @@ tests/               단위·API·Mock E2E 테스트
 - Frida Server 상태 확인
 - USB 포트 포워딩
 
-### iOS on Windows
+### iOS on Windows / WSL2
 
-`IOSDeviceAdapter`가 다음 순서로 가능한 기능을 사용한다.
+`IOSDeviceAdapter`가 다음 순서로 가능한 기능을 사용한다. WSL2에서는 `docs/CLAUDE_CODE_OPERATION.md`의 usbmuxd 역방향 터널과 `ios_usbmux_address`를 쓰며, pymobiledevice3 DVT(실행·종료·프로세스·스크린샷)와 installation proxy(앱 목록·설치·삭제), `syslog live`가 기본 경로다. Frida는 작업대가 띄운 `usbmux forward 27042` 원격 대상으로 연결하고 단말 frida-server 메이저 버전에 클라이언트를 맞춘다. `privileged`는 frida-server(시스템 데몬) 응답으로만 `True`가 된다. 설치가 불가능한 서명의 앱은 `reuse_installed_app`(설치본 재사용) 또는 `register-installed`(바이너리 없는 등록, 정적 분석 `not_configured`)로 Run을 만든다.
 
 - libimobiledevice: `idevice_id`, `ideviceinfo`, `ideviceinstaller`, `idevicesyslog`, `idevicescreenshot`
 - pymobiledevice3: USB 탐색, 앱 목록·실행, 포트 Adapter
@@ -158,6 +160,7 @@ tests/               단위·API·Mock E2E 테스트
 
 - 권한 보호가 없는 Android 외부 노출 컴포넌트는 컴포넌트별 Finding으로 만들고, Intent Filter 수·재현 절차·오탐 가능성·추가 확인 항목을 함께 보존한다.
 - Live Run의 승인형 외부 진입 검증 원장은 현재 활성 정적 분석에서 만든 후보만 표시한다. 후보 ID는 서버가 재계산하고 프로젝트·Run·단말·후보에 묶인 5분 만료 1회 토큰을 소비한다. Android 딥링크는 대상 패키지로 한정하고 Activity/Activity Alias만 직접 호출한다. Service·Receiver·Provider와 iOS는 `manual_required`다. 호출 전 화면이 없으면 실행하지 않으며 전·후 화면·로그·결과를 정적 Finding에 연결한다. Live 호출에는 유효한 승인 통제 검증 범위가 추가로 필요하다.
+- `backend/app/analyzers/security_solutions.py`는 상용 보안솔루션(AppSealing·LIAPP·DexProtector·DexGuard/iXGuard·Promon·Digital.ai·Appdome·Zimperium·Verimatrix·V3 Mobile Plus·nProtect·TouchEn mTransKey·AppSuit·EverSafe·Bangcle·Legu·Jiagu 등) 지표를 패키지·라이브러리·문자열에서 식별해 `analysis_result.structure.security_solutions`와 `security_solution` 범주의 info 발견항목(보안통제 레인)으로 남긴다. 식별만 하며 보호 동작 여부·우회 가능성은 판단하지 않는다. `/api/apps/{id}/analysis/overview`에 `security_solutions`로 노출된다.
 - 인증서 고정, 루팅·탈옥, Frida·후킹, 디버거 탐지 문자열은 일반 취약점과 분리된 모바일 보안통제 신호로 저장한다. 정적 문자열만으로 통제 동작이나 우회 가능성을 확정하지 않는다.
 - `/api/findings?run_id=<run>`은 해당 Run에서 생성된 판정뿐 아니라 선택 앱의 정적 Finding도 함께 반환한다. AI가 비활성화되어도 실제 정적 후보가 실행 화면에서 사라지지 않아야 한다.
 

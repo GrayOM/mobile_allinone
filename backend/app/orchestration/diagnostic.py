@@ -44,6 +44,7 @@ from backend.app.database.models import (
 )
 from backend.app.database.session import SessionLocal
 from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDeviceAdapter
+from backend.app.devices.ios import shutdown_ios_forwards
 from backend.app.evidence import EvidencePolicyEngine, EvidenceService
 from backend.app.frida import (
     FridaManager,
@@ -299,6 +300,7 @@ class DiagnosticOrchestrator:
                 return_exceptions=True,
             )
         await self.frida_sessions.shutdown()
+        await shutdown_ios_forwards()
 
     async def _checkpoint(self, run_id: str) -> None:
         if run_id in self._stop_requested:
@@ -418,6 +420,13 @@ class DiagnosticOrchestrator:
         if callable(resolver):
             return resolver(device_id)
         return FridaTarget.usb(device_id)
+
+    @staticmethod
+    async def prepare_frida_transport(device, device_id: str) -> None:
+        """Start adapter-owned transport (e.g. usbmux port forward) before a session."""
+        ensure = getattr(device, "ensure_frida_forward", None)
+        if callable(ensure) and not await ensure(device_id):
+            raise ValueError("Frida 전송 경로(usbmux 포워딩)를 준비하지 못했습니다.")
 
     def ui_driver_for_run(
         self, run: DiagnosticRun, device, package_name: str
@@ -1747,7 +1756,17 @@ class DiagnosticOrchestrator:
                 await self._stage(
                     db, run, "static_analysis", 12, "업로드된 정적 분석 결과를 실행에 연결합니다."
                 )
-                if app:
+                if app and (app.analysis_result or {}).get("source") == "device_installed":
+                    # Registered from the device without a binary: there is no
+                    # static result to attach, and the ledger must not treat the
+                    # registration manifest as analysis evidence.
+                    record_check(
+                        "static_analysis",
+                        False,
+                        "바이너리 없이 단말 설치본으로 등록한 앱이라 정적 분석 증적이 없습니다.",
+                        required=False,
+                    )
+                elif app:
                     static_evidence = self.evidence.add_json(
                         db,
                         run_id=run.id,
@@ -1809,15 +1828,47 @@ class DiagnosticOrchestrator:
 
                 if app:
                     await self._stage(db, run, "install", 22, "대상 앱을 단말에 설치합니다.")
-                    install_path = Path(app.stored_path)
-                    if bool(run.options.get("use_resigned_ipa")):
-                        install_path = await asyncio.to_thread(resolved_resigned_ipa, app)
-                    install = await device.install_app(run.device_id, install_path)
-                    await self._record_operation(db, run.id, "앱 설치", install)
-                    if install.status == CapabilityStatus.MANUAL_REQUIRED:
-                        raise DiagnosticManualRequired(install.message)
-                    if install.status != CapabilityStatus.AVAILABLE:
-                        raise RuntimeError(install.message)
+                    reused_installed = False
+                    if bool(run.options.get("reuse_installed_app")):
+                        # Store/TestFlight builds cannot be re-installed from a
+                        # decrypted IPA; verify the same bundle is present instead.
+                        installed = await device.list_packages(run.device_id)
+                        present = package_name in (installed.data.get("packages") or [])
+                        await self._record_operation(
+                            db,
+                            run.id,
+                            (
+                                "설치된 앱 재사용 확인"
+                                if present
+                                else "설치된 앱 재사용 확인 실패"
+                            ),
+                            installed,
+                        )
+                        if present:
+                            reused_installed = True
+                            options = dict(run.options)
+                            options["install"] = {
+                                "status": "reused_installed",
+                                "package_name": package_name,
+                                "upload_sha256": app.sha256,
+                                "note": (
+                                    "업로드 파일을 설치하지 않고 단말에 이미 설치된 동일 "
+                                    "식별자의 앱을 사용했습니다. 업로드본과 단말 설치본의 "
+                                    "동일성은 별도 확인이 필요합니다."
+                                ),
+                            }
+                            run.options = options
+                            db.commit()
+                    if not reused_installed:
+                        install_path = Path(app.stored_path)
+                        if bool(run.options.get("use_resigned_ipa")):
+                            install_path = await asyncio.to_thread(resolved_resigned_ipa, app)
+                        install = await device.install_app(run.device_id, install_path)
+                        await self._record_operation(db, run.id, "앱 설치", install)
+                        if install.status == CapabilityStatus.MANUAL_REQUIRED:
+                            raise DiagnosticManualRequired(install.message)
+                        if install.status != CapabilityStatus.AVAILABLE:
+                            raise RuntimeError(install.message)
 
                 if bool(run.options.get("pause_for_security_bypass")):
                     run.current_stage = "security_bypass_preparation"
@@ -1948,7 +1999,7 @@ class DiagnosticOrchestrator:
                     run,
                     device,
                     "02-before-frida.png",
-                    "우회 적용 전",
+                    "Frida 스크립트 적용 전",
                     "등록된 Frida 스크립트를 적용하기 직전 상태입니다.",
                 )
 
@@ -2047,6 +2098,7 @@ class DiagnosticOrchestrator:
                             frida_target = self.frida_target_for_device(
                                 device, run.device_id
                             )
+                            await self.prepare_frida_transport(device, run.device_id)
                         except ValueError as exc:
                             record_check("frida_session", False, str(exc))
                             raise DiagnosticManualRequired(str(exc)) from exc
@@ -2215,8 +2267,8 @@ class DiagnosticOrchestrator:
                         run,
                         device,
                         "03-after-frida.png",
-                        "우회 적용 후",
-                        "Frida 연결 후 앱 실행 상태입니다. 성공 여부는 프로세스와 로그 증적을 함께 검토합니다.",
+                        "Frida 스크립트 적용 후",
+                        "Frida 연결 후 앱 실행 상태입니다. 관찰 스크립트만 로드된 경우 앱 동작은 바뀌지 않으며, 성공 여부는 프로세스와 로그 증적을 함께 검토합니다.",
                     )
                     if after_frida_screen:
                         lifecycle_evidence_ids.append(after_frida_screen.id)

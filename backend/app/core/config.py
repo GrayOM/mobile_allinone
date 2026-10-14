@@ -133,6 +133,12 @@ class AppSettings(BaseModel):
     )
     storage_max_files: int = Field(default=20_000, ge=1, le=100_000)
     storage_sqlite_timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
+    # usbmuxd reachable from this host as HOST:PORT (e.g. the WSL2 reverse
+    # tunnel to Apple's Windows service). None uses the platform usbmuxd.
+    ios_usbmux_address: str | None = None
+    # Local port the adapter forwards to the device's frida-server (27042)
+    # when it has to reach it over usbmux instead of a native USB binding.
+    ios_frida_forward_port: int = Field(default=27042, ge=1024, le=65535)
     network_analysis_max_flows: int = Field(default=500, ge=1, le=5_000)
     network_candidate_max_count: int = Field(default=1_000, ge=1, le=10_000)
     capture_segment_max_bytes: int = Field(
@@ -244,6 +250,15 @@ def get_settings() -> AppSettings:
         "docker_loopback_bridge": _env_bool(
             "MSW_DOCKER_LOOPBACK_BRIDGE",
             values.get("docker_loopback_bridge", False),
+        ),
+        "ios_usbmux_address": os.getenv(
+            "MSW_IOS_USBMUX_ADDRESS", values.get("ios_usbmux_address")
+        )
+        or None,
+        "ios_frida_forward_port": int(
+            os.getenv(
+                "MSW_IOS_FRIDA_FORWARD_PORT", values.get("ios_frida_forward_port", 27042)
+            )
         ),
         "api_token": os.getenv("MSW_API_TOKEN"),
         "admin_token": os.getenv("MSW_ADMIN_TOKEN"),
