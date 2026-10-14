@@ -1999,7 +1999,7 @@ class DiagnosticOrchestrator:
                     run,
                     device,
                     "02-before-frida.png",
-                    "우회 적용 전",
+                    "Frida 스크립트 적용 전",
                     "등록된 Frida 스크립트를 적용하기 직전 상태입니다.",
                 )
 
@@ -2267,8 +2267,8 @@ class DiagnosticOrchestrator:
                         run,
                         device,
                         "03-after-frida.png",
-                        "우회 적용 후",
-                        "Frida 연결 후 앱 실행 상태입니다. 성공 여부는 프로세스와 로그 증적을 함께 검토합니다.",
+                        "Frida 스크립트 적용 후",
+                        "Frida 연결 후 앱 실행 상태입니다. 관찰 스크립트만 로드된 경우 앱 동작은 바뀌지 않으며, 성공 여부는 프로세스와 로그 증적을 함께 검토합니다.",
                     )
                     if after_frida_screen:
                         lifecycle_evidence_ids.append(after_frida_screen.id)

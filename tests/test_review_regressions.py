@@ -550,7 +550,7 @@ def test_frida_attach_and_spawn_lifecycles_preserve_ordered_evidence(client):
         positions["Frida Spawn 전 앱 정상 종료"]
         < positions["Frida Spawn 전 프로세스 종료 확인"]
         < positions["Frida Spawn 후 프로세스 실행 확인"]
-        < positions["우회 적용 후"]
+        < positions["Frida 스크립트 적용 후"]
     )
     script_evidence = next(
         item for item in ordered if item["evidence_type"] == "frida_script"
@@ -560,11 +560,11 @@ def test_frida_attach_and_spawn_lifecycles_preserve_ordered_evidence(client):
         item["title"] for item in ordered if item["id"] in lifecycle_ids
     }
     assert {
-        "우회 적용 전",
+        "Frida 스크립트 적용 전",
         "Frida Spawn 전 앱 정상 종료",
         "Frida Spawn 전 프로세스 종료 확인",
         "Frida Spawn 후 프로세스 실행 확인",
-        "우회 적용 후",
+        "Frida 스크립트 적용 후",
     } <= lifecycle_titles
     transcript = next(
         item
