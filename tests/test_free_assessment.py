@@ -122,6 +122,14 @@ def test_free_assessment_profile_reports_confirmed_findings_only(client, tmp_pat
     ]
     assert len(attestations) == 1 and attestations[0]["finding_id"] == finding["id"]
 
+    refreshed = client.get(f"/api/runs/{run['id']}").json()
+    assert refreshed["options"]["assessment_summary"]["confirmed"] == 1
+    assert refreshed["options"]["assessment_summary"]["confirmed_manual_findings"] == 1
+    assert any(
+        item["evidence_type"] == "vulnerability_assessment"
+        for item in client.get(f"/api/runs/{run['id']}/evidence").json()
+    )
+
     report = client.post(f"/api/runs/{run['id']}/report/docx")
     assert report.status_code == 200, report.text
     download = client.get(f"/api/runs/{run['id']}/report/docx")
@@ -146,6 +154,69 @@ def test_free_assessment_profile_reports_confirmed_findings_only(client, tmp_pat
     )
     assert "검토 중 항목" not in text_after
     assert other["verdict"] == "needs_review"
+
+    # Downgrading drops the confirmation record and resets confidence.
+    downgraded = client.post(
+        f"/api/findings/{finding['id']}/record",
+        json={"verdict": "false_positive", "reviewer": "claude-code", "summary": "재검토 결과 오탐"},
+    ).json()
+    assert downgraded["verdict"] == "false_positive"
+    assert downgraded["confidence"] == 0.0
+    assert downgraded["rationale"] == "After 저장소 스냅샷에서 세션 값 평문 저장을 확인했다."
+    sources = client.get(f"/api/findings/{finding['id']}/sources").json()
+    linked = {evidence_id for row in sources for evidence_id in (row.get("evidence_ids") or [])}
+    assert attestations[0]["id"] not in linked
+    assert client.get(f"/api/runs/{run['id']}").json()["options"]["assessment_summary"]["confirmed"] == 0
+    assert client.post(f"/api/runs/{run['id']}/report/docx").status_code == 409
+
+    # Ad-hoc categories accept analyst attachments as probative evidence.
+    adhoc = client.post(
+        "/api/findings",
+        json={
+            "run_id": run["id"],
+            "title": "보안키패드 입력값 화면 노출",
+            "category": "secure_keypad",
+            "severity": "medium",
+            "reviewer": "claude-code",
+        },
+    ).json()
+    png = tmp_path / "keypad.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\nmanual-capture")
+    with png.open("rb") as stream:
+        attached = client.post(
+            f"/api/findings/{adhoc['id']}/evidence",
+            files={"file": ("keypad.png", stream, "image/png")},
+        )
+    assert attached.status_code == 200, attached.text
+    assert attached.json()["evidence_type"] == "manual_assessment_attachment"
+    with png.open("rb") as stream:
+        wrong_kind = client.post(
+            f"/api/findings/{adhoc['id']}/evidence",
+            files={"file": ("keypad.exe", stream, "application/octet-stream")},
+        )
+    assert wrong_kind.status_code == 415
+    confirmed_adhoc = client.post(
+        f"/api/findings/{adhoc['id']}/record",
+        json={
+            "verdict": "confirmed",
+            "reviewer": "claude-code",
+            "summary": "키패드 입력 중 캡처한 화면에 입력값이 그대로 보인다.",
+            "criteria_confirmed": True,
+        },
+    )
+    assert confirmed_adhoc.status_code == 200, confirmed_adhoc.text
+    # The attachment of another finding cannot be reused.
+    reused = client.post(
+        f"/api/findings/{finding['id']}/record",
+        json={
+            "verdict": "confirmed",
+            "reviewer": "claude-code",
+            "summary": "재확정",
+            "evidence_ids": [attached.json()["id"], storage["id"]],
+            "criteria_confirmed": True,
+        },
+    )
+    assert reused.status_code == 422
 
 
 def _save(path: Path, data: bytes) -> Path:
@@ -173,3 +244,14 @@ def test_manual_finding_rejects_foreign_evidence_and_running_runs(client, tmp_pa
     assert rejected.status_code == 422
     missing_run = client.post("/api/findings", json={"run_id": "nope", "title": "x", "category": "local_storage"})
     assert missing_run.status_code == 404
+    # Findings created by the domestic ledger are judged through the control endpoint only.
+    standard = next(
+        (item for item in client.get(f"/api/findings?run_id={run['id']}").json() if item["source"].startswith("standard:")),
+        None,
+    )
+    if standard is not None:
+        blocked = client.post(
+            f"/api/findings/{standard['id']}/record",
+            json={"verdict": "false_positive", "reviewer": "x", "summary": "y"},
+        )
+        assert blocked.status_code == 409

@@ -3306,6 +3306,9 @@ class DiagnosticOrchestrator:
                                     for item in assessment_summary["controls"]
                                     if item["result"] == "confirmed"
                                 ],
+                                "manual_findings": assessment_summary.get(
+                                    "manual_findings", []
+                                ),
                             },
                             description="취약 판정이 확정된 항목과 연결 원본 증적만 기록했습니다.",
                         )

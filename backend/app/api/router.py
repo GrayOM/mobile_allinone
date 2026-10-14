@@ -137,6 +137,7 @@ from backend.app.devices import (
     IOSDeviceAdapter,
     MockDeviceAdapter,
 )
+from backend.app.evidence.categories import normalize_finding_category
 from backend.app.evidence.policy import EvidencePolicyEngine
 from backend.app.evidence.report import EvidenceReportRenderer
 from backend.app.evidence.docx_report import VulnerabilityDocxReportRenderer
@@ -3361,6 +3362,26 @@ def _run_evidence_or_422(db: Session, run: DiagnosticRun, ids: list[str]) -> lis
     return rows
 
 
+_NON_PROBATIVE_EVIDENCE_TYPES = {
+    "assessment_attestation",
+    "assessment_ledger",
+    "assessment_ledger_amendment",
+    "vulnerability_assessment",
+    "evidence_policy",
+}
+
+
+def _attestation_ids(db: Session, finding: Finding) -> set[str]:
+    return set(
+        db.scalars(
+            select(Evidence.id).where(
+                Evidence.finding_id == finding.id,
+                Evidence.evidence_type == "assessment_attestation",
+            )
+        ).all()
+    )
+
+
 def _manual_finding_source(db: Session, finding: Finding) -> FindingSource | None:
     return db.scalar(
         select(FindingSource).where(
@@ -3419,6 +3440,76 @@ def create_manual_finding(
     return finding
 
 
+@router.post("/findings/{finding_id}/evidence")
+async def upload_finding_evidence(
+    request: Request,
+    finding_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Attach an analyst-collected file (screenshot, log, HAR) to a manual finding."""
+    finding = db.get(Finding, finding_id)
+    if not finding:
+        raise HTTPException(404, "발견항목을 찾을 수 없습니다.")
+    if finding.source != "manual" or not finding.run_id:
+        raise HTTPException(409, "Run에 묶인 수동 발견항목에만 증적을 첨부할 수 있습니다.")
+    run = _run_or_404(db, finding.run_id)
+    _assert_assessment_recording_state(run)
+    name = Path(file.filename or "evidence.bin").name
+    suffix = Path(name).suffix.casefold()
+    allowed = {".png", ".jpg", ".jpeg", ".txt", ".log", ".json", ".xml", ".har"}
+    if suffix not in allowed:
+        raise HTTPException(415, "PNG/JPEG/TXT/LOG/JSON/XML/HAR 증적만 첨부할 수 있습니다.")
+    destination = (
+        EvidenceService(_settings(request)).run_dir(run.id)
+        / "findings"
+        / f"{uuid.uuid4()}{suffix}"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    limit = min(_settings(request).max_upload_mb, 16) * 1024 * 1024
+    total = 0
+    try:
+        with destination.open("wb") as stream:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    raise HTTPException(413, "첨부 증적은 16MB를 넘을 수 없습니다.")
+                stream.write(chunk)
+    except HTTPException:
+        destination.unlink(missing_ok=True)
+        raise
+    mime = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".json": "application/json",
+        ".har": "application/json",
+        ".xml": "application/xml",
+    }.get(suffix, "text/plain")
+    evidence = EvidenceService(_settings(request)).add(
+        db,
+        run_id=run.id,
+        finding_id=finding.id,
+        evidence_type="manual_assessment_attachment",
+        title=f"수동 첨부 증적 · {name}",
+        description=f"발견항목 '{finding.title[:60]}'에 검토자가 첨부한 원본입니다.",
+        file_path=destination,
+        mime_type=mime,
+        inline_data={"finding_id": finding.id, "original_name": name, "bytes": total},
+    )
+    source = _manual_finding_source(db, finding)
+    if source is not None:
+        source.evidence_ids = list(dict.fromkeys([*(source.evidence_ids or []), evidence.id]))
+    db.commit()
+    return {
+        "id": evidence.id,
+        "finding_id": finding.id,
+        "evidence_type": evidence.evidence_type,
+        "sha256": evidence.sha256,
+        "bytes": total,
+    }
+
+
 @router.post("/findings/{finding_id}/record", response_model=FindingOut)
 def record_finding_verdict(
     request: Request,
@@ -3431,41 +3522,65 @@ def record_finding_verdict(
         raise HTTPException(404, "발견항목을 찾을 수 없습니다.")
     if not finding.run_id:
         raise HTTPException(409, "Run에 묶이지 않은 정적 발견항목은 Run 증적으로 판정할 수 없습니다.")
+    if finding.source != "manual":
+        raise HTTPException(
+            409,
+            "국내 기준 항목에서 만든 발견항목은 /assessment-controls/{id}/record로만 판정합니다.",
+        )
     run = _run_or_404(db, finding.run_id)
     _assert_assessment_recording_state(run)
+    app = _app_or_404(db, run.app_id) if run.app_id else None
     source = _manual_finding_source(db, finding)
-    existing_ids = list(source.evidence_ids or []) if source else []
+    existing_ids = [
+        item
+        for item in (source.evidence_ids or [])
+        if item not in _attestation_ids(db, finding)
+    ] if source else []
     requested_ids = (
         list(dict.fromkeys([*existing_ids, *payload.evidence_ids]))
         if payload.verdict == "confirmed"
         else []
     )
     evidence = _run_evidence_or_422(db, run, requested_ids)
+    foreign_attachments = [
+        item
+        for item in evidence
+        if item.evidence_type == "manual_assessment_attachment"
+        and item.finding_id != finding.id
+    ]
+    if foreign_attachments:
+        raise HTTPException(422, "다른 발견항목이나 국내 기준 항목에 첨부한 수동 증적은 재사용할 수 없습니다.")
     if payload.verdict == "confirmed":
         if not payload.criteria_confirmed:
             raise HTTPException(422, "재현 절차 수행 확인이 필요합니다.")
-        usable = [item for item in evidence if item.evidence_type != "assessment_attestation"]
+        usable = [
+            item
+            for item in evidence
+            if item.evidence_type not in _NON_PROBATIVE_EVIDENCE_TYPES
+        ]
         if not usable:
             raise HTTPException(422, "취약 확정 판정에는 재현 원본 증적이 필요합니다.")
-        decision = EvidencePolicyEngine().decide_finding(
-            category=finding.category,
-            requested_verdict="confirmed",
-            confidence=1.0,
-            proposed_ids=[item.id for item in usable],
-            evidence_by_id={item.id: item for item in usable},
-            minimum_quality=0.0,
-        )
-        if decision.effective_verdict != "confirmed":
-            raise HTTPException(
-                422,
-                decision.explanation
-                + (
-                    " 필수 증적 유형: "
-                    + "; ".join(" 또는 ".join(group) for group in decision.missing_requirements)
-                    if decision.missing_requirements
-                    else ""
-                ),
+        if normalize_finding_category(finding.category) is not None:
+            # Canonical categories keep the same evidence gate as the domestic ledger.
+            decision = EvidencePolicyEngine().decide_finding(
+                category=finding.category,
+                requested_verdict="confirmed",
+                confidence=1.0,
+                proposed_ids=[item.id for item in usable],
+                evidence_by_id={item.id: item for item in usable},
+                minimum_quality=0.0,
             )
+            if decision.effective_verdict != "confirmed":
+                raise HTTPException(
+                    422,
+                    decision.explanation
+                    + (
+                        " 필수 증적 유형: "
+                        + "; ".join(" 또는 ".join(group) for group in decision.missing_requirements)
+                        if decision.missing_requirements
+                        else ""
+                    ),
+                )
         attestation = EvidenceService(_settings(request)).add(
             db,
             run_id=run.id,
@@ -3485,8 +3600,19 @@ def record_finding_verdict(
         )
         linked_ids = [*[item.id for item in usable], attestation.id]
         finding.confidence = 1.0
+        finding.rationale = payload.summary
     else:
+        # Downgrades drop every previous confirmation record so a false_positive
+        # finding never carries a 'confirmed' attestation.
+        for stale in db.scalars(
+            select(Evidence).where(
+                Evidence.finding_id == finding.id,
+                Evidence.evidence_type == "assessment_attestation",
+            )
+        ).all():
+            stale.finding_id = None
         linked_ids = existing_ids
+        finding.confidence = 0.0
     if source is None:
         source = FindingSource(
             finding_id=finding.id,
@@ -3501,7 +3627,15 @@ def record_finding_verdict(
         db.add(source)
     source.evidence_ids = list(dict.fromkeys(linked_ids))
     finding.verdict = payload.verdict
-    finding.rationale = payload.summary
+    db.flush()
+    if app is not None:
+        _apply_assessment_summary(
+            request,
+            db,
+            run=run,
+            app=app,
+            title=f"취약점 확정 원장 갱신 · 발견항목 {finding.title[:40]}",
+        )
     options = dict(run.options)
     reviews = list(options.get("finding_reviews") or [])
     reviews.append(
@@ -4827,6 +4961,7 @@ def _apply_assessment_summary(
                 "controls": [
                     item for item in summary["controls"] if item["result"] == "confirmed"
                 ],
+                "manual_findings": summary.get("manual_findings", []),
             },
             description="취약 판정이 확정된 항목과 연결 원본 증적만 기록했습니다.",
         )
@@ -4895,14 +5030,7 @@ def record_assessment_result(
         if payload.outcome == "confirmed"
         else []
     )
-    evidence = db.scalars(
-        select(Evidence).where(
-            Evidence.run_id == run.id,
-            Evidence.id.in_(requested_ids or ["-"]),
-        )
-    ).all()
-    if len(evidence) != len(requested_ids):
-        raise HTTPException(422, "다른 Run 또는 존재하지 않는 증적은 연결할 수 없습니다.")
+    evidence = _run_evidence_or_422(db, run, requested_ids)
     foreign_attachments = [
         item
         for item in evidence

@@ -5,14 +5,14 @@ Claude Code 세션이 MCP로 로컬 작업대를 조작하는 방법과, WSL2에
 ## 1. 구성
 
 1. 작업대 서버를 먼저 띄운다. WSL/Linux는 `scripts/run.sh`, Windows는 `run_windows.ps1`. 기본 주소는 `http://127.0.0.1:8765`.
-2. 저장소 루트의 `.mcp.json`이 `mobile-security-workbench` 서버를 등록한다. Claude Code를 저장소 루트에서 실행하면 자동으로 로드된다. 서버 주소가 다르면 `MSW_BASE_URL`, LAN 토큰 모드이면 `MSW_API_TOKEN`을 `env`에 추가한다.
+2. MCP 의존성은 선택 extra다: `pip install -e ".[mcp]"` (dev extra에도 포함). 저장소 루트의 `.mcp.json`이 `mobile-security-workbench` 서버를 등록한다. 기본 `command`는 WSL/Linux/macOS의 `.venv/bin/python`이며 Windows에서는 `.venv\\Scripts\\python.exe`로 바꾸거나 `claude mcp add mobile-security-workbench -- .venv\\Scripts\\python.exe -m backend.app.mcp_server`로 사용자 범위에 등록한다. Claude Code를 저장소 루트에서 실행하면 자동으로 로드된다. 서버 주소가 다르면 `MSW_BASE_URL`, LAN 토큰 모드이면 `MSW_API_TOKEN`을 `env`에 추가한다.
 3. 세션에서 `msw://routes` 리소스를 먼저 읽고 다음 도구를 쓴다.
 
 | 도구 | 용도 |
 |---|---|
 | `msw_get(path, params)` | 조회 (`/api/devices`, `/api/runs/{id}`, `/api/coverage?run_id=…`) |
 | `msw_post(path, body, method)` | 생성·상태 변경 (`/api/runs`, `/api/approvals`, `/api/runs/{id}/resume`, PATCH/PUT/DELETE 포함) |
-| `msw_upload(path, file_path)` | APK/IPA 업로드, HAR 가져오기, 판정 증적 첨부 |
+| `msw_upload(path, file_path)` | APK/IPA 업로드, HAR 가져오기, 판정 증적 첨부(`/assessment-controls/{id}/evidence`, `/findings/{id}/evidence`) |
 | `msw_download(evidence_id, dir)` | 화면·원본·보고서를 로컬 파일로 받는다. Claude Code는 받은 PNG를 Read로 직접 본다 |
 | `msw_wait_run(run_id, timeout)` | Run이 안전 일시정지 또는 종료될 때까지 대기 |
 
@@ -27,6 +27,7 @@ Claude Code 세션이 MCP로 로컬 작업대를 조작하는 방법과, WSL2에
 ```
 
 - 고위험 작업(우회 스크립트 Spawn, 중위험 UI 동작, Live GET/HEAD 재현, 컴포넌트 호출)은 `safely_paused` 상태에서 `/api/approvals`로 5분 만료 1회 토큰을 받은 뒤 실행 API에 넘긴다. 승인 요청 전에 Claude Code는 대상·코드 SHA-256·범위를 사용자에게 보여 주고 확인을 받는다.
+- ALL 프로필에서는 `POST /api/findings`로 Run에 묶인 발견항목을 만들고, 단말에서 직접 찍은 화면은 `POST /api/findings/{id}/evidence`로 첨부한 뒤 `POST /api/findings/{id}/record`로 확정한다. 국내 기준 항목에서 만든 발견항목은 이 경로로 판정할 수 없다(409).
 - 판정은 `/api/assessment-controls/{id}/record`로 남긴다. `confirmed`는 같은 Run의 필수 증적 ID가 있어야 하며 정적 신호나 AI 추천만으로는 422로 거부된다.
 - NVIDIA 추천(`/apps/{id}/ai/triage`, `/runs/{id}/ai/evidence-priority`)은 `needs_review` 후보일 뿐이다. 최종 판정은 Claude Code가 증적을 직접 확인한 뒤 사용자와 함께 기록한다.
 

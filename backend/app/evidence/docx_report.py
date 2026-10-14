@@ -116,14 +116,7 @@ class VulnerabilityDocxReportRenderer:
             if index != len(controls):
                 document.add_page_break()
 
-        output = self.settings.reports_dir / f"{run.id}-{profile}-vulnerabilities.docx"
-        temporary = output.with_name(f".{output.name}.{uuid.uuid4()}.tmp.docx")
-        try:
-            document.save(temporary)
-            os.replace(temporary, output)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return output
+        return self._save(document, run_id=run.id, profile=profile)
 
     def _render_free(
         self,
@@ -163,37 +156,40 @@ class VulnerabilityDocxReportRenderer:
             ).all()
             if item.evidence_type not in EXCLUDED_EVIDENCE_TYPES
         }
+        rows_by_finding = {
+            finding.id: [
+                evidence[item]
+                for item in dict.fromkeys(linked[finding.id])
+                if item in evidence
+            ]
+            for finding in findings
+        }
         document = Document()
         self._configure(document)
         self._cover(document, project, app, run, profile, len(findings))
         document.add_heading("취약점 요약", level=1)
-        table = document.add_table(rows=1, cols=4)
-        table.style = "Table Grid"
-        table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        for cell, value in zip(table.rows[0].cells, ("번호", "취약점", "위험도", "증적")):
-            cell.text = value
-            cell.paragraphs[0].runs[0].bold = True
-            _shade_cell(cell, "17333A")
-            cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+        table = self._summary_table(document, ("번호", "취약점", "위험도", "증적"))
         for index, finding in enumerate(findings, start=1):
             row = table.add_row().cells
             row[0].text = f"{index:02d}"
             row[1].text = finding.title
             row[2].text = finding.severity.upper()
-            row[3].text = f"{len(dict.fromkeys(linked[finding.id]))}건"
+            row[3].text = f"{len(rows_by_finding[finding.id])}건"
         document.add_page_break()
         for index, finding in enumerate(findings, start=1):
-            rows = [
-                evidence[item]
-                for item in dict.fromkeys(linked[finding.id])
-                if item in evidence
-            ]
             self._finding_section(
-                document, platform=app.platform, index=index, finding=finding, evidence=rows
+                document,
+                platform=app.platform,
+                index=index,
+                finding=finding,
+                evidence=rows_by_finding[finding.id],
             )
             if index != len(findings):
                 document.add_page_break()
-        output = self.settings.reports_dir / f"{run.id}-{profile}-vulnerabilities.docx"
+        return self._save(document, run_id=run.id, profile=profile)
+
+    def _save(self, document: Document, *, run_id: str, profile: str) -> Path:
+        output = self.settings.reports_dir / f"{run_id}-{profile}-vulnerabilities.docx"
         temporary = output.with_name(f".{output.name}.{uuid.uuid4()}.tmp.docx")
         try:
             document.save(temporary)
@@ -201,6 +197,18 @@ class VulnerabilityDocxReportRenderer:
         finally:
             temporary.unlink(missing_ok=True)
         return output
+
+    @staticmethod
+    def _summary_table(document: Document, headers: tuple[str, ...]):
+        table = document.add_table(rows=1, cols=len(headers))
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for cell, value in zip(table.rows[0].cells, headers):
+            cell.text = value
+            cell.paragraphs[0].runs[0].bold = True
+            _shade_cell(cell, "17333A")
+            cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+        return table
 
     def _finding_section(
         self,
@@ -318,15 +326,9 @@ class VulnerabilityDocxReportRenderer:
         findings: dict[str, Finding],
     ) -> None:
         document.add_heading("취약점 요약", level=1)
-        table = document.add_table(rows=1, cols=4)
-        table.style = "Table Grid"
-        table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        headers = ("기준 ID", "취약점", "위험도", "증적")
-        for cell, value in zip(table.rows[0].cells, headers):
-            cell.text = value
-            cell.paragraphs[0].runs[0].bold = True
-            _shade_cell(cell, "17333A")
-            cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+        table = VulnerabilityDocxReportRenderer._summary_table(
+            document, ("기준 ID", "취약점", "위험도", "증적")
+        )
         for control in controls:
             row = table.add_row().cells
             severities = [

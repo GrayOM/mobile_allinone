@@ -305,6 +305,14 @@ def evaluate_standard_controls(
             if isinstance(control_id, str):
                 ai_recommendations.setdefault(control_id, []).append(item)
 
+    manual_confirmed = db.scalars(
+        select(Finding).where(
+            Finding.run_id == run.id,
+            Finding.source == "manual",
+            Finding.verdict == "confirmed",
+        )
+    ).all()
+
     for control in controls:
         definition = resolve_definition(
             db,
@@ -449,12 +457,33 @@ def evaluate_standard_controls(
         for result, count in counts.items()
         if result not in TERMINAL_ASSESSMENT_RESULTS
     )
+    manual_sources = {
+        row.finding_id: list(row.evidence_ids or [])
+        for row in db.scalars(
+            select(FindingSource).where(
+                FindingSource.finding_id.in_([item.id for item in manual_confirmed] or ["-"]),
+                FindingSource.source_tool == "manual",
+            )
+        ).all()
+    }
     return {
         "profile": profile,
         "total": len(controls),
         "counts": dict(counts),
-        "confirmed": counts.get("confirmed", 0),
+        "confirmed": counts.get("confirmed", 0) + len(manual_confirmed),
+        "confirmed_controls": counts.get("confirmed", 0),
+        "confirmed_manual_findings": len(manual_confirmed),
         "unresolved": unresolved,
+        "manual_findings": [
+            {
+                "finding_id": item.id,
+                "title": item.title,
+                "category": item.category,
+                "severity": item.severity,
+                "evidence_ids": manual_sources.get(item.id, []),
+            }
+            for item in manual_confirmed
+        ],
         "controls": [
             {
                 "control_id": item.mastg_id,

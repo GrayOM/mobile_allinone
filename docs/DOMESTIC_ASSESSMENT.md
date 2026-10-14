@@ -6,6 +6,7 @@
 |---|---|---:|---|
 | `critical_infrastructure` | 주요정보통신기반시설 | 27 | `CII-MA-01` ~ `CII-MA-27` |
 | `electronic_financial` | 전자금융기반시설 | 56 | `EFI-MA-01` ~ `EFI-MA-56` |
+| `free_assessment` | 전체 진단 (ALL) | 0 | 없음 — `POST /api/findings`로 만든 수동 발견항목을 `/api/findings/{id}/record`로 확정 |
 
 항목명과 진단 기준은 사용자가 제공한 두 DOCX 권고안에서 실행 정책에 필요한 부분을 요약한 것이다. 원문 전체를 복제하지 않는다. 프로젝트 생성 시 한 프로필을 선택하며 앱 또는 진단 이력이 생긴 뒤에는 변경할 수 없다.
 
