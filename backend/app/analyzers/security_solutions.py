@@ -57,9 +57,19 @@ _CATEGORY_LABELS = {
 }
 
 
+def _token_regex(token: str) -> str:
+    # Package prefixes and library names may continue (com.inka.appsealing.Foo,
+    # libliapp-arm64.so); bare product words must stand alone so that
+    # "nProtect" never matches inside "ApplicationProtection".
+    escaped = re.escape(token)
+    if "." in token or token.lower().startswith("lib"):
+        return rf"(?<![A-Za-z0-9_]){escaped}"
+    return rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])"
+
+
 def solution_pattern() -> re.Pattern[str]:
     tokens = sorted({token for item in SIGNATURES for token in item.indicators}, key=len, reverse=True)
-    return re.compile("|".join(re.escape(token) for token in tokens))
+    return re.compile("|".join(_token_regex(token) for token in tokens))
 
 
 def identify_security_solutions(

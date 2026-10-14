@@ -34,6 +34,9 @@ def test_pattern_matches_longest_indicator_first():
     pattern = solution_pattern()
     assert pattern.search("Lcom/inka/appsealing/Foo;").group(0) == "com.inka.appsealing" or pattern.search("com.inka.appsealing").group(0) == "com.inka.appsealing"
     assert pattern.search("no match here") is None
+    assert pattern.search("ApplicationProtectionLayer") is None
+    assert pattern.search("libdroidx-security.so").group(0) == "libdroidx"
+    assert pattern.search("uses nProtect AppGuard") is not None
 
 
 @pytest.mark.asyncio
