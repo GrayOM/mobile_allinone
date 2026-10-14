@@ -1016,6 +1016,9 @@ def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
         "catalog_source": CATALOG_SOURCE,
         "assessment_profile": artifact.project.assessment_profile,
         "assessment_source": PROFILE_SOURCES[artifact.project.assessment_profile],
+        "security_solutions": (
+            (artifact.analysis_result or {}).get("structure") or {}
+        ).get("security_solutions", []),
         "tool_runs": [
             {
                 "id": item.id,

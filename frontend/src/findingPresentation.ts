@@ -13,6 +13,7 @@ const SECURITY_CONTROL_CATEGORIES = new Set([
   "obfuscation",
   "root_detection",
   "security_control",
+  "security_solution",
 ]);
 
 export function findingLane(finding: Finding): FindingLane {
