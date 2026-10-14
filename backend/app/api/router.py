@@ -137,6 +137,7 @@ from backend.app.devices import (
     IOSDeviceAdapter,
     MockDeviceAdapter,
 )
+from backend.app.evidence.policy import EvidencePolicyEngine
 from backend.app.evidence.report import EvidenceReportRenderer
 from backend.app.evidence.docx_report import VulnerabilityDocxReportRenderer
 from backend.app.evidence.service import EvidenceService
@@ -3323,6 +3324,200 @@ def list_findings(
             )
         query = query.where(or_(*run_scope))
     return db.scalars(query.order_by(Finding.created_at.desc())).all()
+
+
+class ManualFindingCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    title: str = Field(min_length=1, max_length=300)
+    category: str = Field(min_length=1, max_length=100)
+    severity: Literal["info", "low", "medium", "high", "critical"] = "medium"
+    location: str = Field(default="", max_length=2000)
+    rationale: str = Field(default="", max_length=8000)
+    reproduction: list[str] = Field(default_factory=list, max_length=50)
+    additional_checks: list[str] = Field(default_factory=list, max_length=50)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=100)
+    reviewer: str = Field(default="local_user", min_length=1, max_length=100)
+
+
+class FindingRecordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["confirmed", "needs_review", "false_positive"]
+    reviewer: str = Field(min_length=1, max_length=100)
+    summary: str = Field(min_length=1, max_length=4000)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=100)
+    criteria_confirmed: bool = False
+
+
+def _run_evidence_or_422(db: Session, run: DiagnosticRun, ids: list[str]) -> list[Evidence]:
+    wanted = list(dict.fromkeys(ids))
+    rows = db.scalars(
+        select(Evidence).where(Evidence.run_id == run.id, Evidence.id.in_(wanted or ["-"]))
+    ).all()
+    if len(rows) != len(wanted):
+        raise HTTPException(422, "다른 Run 또는 존재하지 않는 증적은 연결할 수 없습니다.")
+    return rows
+
+
+def _manual_finding_source(db: Session, finding: Finding) -> FindingSource | None:
+    return db.scalar(
+        select(FindingSource).where(
+            FindingSource.finding_id == finding.id,
+            FindingSource.source_tool == "manual",
+        )
+    )
+
+
+@router.post("/findings", response_model=FindingOut, status_code=201)
+def create_manual_finding(
+    request: Request, payload: ManualFindingCreate, db: Session = Depends(get_db)
+):
+    """Record an analyst-defined finding bound to one Run (ALL profile and ad-hoc checks).
+
+    The finding starts as ``needs_review``; ``/findings/{id}/record`` confirms it
+    only with same-Run evidence that satisfies the category policy.
+    """
+    run = _run_or_404(db, payload.run_id)
+    _assert_assessment_recording_state(run)
+    app = _app_or_404(db, run.app_id) if run.app_id else None
+    evidence = _run_evidence_or_422(db, run, payload.evidence_ids)
+    finding = Finding(
+        project_id=run.project_id,
+        run_id=run.id,
+        title=payload.title,
+        category=payload.category,
+        platform=app.platform if app else platform_for_adapter(run.device_adapter, run.device_id),
+        severity=payload.severity,
+        location=payload.location,
+        verdict="needs_review",
+        confidence=0.0,
+        rationale=payload.rationale,
+        reproduction=[item for item in payload.reproduction if item.strip()],
+        false_positive_risk="검토자가 같은 Run의 증적을 다시 확인하기 전에는 확정하지 않습니다.",
+        additional_checks=[item for item in payload.additional_checks if item.strip()],
+        source="manual",
+        synthetic=run.synthetic,
+    )
+    db.add(finding)
+    db.flush()
+    db.add(
+        FindingSource(
+            finding_id=finding.id,
+            raw_finding_id=None,
+            source_tool="manual",
+            source_rule_id=f"manual:{payload.reviewer}",
+            fingerprint=hashlib.sha256(
+                f"{run.id}:manual:{finding.id}".encode("utf-8")
+            ).hexdigest(),
+            evidence_ids=[item.id for item in evidence],
+        )
+    )
+    db.commit()
+    db.refresh(finding)
+    return finding
+
+
+@router.post("/findings/{finding_id}/record", response_model=FindingOut)
+def record_finding_verdict(
+    request: Request,
+    finding_id: str,
+    payload: FindingRecordRequest,
+    db: Session = Depends(get_db),
+):
+    finding = db.get(Finding, finding_id)
+    if not finding:
+        raise HTTPException(404, "발견항목을 찾을 수 없습니다.")
+    if not finding.run_id:
+        raise HTTPException(409, "Run에 묶이지 않은 정적 발견항목은 Run 증적으로 판정할 수 없습니다.")
+    run = _run_or_404(db, finding.run_id)
+    _assert_assessment_recording_state(run)
+    source = _manual_finding_source(db, finding)
+    existing_ids = list(source.evidence_ids or []) if source else []
+    requested_ids = (
+        list(dict.fromkeys([*existing_ids, *payload.evidence_ids]))
+        if payload.verdict == "confirmed"
+        else []
+    )
+    evidence = _run_evidence_or_422(db, run, requested_ids)
+    if payload.verdict == "confirmed":
+        if not payload.criteria_confirmed:
+            raise HTTPException(422, "재현 절차 수행 확인이 필요합니다.")
+        usable = [item for item in evidence if item.evidence_type != "assessment_attestation"]
+        if not usable:
+            raise HTTPException(422, "취약 확정 판정에는 재현 원본 증적이 필요합니다.")
+        decision = EvidencePolicyEngine().decide_finding(
+            category=finding.category,
+            requested_verdict="confirmed",
+            confidence=1.0,
+            proposed_ids=[item.id for item in usable],
+            evidence_by_id={item.id: item for item in usable},
+            minimum_quality=0.0,
+        )
+        if decision.effective_verdict != "confirmed":
+            raise HTTPException(
+                422,
+                decision.explanation
+                + (
+                    " 필수 증적 유형: "
+                    + "; ".join(" 또는 ".join(group) for group in decision.missing_requirements)
+                    if decision.missing_requirements
+                    else ""
+                ),
+            )
+        attestation = EvidenceService(_settings(request)).add(
+            db,
+            run_id=run.id,
+            finding_id=finding.id,
+            evidence_type="assessment_attestation",
+            title=f"발견항목 취약 판정 확인 · {finding.title[:60]}",
+            description=payload.summary,
+            inline_data={
+                "finding_id": finding.id,
+                "category": finding.category,
+                "outcome": payload.verdict,
+                "reviewer": payload.reviewer,
+                "criteria_confirmed": payload.criteria_confirmed,
+                "linked_evidence_ids": [item.id for item in usable],
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        linked_ids = [*[item.id for item in usable], attestation.id]
+        finding.confidence = 1.0
+    else:
+        linked_ids = existing_ids
+    if source is None:
+        source = FindingSource(
+            finding_id=finding.id,
+            raw_finding_id=None,
+            source_tool="manual",
+            source_rule_id=f"manual:{payload.reviewer}",
+            fingerprint=hashlib.sha256(
+                f"{run.id}:manual:{finding.id}".encode("utf-8")
+            ).hexdigest(),
+            evidence_ids=[],
+        )
+        db.add(source)
+    source.evidence_ids = list(dict.fromkeys(linked_ids))
+    finding.verdict = payload.verdict
+    finding.rationale = payload.summary
+    options = dict(run.options)
+    reviews = list(options.get("finding_reviews") or [])
+    reviews.append(
+        {
+            "finding_id": finding.id,
+            "verdict": payload.verdict,
+            "reviewer": payload.reviewer,
+            "summary": payload.summary,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    options["finding_reviews"] = reviews[-500:]
+    run.options = options
+    db.commit()
+    db.refresh(finding)
+    return finding
 
 
 @router.get("/findings/{finding_id}", response_model=FindingOut)

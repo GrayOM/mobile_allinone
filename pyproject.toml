@@ -23,6 +23,7 @@ dependencies = [
   "psutil>=6.1,<8",
   "alembic>=1.14,<2",
   "argon2-cffi>=23.1,<26",
+  "mcp>=1.2,<2",
 ]
 
 [project.optional-dependencies]

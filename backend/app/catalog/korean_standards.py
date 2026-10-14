@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 CRITICAL_INFRASTRUCTURE = "critical_infrastructure"
 ELECTRONIC_FINANCIAL = "electronic_financial"
+FREE_ASSESSMENT = "free_assessment"
 DEFAULT_ASSESSMENT_PROFILE = CRITICAL_INFRASTRUCTURE
 
 
@@ -26,6 +27,18 @@ PROFILE_SOURCES: dict[str, dict[str, Any]] = {
         "reviewed_at": "2026-08-20",
         "item_count": 56,
         "note": "제공된 보고서 템플릿의 항목명과 진단 기준을 로컬 실행·증적 정책으로 요약했습니다.",
+    },
+    FREE_ASSESSMENT: {
+        "id": FREE_ASSESSMENT,
+        "name": "전체 진단 (ALL)",
+        "document": "고정 카탈로그 없음 · 발견항목 중심",
+        "reviewed_at": "2026-10-14",
+        "item_count": 0,
+        "note": (
+            "국내 권고안 항목에 얽매이지 않는 자유 진단입니다. 판정 원장은 비어 있고 "
+            "취약점은 같은 Run의 증적을 연결해 확정한 발견항목으로만 기록합니다. "
+            "기준 외 예외 검사(CUS-MA-NN)는 그대로 추가할 수 있습니다."
+        ),
     },
 }
 
@@ -239,7 +252,13 @@ def controls_for_profile(profile: str) -> tuple[StandardControlDefinition, ...]:
         return CRITICAL_INFRASTRUCTURE_CONTROLS
     if profile == ELECTRONIC_FINANCIAL:
         return ELECTRONIC_FINANCIAL_CONTROLS
+    if profile == FREE_ASSESSMENT:
+        return ()
     raise ValueError("지원하지 않는 국내 진단 기준 프로파일입니다.")
+
+
+def is_free_assessment(profile: str | None) -> bool:
+    return profile == FREE_ASSESSMENT
 
 
 def control_by_id(profile: str, control_id: str) -> StandardControlDefinition | None:

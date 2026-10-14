@@ -114,7 +114,7 @@ def test_app_assessment_plan_is_generated_and_never_auto_confirms(client):
 def test_project_profile_seeds_only_selected_domestic_baseline(client, tmp_path):
     profiles = client.get("/api/assessment/profiles")
     assert profiles.status_code == 200
-    assert {item["item_count"] for item in profiles.json()} == {27, 56}
+    assert {item["item_count"] for item in profiles.json()} == {0, 27, 56}
 
     project = client.post(
         "/api/projects",

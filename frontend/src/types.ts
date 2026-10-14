@@ -19,7 +19,7 @@ export interface Project {
   external_analyzer_certificate_sha256: string | null;
   mock_mode: boolean;
   run_mode: "mock" | "live";
-  assessment_profile: "critical_infrastructure" | "electronic_financial";
+  assessment_profile: "critical_infrastructure" | "electronic_financial" | "free_assessment";
   retention_days: number;
   raw_access_enabled: boolean;
   created_at: string;
