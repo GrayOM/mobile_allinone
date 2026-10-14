@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mobile-security-workbench": {
+      "command": ".venv/bin/python",
+      "args": ["-m", "backend.app.mcp_server"],
+      "env": {
+        "MSW_BASE_URL": "http://127.0.0.1:8765"
+      }
+    }
+  }
+}

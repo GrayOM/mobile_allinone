@@ -18,9 +18,11 @@ from sqlalchemy.orm import Session
 from backend.app.ai.masking import mask_context
 from backend.app.assessment_scope import custom_row_for, resolve_definition
 from backend.app.catalog import execution_plan
+from backend.app.catalog.korean_standards import is_free_assessment
 from backend.app.catalog.guidance import guidance_for
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.database.models import (
+    FindingSource,
     AppArtifact,
     ControlTest,
     DiagnosticRun,
@@ -33,6 +35,7 @@ from backend.app.database.models import (
 PROFILE_NAMES = {
     "critical_infrastructure": "주요정보통신기반시설",
     "electronic_financial": "전자금융기반시설",
+    "free_assessment": "전체 진단 (ALL)",
 }
 EXCLUDED_EVIDENCE_TYPES = {
     "assessment_ledger",
@@ -54,6 +57,8 @@ class VulnerabilityDocxReportRenderer:
         if not project or not app:
             raise LookupError("보고서에 필요한 프로젝트 또는 앱을 찾을 수 없습니다.")
         profile = str(run.options.get("assessment_profile") or project.assessment_profile)
+        if is_free_assessment(profile):
+            return self._render_free(db, project=project, app=app, run=run, profile=profile)
         controls = db.scalars(
             select(ControlTest)
             .where(
@@ -111,7 +116,80 @@ class VulnerabilityDocxReportRenderer:
             if index != len(controls):
                 document.add_page_break()
 
-        output = self.settings.reports_dir / f"{run.id}-{profile}-vulnerabilities.docx"
+        return self._save(document, run_id=run.id, profile=profile)
+
+    def _render_free(
+        self,
+        db: Session,
+        *,
+        project: Project,
+        app: AppArtifact,
+        run: DiagnosticRun,
+        profile: str,
+    ) -> Path:
+        """ALL profile: the report is built from confirmed findings of this Run."""
+        findings = db.scalars(
+            select(Finding)
+            .where(Finding.run_id == run.id, Finding.verdict == "confirmed")
+            .order_by(Finding.created_at, Finding.id)
+        ).all()
+        if not findings:
+            raise ValueError("취약 확정 발견항목이 없어 DOCX 보고서를 생성하지 않았습니다.")
+        sources = db.scalars(
+            select(FindingSource).where(
+                FindingSource.finding_id.in_([item.id for item in findings])
+            )
+        ).all()
+        linked: dict[str, list[str]] = {item.id: [] for item in findings}
+        for source in sources:
+            linked[source.finding_id].extend(source.evidence_ids or [])
+        for item in findings:
+            linked[item.id].extend(evidence.id for evidence in item.evidence)
+        evidence_ids = {evidence_id for ids in linked.values() for evidence_id in ids}
+        evidence = {
+            item.id: item
+            for item in db.scalars(
+                select(Evidence).where(
+                    Evidence.id.in_(evidence_ids or {"-"}),
+                    Evidence.run_id == run.id,
+                )
+            ).all()
+            if item.evidence_type not in EXCLUDED_EVIDENCE_TYPES
+        }
+        rows_by_finding = {
+            finding.id: [
+                evidence[item]
+                for item in dict.fromkeys(linked[finding.id])
+                if item in evidence
+            ]
+            for finding in findings
+        }
+        document = Document()
+        self._configure(document)
+        self._cover(document, project, app, run, profile, len(findings))
+        document.add_heading("취약점 요약", level=1)
+        table = self._summary_table(document, ("번호", "취약점", "위험도", "증적"))
+        for index, finding in enumerate(findings, start=1):
+            row = table.add_row().cells
+            row[0].text = f"{index:02d}"
+            row[1].text = finding.title
+            row[2].text = finding.severity.upper()
+            row[3].text = f"{len(rows_by_finding[finding.id])}건"
+        document.add_page_break()
+        for index, finding in enumerate(findings, start=1):
+            self._finding_section(
+                document,
+                platform=app.platform,
+                index=index,
+                finding=finding,
+                evidence=rows_by_finding[finding.id],
+            )
+            if index != len(findings):
+                document.add_page_break()
+        return self._save(document, run_id=run.id, profile=profile)
+
+    def _save(self, document: Document, *, run_id: str, profile: str) -> Path:
+        output = self.settings.reports_dir / f"{run_id}-{profile}-vulnerabilities.docx"
         temporary = output.with_name(f".{output.name}.{uuid.uuid4()}.tmp.docx")
         try:
             document.save(temporary)
@@ -119,6 +197,60 @@ class VulnerabilityDocxReportRenderer:
         finally:
             temporary.unlink(missing_ok=True)
         return output
+
+    @staticmethod
+    def _summary_table(document: Document, headers: tuple[str, ...]):
+        table = document.add_table(rows=1, cols=len(headers))
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for cell, value in zip(table.rows[0].cells, headers):
+            cell.text = value
+            cell.paragraphs[0].runs[0].bold = True
+            _shade_cell(cell, "17333A")
+            cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+        return table
+
+    def _finding_section(
+        self,
+        document: Document,
+        *,
+        platform: str,
+        index: int,
+        finding: Finding,
+        evidence: list[Evidence],
+    ) -> None:
+        document.add_paragraph(f"VULNERABILITY {index:02d}", style="Subtitle")
+        document.add_heading(finding.title, level=1)
+        facts = document.add_table(rows=2, cols=4)
+        facts.style = "Table Grid"
+        facts.cell(0, 0).text = "판정"
+        facts.cell(0, 1).text = "CONFIRMED"
+        facts.cell(0, 2).text = "위험도"
+        facts.cell(0, 3).text = finding.severity.upper()
+        facts.cell(1, 0).text = "분류"
+        facts.cell(1, 1).text = f"{finding.category} · {platform}"
+        facts.cell(1, 2).text = "증적 수"
+        facts.cell(1, 3).text = str(len(evidence))
+        for row in facts.rows:
+            for cell_index in (0, 2):
+                row.cells[cell_index].paragraphs[0].runs[0].bold = True
+                _shade_cell(row.cells[cell_index], "DCE8E6")
+        if finding.location:
+            document.add_paragraph(f"위치: {finding.location}", style="Caption")
+        document.add_heading("판정 근거", level=2)
+        document.add_paragraph(finding.rationale or "같은 Run의 재현 증적을 검토자가 확인했습니다.")
+        document.add_heading("재현 절차", level=2)
+        for step in [item for item in finding.reproduction if item] or ["재현 절차가 기록되지 않았습니다."]:
+            document.add_paragraph(step, style="List Number")
+        document.add_heading("취약 증적", level=2)
+        if not evidence:
+            document.add_paragraph("연결 증적 메타데이터를 찾지 못했습니다.")
+        for position, item in enumerate(evidence, start=1):
+            self._evidence(document, position, item)
+        if finding.additional_checks:
+            document.add_heading("조치 권고", level=2)
+            for line in finding.additional_checks:
+                document.add_paragraph(line, style="List Bullet")
 
     @staticmethod
     def _configure(document: Document) -> None:
@@ -194,15 +326,9 @@ class VulnerabilityDocxReportRenderer:
         findings: dict[str, Finding],
     ) -> None:
         document.add_heading("취약점 요약", level=1)
-        table = document.add_table(rows=1, cols=4)
-        table.style = "Table Grid"
-        table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        headers = ("기준 ID", "취약점", "위험도", "증적")
-        for cell, value in zip(table.rows[0].cells, headers):
-            cell.text = value
-            cell.paragraphs[0].runs[0].bold = True
-            _shade_cell(cell, "17333A")
-            cell.paragraphs[0].runs[0].font.color.rgb = RGBColor(255, 255, 255)
+        table = VulnerabilityDocxReportRenderer._summary_table(
+            document, ("기준 ID", "취약점", "위험도", "증적")
+        )
         for control in controls:
             row = table.add_row().cells
             severities = [

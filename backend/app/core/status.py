@@ -44,6 +44,8 @@ class RunMode(StringEnum):
 class AssessmentProfile(StringEnum):
     CRITICAL_INFRASTRUCTURE = "critical_infrastructure"
     ELECTRONIC_FINANCIAL = "electronic_financial"
+    # "ALL": no fixed catalog; the ledger is built from confirmed findings.
+    FREE_ASSESSMENT = "free_assessment"
 
 
 class FindingVerdict(StringEnum):

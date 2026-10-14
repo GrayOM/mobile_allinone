@@ -252,7 +252,7 @@ export default function DiagnosticSetupPage() {
           </div>
           <div className="diagnostic-guide__checks">
             <div className={project ? "guide-check guide-check--done" : "guide-check"}>
-              <span>1</span><div><strong>프로젝트·기준</strong><small>{project ? `${project.run_mode === "mock" ? "Mock 연습" : "Live 진단"} · ${project.assessment_profile === "electronic_financial" ? "전자금융기반시설 56항목" : "주요정보통신기반시설 27항목"}` : "프로젝트를 선택하세요"}</small></div>
+              <span>1</span><div><strong>프로젝트·기준</strong><small>{project ? `${project.run_mode === "mock" ? "Mock 연습" : "Live 진단"} · ${project.assessment_profile === "electronic_financial" ? "전자금융기반시설 56항목" : project.assessment_profile === "free_assessment" ? "전체 진단 (ALL)" : "주요정보통신기반시설 27항목"}` : "프로젝트를 선택하세요"}</small></div>
             </div>
             <div className={selectedApp ? "guide-check guide-check--done" : "guide-check"}>
               <span>2</span><div><strong>대상 앱</strong><small>{selectedApp ? (selectedApp.app_name || selectedApp.original_name) : "APK 또는 IPA를 선택하세요"}</small></div>
