@@ -1756,7 +1756,17 @@ class DiagnosticOrchestrator:
                 await self._stage(
                     db, run, "static_analysis", 12, "업로드된 정적 분석 결과를 실행에 연결합니다."
                 )
-                if app:
+                if app and (app.analysis_result or {}).get("source") == "device_installed":
+                    # Registered from the device without a binary: there is no
+                    # static result to attach, and the ledger must not treat the
+                    # registration manifest as analysis evidence.
+                    record_check(
+                        "static_analysis",
+                        False,
+                        "바이너리 없이 단말 설치본으로 등록한 앱이라 정적 분석 증적이 없습니다.",
+                        required=False,
+                    )
+                elif app:
                     static_evidence = self.evidence.add_json(
                         db,
                         run_id=run.id,

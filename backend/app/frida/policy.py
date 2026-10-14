@@ -42,6 +42,10 @@ def script_applies_to_app(script: FridaScript, app: AppArtifact) -> tuple[bool, 
     conditions = [item.strip().lower() for item in (script.conditions or []) if item.strip()]
     if not conditions:
         return True, "별도 적용 조건이 없습니다."
+    if (app.analysis_result or {}).get("source") == "device_installed":
+        # Registered from the device without a binary: there are no static
+        # signals to match, so platform/framework agreement is the only gate.
+        return True, "바이너리 없는 단말 설치본이라 플랫폼 일치만 확인했습니다."
     signals = (app.analysis_result or {}).get("signals") or {}
     category_signal = _CATEGORY_SIGNALS.get((script.category or "").strip().lower())
     if category_signal and signals.get(category_signal):

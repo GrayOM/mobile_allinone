@@ -206,6 +206,33 @@ class IOSDeviceAdapter(DeviceAdapter):
             if isinstance(item, dict) and item.get("CFBundleIdentifier")
         }
 
+    @staticmethod
+    def _normalize_device_path(path: str) -> str:
+        value = str(path or "")
+        return value[len("/private"):] if value.startswith("/private/") else value
+
+    async def _frida_app_pids(self, device_id: str, package_name: str) -> list[int] | None:
+        """Resolve running app pids by bundle identifier via ``frida-ps -ai``."""
+        if not self.frida_ps:
+            return None
+        try:
+            target = self.frida_target(device_id)
+        except ValueError:
+            return None
+        if not await self.ensure_frida_forward(device_id):
+            return None
+        result = await run_command(
+            [self.frida_ps, target.command_option, target.display, "-a", "-i"], timeout=25
+        )
+        if not result.ok:
+            return None
+        pids: list[int] = []
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[0].isdigit() and parts[-1] == package_name:
+                pids.append(int(parts[0]))
+        return pids
+
     async def _app_pids(self, device_id: str, package_name: str) -> tuple[list[int], CommandResult]:
         processes = await self._pmd(device_id, "developer", "dvt", "proclist", timeout=90)
         if not processes.ok:
@@ -216,18 +243,35 @@ class IOSDeviceAdapter(DeviceAdapter):
             return [], processes
         inventory = await self._app_inventory(device_id)
         app = inventory.get(package_name) or {}
-        bundle_path = str(app.get("BundlePath") or app.get("ContainerBundlePath") or "")
+        bundle_path = self._normalize_device_path(
+            str(app.get("BundlePath") or app.get("ContainerBundlePath") or "")
+        )
         executable = str(app.get("ExecutableName") or "")
+        main_binary = f"{bundle_path}/{executable}" if bundle_path and executable else ""
+        # Only the main executable counts: app extensions (.appex) under the
+        # bundle run as separate system-managed processes and may linger or
+        # restart after the app itself is killed.
         pids = [
             int(item["pid"])
             for item in payload
             if isinstance(item, dict)
             and isinstance(item.get("pid"), int)
             and (
-                (bundle_path and str(item.get("realAppName") or "").startswith(bundle_path))
-                or (executable and item.get("name") == executable)
+                (
+                    main_binary
+                    and self._normalize_device_path(str(item.get("realAppName") or "")) == main_binary
+                )
+                or (
+                    not main_binary
+                    and executable
+                    and item.get("name") == executable
+                    and ".appex/" not in str(item.get("realAppName") or "")
+                )
             )
         ]
+        frida_pids = await self._frida_app_pids(device_id, package_name)
+        if frida_pids:
+            pids = sorted(set(pids) | set(frida_pids))
         return pids, processes
 
     def _manual(self, message: str) -> DeviceOperation:
@@ -736,7 +780,9 @@ class IOSDeviceAdapter(DeviceAdapter):
             if listed.ok:
                 operation.data["pids"] = [str(pid) for pid in pids]
                 operation.data["running"] = bool(pids)
-                operation.output = f"{package_name}: pids={pids}"
+                # Keep the bundle id out of the text so the orchestrator's
+                # substring heuristic cannot mistake an empty result for running.
+                operation.output = f"main_executable_pids={pids}"
             return operation
         return self._manual(
             "비탈옥 단말 프로세스 조회는 pymobiledevice3 DVT 터널 구성 후 수동 확인이 필요합니다."
