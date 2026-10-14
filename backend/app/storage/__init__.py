@@ -1,4 +1,5 @@
 from .android import AndroidStorageCollector
+from .clipboard import AndroidClipboardInspector
 from .inspector import inspect_sqlite_database
 from .mock import MockAndroidStorageCollector
 from .models import (
@@ -11,6 +12,7 @@ from .models import (
 )
 
 __all__ = [
+    "AndroidClipboardInspector",
     "AndroidStorageCollector",
     "DatabaseArtifact",
     "FileChange",

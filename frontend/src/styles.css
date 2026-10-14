@@ -2702,9 +2702,14 @@ a:hover {
   grid-row: 4;
 }
 
-.network-test-console {
+.background-console {
   grid-column: 1 / -1;
   grid-row: 5;
+}
+
+.network-test-console {
+  grid-column: 1 / -1;
+  grid-row: 6;
 }
 
 .network-test-ledger {
@@ -2898,6 +2903,10 @@ a:hover {
 
 .storage-ledger > div:last-child {
   border-right: 0;
+}
+
+.storage-ledger--secondary {
+  background: #10282f;
 }
 
 .storage-ledger span,

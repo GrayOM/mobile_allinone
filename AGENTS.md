@@ -1,6 +1,6 @@
 # Mobile Security Workbench — 세션 인수인계
 
-> 최종 갱신: 2026-10-13
+> 최종 갱신: 2026-10-14
 > 작업 위치: `/mnt/c/Users/PSM/Desktop/project/mobile_allinone`
 > 새 세션에서는 이 파일을 먼저 읽고, 완료된 기능을 처음부터 다시 만들지 않는다.
 
@@ -10,6 +10,7 @@
 - 최신 배포 기준점: 이 문서를 포함한 `main` HEAD
 - 기능 검증 브랜치 `test/approved-control-validation`은 `main`에 fast-forward 반영됐다.
 - [PR #1 feat: connect static findings to approved live evidence](https://github.com/GrayOM/mobile_allinone/pull/1)은 2026-08-21 병합 완료됐다.
+- 2026-10-14 작업: PR #2 병합 뒤 Android 앱 전용 외부 저장소 Before/After, Clipboard 대상 앱 귀속, 백그라운드 화면 보호(FLAG_SECURE·최근 화면·Task 스냅샷) 관찰을 추가했다. `EFI-MA-50`은 `background_screen` 판정 방식으로 바뀌었고 자동 확정은 없다. backend 167 passed·1 skipped, frontend build·audit, 1440×1000·390×844 UI 검증을 통과했다. 실제 단말 검증은 여전히 없다.
 - 2026-10-13 작업: DOCX 권고안 원문 지침 연결, 프로젝트별 기준 외 예외 검사·범위 제외, 서버 TLS 구성 점검(sslyze), Frida 17 런타임 호환, zsign IPA 재서명, 정적 분석·Semgrep 규칙 확장과 Alembic V9. backend CI 조건 150 passed·3 skipped(지침 파일·Semgrep 포함 시 153 passed), frontend build·audit, 1440×1000·390×844 UI 검증을 통과했다. 실제 단말·실서버 검증은 여전히 없다.
 - 이번 배포에는 조직 인증·역할·감사, 장시간 캡처, Burp/Fiddler 귀속 프로세스, Alembic V8 전환이 포함되며 backend 117 tests, frontend build/audit, Docker health와 1440×1000·390×844 UI 검증이 통과했다.
 - AI 추천은 화면 선택 후보일 뿐 판정·증적 영구 연결·DOCX 수록을 자동 수행하지 않는다. 실제 Android/iOS Live 단말 검증 결과는 아직 추가되지 않았다.
@@ -243,7 +244,8 @@ tests/               단위·API·Mock E2E 테스트
 - `backend/app/navigation/`은 ADB UIAutomator XML 기반 `UIDriver`, 제한형 DFS, default-deny 위험 정책과 결정론적 Mock 화면 그래프를 제공한다. TextView/ViewGroup/탭 계열과 명확한 목록·상세·정보 의미가 모두 있는 요소만 low이며 Button·Switch·CheckBox·확인/저장 계열·무라벨·unknown clickable·외부 Intent 가능 요소는 `pending_approval`로만 남긴다. `pause_for_approval_candidates=true`이면 현재 화면의 medium tap 후보에서 안전 일시정지하며, 서버가 package·UI fingerprint·element ID·위험도를 재검증한 뒤 후보에 묶인 5분 만료 1회 토큰으로만 실행한다. high·blocked·파괴적 동작과 임의 좌표·텍스트 입력은 실행하지 않는다. 삭제·제거·초기화·해제·비활성화·revoke/disconnect 등 파괴적 의미는 safe hint보다 먼저 high로 분류하고 resource allowlist는 토큰 경계로만 일치시킨다.
 - UI 상태는 activity/resource-id/class/tree shape의 `structural_fingerprint`, clickable path/resource/class와 숫자를 정규화한 의미 label의 `interaction_fingerprint`, 전체 Text/content-desc/bounds/checked의 `content_fingerprint`를 분리한다. 그래프 방문은 interaction identity를 사용하되 동일 구조의 variant 수를 제한해 동적 화면 폭증과 동일 layout 과병합을 함께 막는다. Element ID는 bounds/content-desc 변화에 의존하지 않는다.
 - 허용 UI 동작은 Before Screenshot/UI Tree → Action → After Screenshot/UI Tree 순서와 Edge 증적 ID를 보존한다. 상태·깊이·동작·화면별 동작·반복·동작 시간·전체 시간 제한에는 서버 hard cap이 있다. 스크롤은 대상 앱의 `scrollable=true` container 내부에서만 `max_scrolls_per_state`까지 실행하고 동일 content 반복 시 중단한다.
-- `backend/app/storage/`은 Root Android의 검증된 `/data/data/<package>`만 제한형 tar로 수집한다. ADB stdout은 RAM bytes가 아니라 제한형 임시 파일로 streaming하고 성공 시 원자 교체한다. Archive hash와 SQLite 검사는 worker thread에서 실행하며 SQLite progress handler 시간 제한을 둔다. Before/After 파일 diff와 table/column/row count 및 기본 마스킹 Preview를 제공한다.
+- `backend/app/storage/`은 Root Android의 검증된 `/data/data/<package>`와 앱 전용 외부 저장소 `Android/{data,media,obb}/<package>`(shell 사용자 먼저, 실패 시 Root)를 제한형 tar로 수집한다. 공용 Download 등 다른 앱과 섞이는 경로는 읽지 않으며 Android 11 이상 비루팅 단말은 `unsupported`로 끝난다. 외부 저장소 Snapshot은 `scope=external`로 같은 `storage_snapshot`·`storage_diff` 유형에 기록되고 내부 Snapshot과 Diff를 섞지 않는다. Clipboard는 `dumpsys clipboard` 소유 uid·`pm list packages -U` 대상 uid·`appops` WRITE_CLIPBOARD 시각으로 대상 앱 귀속만 판단하고 원문은 저장하지 않는다(SHA-256·길이·`attributed`·`signals`). ADB stdout은 RAM bytes가 아니라 제한형 임시 파일로 streaming하고 성공 시 원자 교체한다. Archive hash와 SQLite 검사는 worker thread에서 실행하며 SQLite progress handler 시간 제한을 둔다. Before/After 파일 diff와 table/column/row count 및 기본 마스킹 Preview를 제공한다.
+- `backend/app/screen_protection/`은 Run 옵션 `background_screen_check`(Android 전용, Mock 기본 켜짐)로 대상 앱 창의 FLAG_SECURE 속성을 읽고, 전환 전 화면 캡처 → HOME → APP_SWITCH → 최근 앱 화면 캡처 → Root 단말이면 대상 Task의 시스템 스냅샷 파일(`task_snapshot`) 보존 → 앱 전면 복귀·프로세스 확인 순서로 관찰한다. 캡처 PNG의 검은 화면 비율을 stdlib로 계산해 FLAG_SECURE 신호를 보강한다. 결과는 `background_screen_check` 증적과 `options.background_screen`에 남고 MASTG-TEST-0010·`EFI-MA-50`은 `needs_review`까지만 바뀐다.
 - `backend/app/network_testing/`은 ProxyFlow를 로컬 구조화한 뒤 실행 전 Candidate를 만든다. Mock의 읽기 전용 합성 재현은 자동 실행한다. Live는 현재 Run의 원본 Flow에서 다시 계산한 본문 없는 GET/HEAD만 승인된 host·DNS/peer IP 고정·redirect 차단·1 MiB 응답 제한 아래 후보별 1회 실행하고 Response Comparator 증적을 보존한다. POST/PUT/PATCH/DELETE·업로드·Object 경계 후보는 승인 후에도 자동 실행하지 않는다.
 - Finding 증적 정책은 AI 자유 문자열을 exact alias 기반 `CanonicalFindingCategory`로 먼저 정규화한 뒤 범주별 required evidence group을 검사한다. `local_storage` confirmed에는 반드시 `storage_snapshot` 또는 `storage_diff`가 필요하며 network/runtime 노출과 분리한다. 출처가 모호한 `sensitive_data_exposure`는 `needs_review`로 제한한다.
 - 기본 `/api/runs/{id}/flows`와 Frida WebSocket은 마스킹한다. 인증된 `/api/runs/{id}/flows/raw`와 원본 Frida JSONL은 명시적 Raw 접근이다.
@@ -380,6 +382,7 @@ data/
 - 진단 설정의 4단계 준비도: 프로젝트·대상 앱·단말 연결·캡처 범위
 - 발견항목의 결과 해석 안내: 심각도·판정·합성 데이터 분리 및 `needs_review` 필터
 - 발견항목 원장은 앱 취약점과 모바일 보안통제 신호를 분리하며, 정적 확인·동적 재검증 필요·실행 증적 확인 상태를 표시한다.
+- 실시간 진단의 DYNAMIC STORAGE DIFF는 외부 저장소 범위·Clipboard 소유 uid·귀속 신호 행을, 별도 BACKGROUND SCREEN PROTECTION 패널은 FLAG_SECURE·캡처 검은 비율·Task 스냅샷·복귀 상태와 관찰 단계를 보여 준다. 진단 설정에는 **백그라운드 화면 보호 관찰** 토글이 있다.
 - 프로젝트 화면의 진단 범위·기준 외 예외 검사 원장, iOS 앱의 IPA 재서명 패널, 국내 원장의 CUSTOM·OUT OF SCOPE 표식과 권고안 원문 기준 펼침, Run 원장의 서버 TLS 구성 점검 패널, 설정 화면의 Frida 17 런타임·sslyze·zsign 상태가 연결되어 있다.
 
 디자인 방향은 산업용 로컬 보안 워크벤치다.
@@ -464,10 +467,24 @@ MSW_ENABLE_API_DOCS=false
 
 ## 9. 현재 검증 결과
 
-마지막 검증(2026-10-13, WSL Ubuntu·Python 3.12):
+마지막 검증(2026-10-14, WSL Ubuntu·Python 3.12):
 
 ```text
 python -m compileall -q backend    통과
+pytest                             167 passed, 1 skipped (지침 파일·semgrep 있는 PC) / CI 조건에서는 skip 3
+npm run build                      통과
+npm audit --audit-level=high       0 vulnerabilities
+```
+
+2026-10-14 추가 검증:
+
+- `tests/test_device_privacy_checks.py` 13건: `dumpsys clipboard`·`pm`·`appops` 파서, uid 일치·시간 창 기반 귀속, 원문 미저장, 가짜 ADB로 앱 전용 외부 저장소 subtree만 tar하는지와 비루팅 접근 거부 시 `unsupported`, Mock 외부 Snapshot Diff와 내부/외부 Diff 혼합 거부, `dumpsys window` 기호·16진 플래그 파서, Task ID 신·구 형식, 스냅샷 목록 필터, PNG 검은 비율, 전자금융 Mock Run에서 `EFI-MA-50`·`EFI-MA-21`이 `needs_review`로만 연결되고 `background_screen_check`·`task_snapshot` 증적이 생기는 회귀를 확인했다.
+- 1440×1000·390×844 headless Chromium에서 실시간 진단과 진단 설정 화면을 확인했다. 가로 넘침·콘솔 오류·경고·실패 API 응답은 0건이었다.
+- 실제 Android 단말에서의 `dumpsys` 형식·키 입력·스냅샷 파일 읽기는 검증하지 않았다.
+
+이전 검증(2026-10-13):
+
+```text
 pytest                             150 passed, 3 skipped (지침 파일·semgrep 없음, CI 조건) / 모두 있을 때 153 passed
 semgrep 1.180 포함 실행             표본 9개 신규 규칙 탐지, 오류 0
 npm run build                      통과
@@ -556,8 +573,9 @@ npm audit --audit-level=high
 - Frida 17 브리지 번들의 실제 Android·iOS 단말 로드(로컬 Linux 프로세스로만 검증)
 - 실제 승인 서버 대상 sslyze 점검(로컬 루프백과 Mock으로만 검증)
 - 모든 iOS 버전/단말 조합의 파일·화면 수집 보장
-- iOS Keychain 구조화 뷰어와 Android app-specific external storage 수집
-- 실 Android Clipboard의 대상 앱 귀속 검증과 FLAG_SECURE/background snapshot 검증
+- iOS Keychain 구조화 뷰어
+- 실제 Android 단말에서의 외부 저장소 수집·Clipboard 귀속·백그라운드 화면 보호 관찰(구현은 있으나 가짜 ADB와 Mock으로만 검증, `dumpsys` 출력 형식은 버전별로 다를 수 있음)
+- 공용 외부 저장소(Download 등)에 대상 앱이 쓴 파일의 귀속(의도적으로 수집하지 않음)
 - high·blocked UI 동작의 자동 실행(의도적으로 `manual_required`)과 Live 상태 변경 API 재전송(의도적으로 금지)
 - Live API 테스트 계정의 실제 귀속 검증(현재는 비밀번호 없는 계정 참조와 허용 서버 범위만 구조화)
 
@@ -582,8 +600,8 @@ npm audit --audit-level=high
 
 사용자가 별도 우선순위를 주지 않으면 다음 순서가 합리적이다.
 
-1. Android external storage·Clipboard 귀속·FLAG_SECURE/background snapshot 검증
-2. 실제 Android/iOS 단말 매트릭스 검증과 iOS AFC/HouseArrest·Keychain 확장
+1. 실제 Android 단말에서 외부 저장소·Clipboard 귀속·백그라운드 화면 보호 관찰 검증과 iOS 대응(AFC/HouseArrest·Keychain·백그라운드 스냅샷)
+2. 실제 Android/iOS 단말 매트릭스 검증
 3. 실제 제품 버전에 고정된 Burp/Fiddler Extension/API Adapter가 필요한 고객 환경 검증
 
 ## 13. 참고 문서

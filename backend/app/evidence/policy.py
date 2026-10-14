@@ -54,6 +54,8 @@ class EvidencePolicyEngine:
         "device_log",
         "storage_snapshot",
         "storage_diff",
+        "background_screen_check",
+        "task_snapshot",
         "frida_script",
         "frida_session",
         "screenshot",

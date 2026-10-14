@@ -80,6 +80,9 @@ EVIDENCE_REQUIREMENTS_BY_EVALUATOR: dict[str, tuple[tuple[str, ...], ...]] = {
         "network_review": (("network_capture", "network_test", "manual_proxy_import"),),
     "tls_configuration": (("tls_scan", "manual_assessment_attachment"),),
         "ui_review": (("screenshot", "ui_tree", "manual_assessment_attachment"),),
+        "background_screen": (
+            ("background_screen_check", "manual_assessment_attachment"),
+        ),
         "dynamic_review": (
             ("screenshot", "runtime_tool", "manual_assessment_attachment"),
         ),
@@ -215,7 +218,7 @@ ELECTRONIC_FINANCIAL_CONTROLS: tuple[StandardControlDefinition, ...] = (
     _d(_EFI, 47, "정보 노출", "불필요한 파일 노출 여부", "샘플·테스트·백업·이전 소스 등 불필요한 파일이 알려진 경로에 노출되는지 확인한다.", "manual", "network_review", "medium", "unnecessary_file_exposure"),
     _d(_EFI, 48, "입력값·서버 실행", "크로스 사이트 스크립팅 (XSS)", "저장되거나 반사된 입력 스크립트가 다른 이용자의 브라우저·WebView에서 실행되는지 확인한다.", "manual", "manual", "high", "xss", "high"),
     _d(_EFI, 49, "단말 중요정보", "디버그 로그 내 중요정보 노출 여부", "단말 디버그 로그에 개인정보·고유식별정보·비밀번호·금융정보가 기록되는지 확인한다.", "dynamic", "runtime_logs", "low", "runtime_log_exposure", "high"),
-    _d(_EFI, 50, "단말 중요정보", "백그라운드 화면 보호", "민감 화면을 백그라운드로 전환했을 때 최근 화면과 스냅샷 파일에 중요정보가 남는지 확인한다.", "manual", "ui_review", "medium", "background_screen", "high"),
+    _d(_EFI, 50, "단말 중요정보", "백그라운드 화면 보호", "민감 화면을 백그라운드로 전환했을 때 최근 화면과 스냅샷 파일에 중요정보가 남는지 확인한다.", "hybrid", "background_screen", "medium", "background_screen", "high"),
     _d(_EFI, 51, "입력값·서버 실행", "서버 사이드 요청 위조 (SSRF)", "URL·IP 입력값 변조로 서버가 내부망이나 로컬 자원에 요청하고 응답을 반환하는지 확인한다.", "manual", "manual", "high", "ssrf", "high"),
     _d(_EFI, 52, "세션·전송", "세션정보 재사용", "탈취한 세션·OAuth·SSO 토큰을 다른 IP·단말에서 재사용해 권한 페이지에 접근 가능한지 확인한다.", "manual", "manual", "high", "session_reuse", "critical"),
     _d(_EFI, 53, "전자금융 인증", "인증수단 소유자 검증 여부", "타인 명의 인증서·전화번호·계좌·OTP를 등록하거나 인증에 사용 가능한지 확인한다.", "manual", "manual", "blocked", "credential_ownership", "critical"),
