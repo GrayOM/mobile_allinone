@@ -35,8 +35,8 @@ Claude Code 세션이 MCP로 로컬 작업대를 조작하는 방법과, WSL2에
 
 ### Android 14 (Magisk)
 
-- Windows에 Platform-Tools를 설치하고 `adb.exe`로 단말을 먼저 인식시킨다(USB 디버깅 허용).
-- WSL 쪽 `adb`는 Windows adb 서버를 공유한다. `.env` 또는 `config.yaml`의 `adb` 경로를 Windows 바이너리(`/mnt/c/.../platform-tools/adb.exe`)로 지정하면 가장 단순하다. `adb.exe`는 WSL에서 실행 가능하며 같은 서버·단말 목록을 쓴다.
+- Windows에 Platform-Tools를 설치하고 `adb.exe`로 단말을 먼저 인식시킨다(USB 디버깅 허용). 이 PC에서는 `C:\Users\PSM\AppData\Local\Android\Sdk\platform-tools\adb.exe`(1.0.41, 36.0.2)가 WSL interop으로 바로 실행되는 것을 확인했다(2026-10-14, 단말 미연결 상태).
+- WSL 쪽 `adb`는 Windows adb 서버를 공유한다. `config.yaml`의 `tools.adb`를 `/mnt/c/Users/<user>/AppData/Local/Android/Sdk/platform-tools/adb.exe`로 지정하면 WSL 작업대가 Windows의 USB 단말을 그대로 본다. Linux 네이티브 adb를 쓰려면 `usbipd-win`으로 USB를 attach해야 한다(관리자 권한 필요).
 - Frida: 단말의 `frida-server`는 Magisk 모듈 또는 수동 push로 실행한다. Python `frida`가 USB 장치를 보려면 `usbipd-win`으로 USB를 WSL에 attach하거나, `adb forward tcp:27042 tcp:27042` 뒤 `127.0.0.1:27042` 원격 장치를 쓴다.
 - Root tar 수집·외부 저장소·Task 스냅샷 읽기는 Magisk `su`가 있으면 그대로 동작한다.
 
