@@ -14,6 +14,7 @@ from backend.app.database.models import (
     RawFinding,
     ToolRun,
 )
+from backend.app.assessment_scope import sync_app_baseline
 from backend.app.catalog import evaluate_profile_baseline
 
 from .correlation import correlate_findings
@@ -49,6 +50,7 @@ def ensure_assessment_baseline(
         .limit(1)
     )
     if exists:
+        sync_app_baseline(db, project=project, artifact=artifact)
         return False
     for item in evaluate_profile_baseline(
         project.assessment_profile,
@@ -80,6 +82,7 @@ def ensure_assessment_baseline(
             )
         )
     db.flush()
+    sync_app_baseline(db, project=project, artifact=artifact)
     return True
 
 

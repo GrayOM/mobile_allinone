@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, downloadAuthenticatedFile, post, upload } from "../api";
+import { ControlGuidancePanel } from "../components/ControlGuidancePanel";
+import { TlsScanPanel } from "../components/TlsScanPanel";
 import type {
   AIEvidencePriority,
   AIEvidencePriorityRecommendation,
@@ -230,6 +232,21 @@ export default function CoveragePage() {
       setError(reason instanceof Error ? reason.message : "AI 사전 분류를 완료하지 못했습니다.");
     } finally {
       setTriaging(false);
+    }
+  }
+
+  async function reloadRunLedger() {
+    if (!runId) return;
+    try {
+      const query = new URLSearchParams({ run_id: runId, scope: "run", standard });
+      const [nextCoverage, nextEvidence] = await Promise.all([
+        api<CoverageData>(`/coverage?${query.toString()}`),
+        api<Evidence[]>(`/runs/${runId}/evidence`),
+      ]);
+      setCoverage(nextCoverage);
+      setRunEvidence(nextEvidence);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Run 원장을 새로 고치지 못했습니다.");
     }
   }
 
@@ -525,6 +542,14 @@ export default function CoveragePage() {
             </button>
           </div>
         </section>
+      )}
+
+      {domestic && selectedRun && runId && (
+        <TlsScanPanel
+          run={selectedRun}
+          recordable={ASSESSMENT_RECORDABLE_STATUSES.has(selectedRun.status)}
+          onRecorded={() => void reloadRunLedger()}
+        />
       )}
 
       {domestic && assessmentPlan && (
@@ -826,6 +851,8 @@ function ControlRow({
             {plan.queue_status.replaceAll("_", " ")}
           </span>
         )}
+        {domestic && test.custom && <span className="scope-badge scope-badge--custom">CUSTOM</span>}
+        {domestic && test.excluded && <span className="scope-badge scope-badge--excluded">OUT OF SCOPE</span>}
         {domestic ? <small>RISK · {test.risk.toUpperCase()}</small> : test.replacement_ids.length > 0 && (
           <small>→ {test.replacement_ids.join(", ")}</small>
         )}
@@ -844,12 +871,23 @@ function ControlRow({
             <p>연결 증적 {test.evidence_ids.length}건 · Finding {test.finding_ids.length}건</p>
           </details>
         )}
+        {domestic && (test.guidance?.available || test.custom) && (
+          <details className="control-criteria control-guidance">
+            <summary>{test.custom ? "예외 검사 정의 보기" : "보안 권고안 원문 기준 보기"}</summary>
+            <ControlGuidancePanel
+              standard={test.standard}
+              controlId={test.control_id || test.mastg_id}
+              projectId={test.project_id}
+              platform={test.platform}
+            />
+          </details>
+        )}
         {domestic && onReview && (
           <button
             type="button"
             className="button button--quiet button--small control-review-button"
             onClick={onReview}
-            disabled={reviewDisabled}
+            disabled={reviewDisabled || Boolean(test.excluded)}
             title={reviewDisabled ? "안전 일시정지 또는 종료된 Run에서 판정할 수 있습니다." : "이 항목의 취약 증적과 판정을 검토합니다."}
           >
             취약 판정 작업

@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import type { CapabilityHealth } from "../types";
 import { api, post, put } from "../api";
 import { SectionHeading, StatusChip } from "../components/UI";
 
@@ -71,6 +72,7 @@ export default function SettingsPage() {
   const [aiResult, setAIResult] = useState<Record<string, unknown> | null>(null);
   const [analysisHealth, setAnalysisHealth] = useState<AdapterHealth[]>([]);
   const [runtimeHealth, setRuntimeHealth] = useState<AdapterHealth[]>([]);
+  const [extensionHealth, setExtensionHealth] = useState<Array<{ key: string; label: string; detail: string; value: CapabilityHealth | null }>>([]);
 
   useEffect(() => {
     void Promise.all([
@@ -82,6 +84,34 @@ export default function SettingsPage() {
       setAnalysisHealth(analyzers);
       setRuntimeHealth(runtime);
     });
+    void Promise.all([
+      api<CapabilityHealth>("/frida/runtime").catch(() => null),
+      api<CapabilityHealth>("/assessment/tls-scanner").catch(() => null),
+      api<CapabilityHealth>("/ios/signing").catch(() => null),
+    ]).then(([frida, tls, signing]) => setExtensionHealth([
+      {
+        key: "frida-runtime",
+        label: "Frida 17 런타임 브리지",
+        detail: frida?.python_binding_version
+          ? `Python frida ${frida.python_binding_version} · 브리지 ${frida.bridges?.ready ? "설치됨" : "미설치"}`
+          : "Python frida 바인딩 없음",
+        value: frida,
+      },
+      {
+        key: "sslyze",
+        label: "sslyze · 서버 TLS 구성 점검",
+        detail: "EFI-MA-41~44 · 승인 서버 범위만 · AGPL subprocess",
+        value: tls,
+      },
+      {
+        key: "zsign",
+        label: "zsign · iOS IPA 재서명",
+        detail: signing?.signing?.problems.length
+          ? signing.signing.problems.join(" ")
+          : "macOS 없이 개발 인증서로 재서명",
+        value: signing,
+      },
+    ]));
   }, []);
 
   async function saveTools(event: FormEvent<HTMLFormElement>) {
@@ -185,6 +215,25 @@ export default function SettingsPage() {
             <small>경로 변경은 서버 재시작 후 적용됩니다.</small>
           </div>
         </form>
+      </section>
+
+      <section className="settings-section panel">
+        <div className="settings-section__head">
+          <div className="settings-icon">EXT</div>
+          <div><span className="eyebrow">ANDROID · IOS EXTENSIONS</span><h2>추가 런타임 상태</h2></div>
+        </div>
+        <div className="extension-ledger">
+          {extensionHealth.map((item) => (
+            <article key={item.key}>
+              <div>
+                <strong>{item.label}</strong>
+                <small>{item.value?.message ?? "상태를 확인하지 못했습니다."}</small>
+                <small>{item.detail}</small>
+              </div>
+              <StatusChip value={item.value?.status ?? "failed"} />
+            </article>
+          ))}
+        </div>
       </section>
 
       <section className="settings-section panel">

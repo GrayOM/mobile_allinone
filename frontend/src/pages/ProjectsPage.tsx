@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, post, remove, upload } from "../api";
 import type { AnalysisOverview, AppArtifact, Project } from "../types";
+import { AssessmentScopePanel } from "../components/AssessmentScopePanel";
+import { IpaResignPanel } from "../components/IpaResignPanel";
 import {
   EmptyState,
   SectionHeading,
@@ -112,6 +114,16 @@ export default function ProjectsPage() {
     } catch (reason) {
       setUploading(0);
       setError(reason instanceof Error ? reason.message : "업로드 실패");
+    }
+  }
+
+  async function refreshSelectedApp(appId: string) {
+    try {
+      const items = await api<AppArtifact[]>(`/projects/${selected}/apps`);
+      setApps(items);
+      setSelectedApp(items.find((item) => item.id === appId) ?? null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "앱 정보를 새로 고치지 못했습니다.");
     }
   }
 
@@ -328,6 +340,14 @@ export default function ProjectsPage() {
                   }
                 />
               </div>
+              {selectedApp && selectedApp.platform.endsWith("ios") && (
+                <IpaResignPanel
+                  app={selectedApp}
+                  mock={project.run_mode === "mock"}
+                  onUpdated={() => void refreshSelectedApp(selectedApp.id)}
+                />
+              )}
+              <AssessmentScopePanel project={project} />
             </>
           ) : (
             <EmptyState title="프로젝트를 선택하세요" description="왼쪽에서 프로젝트를 선택하거나 새로 만드세요." />

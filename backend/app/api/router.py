@@ -7,6 +7,7 @@ import os
 import shutil
 import uuid
 import zipfile
+import importlib
 import ipaddress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,7 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from backend.app.ai import AIProviderChain, MockAIProvider
 from backend.app.ai.masking import mask_context
@@ -38,8 +39,32 @@ from backend.app.assessment_priority import (
     build_assessment_evidence_priority,
 )
 from backend.app.assessment_plan import (
+    current_scope_fingerprint,
     refresh_app_assessment_plan,
     stored_plan_is_current,
+)
+from backend.app.assessment_scope import (
+    EXCLUDED_STATUS,
+    ScopeError,
+    clear_exclusion,
+    create_custom_control,
+    custom_row_for,
+    delete_custom_control,
+    load_project_scope,
+    project_definitions_for_platform,
+    project_scope_payload,
+    resolve_definition,
+    scope_row_to_dict,
+    set_custom_control_enabled,
+    set_exclusion,
+)
+from backend.app.catalog.guidance import guidance_for, guidance_source, guidance_summary
+from backend.app.ios_signing import ZsignAdapter, resigned_record
+from backend.app.network_testing.tls_scan import (
+    TlsScanAdapter,
+    TlsScanError,
+    parse_targets as parse_tls_targets,
+    pin_targets as pin_tls_targets,
 )
 from backend.app.analyzers import (
     APKiDAnalyzerAdapter,
@@ -63,6 +88,7 @@ from backend.app.control_validation import (
     active_control_scope,
     network_host_allowed,
     normalize_control_validation_request,
+    normalize_network_hosts,
 )
 from backend.app.component_validation import (
     ComponentCandidateError,
@@ -165,6 +191,11 @@ from backend.app.schemas import (
 
 
 router = APIRouter(prefix="/api")
+
+
+# Keys tied to the uploaded file rather than to one analysis attempt. They
+# survive re-analysis because the IPA bytes (and its SHA-256) do not change.
+APP_SCOPED_ANALYSIS_KEYS = frozenset({"ios_resigned", "ios_resigned_history"})
 
 
 def _orchestrator(request: Request) -> DiagnosticOrchestrator:
@@ -345,7 +376,12 @@ def _activate_analysis_run(
         artifact.package_name = result.package_name
         artifact.version = result.version
         artifact.analysis_status = result.status
-        artifact.analysis_result = result.to_dict()
+        preserved = {
+            key: value
+            for key, value in (artifact.analysis_result or {}).items()
+            if key in APP_SCOPED_ANALYSIS_KEYS
+        }
+        artifact.analysis_result = {**result.to_dict(), **preserved}
         artifact.active_analysis_run_id = analysis_run.id
         analysis_run.status = "active"
         analysis_run.activated_at = datetime.now(timezone.utc)
@@ -1036,7 +1072,14 @@ async def app_ai_static_triage(
     if project.run_mode == RunMode.LIVE.value and not project.external_ai_allowed:
         raise HTTPException(409, "이 프로젝트는 외부 AI 전송이 비활성화되어 있습니다.")
 
-    definitions = controls_for_profile(project.assessment_profile)
+    scope = load_project_scope(db, project)
+    definitions = [
+        item
+        for item in project_definitions_for_platform(
+            db, project, app.platform, scope=scope
+        )
+        if item.control_id not in scope.exclusions
+    ]
     static_analysis = dict(app.analysis_result or {})
     static_analysis.pop("ai_static_triage", None)
     raw_rows = db.scalars(
@@ -1201,11 +1244,22 @@ def _control_to_dict(item: ControlTest) -> dict[str, Any]:
         "finding_ids": item.finding_ids,
         "risk": item.risk,
     }
-    definition = (
-        control_by_id(item.standard, item.mastg_id)
-        if item.standard in PROFILE_SOURCES
-        else None
-    )
+    definition = None
+    if item.standard in PROFILE_SOURCES:
+        session = object_session(item)
+        definition = (
+            resolve_definition(
+                session,
+                project_id=item.project_id,
+                standard=item.standard,
+                control_id=item.mastg_id,
+            )
+            if session is not None
+            else control_by_id(item.standard, item.mastg_id)
+        )
+        value["custom"] = item.mastg_id.startswith("CUS-MA-")
+        value["excluded"] = item.status == EXCLUDED_STATUS
+        value["guidance"] = guidance_summary(item.standard, item.mastg_id)
     if definition is not None:
         value["execution"] = execution_plan(definition)
     return value
@@ -2793,11 +2847,28 @@ async def create_run(
     pause_for_security_bypass = options.get("pause_for_security_bypass", False)
     if not isinstance(pause_for_security_bypass, bool):
         raise HTTPException(422, "pause_for_security_bypass는 boolean이어야 합니다.")
+    use_resigned_ipa = options.get("use_resigned_ipa", False)
+    if not isinstance(use_resigned_ipa, bool):
+        raise HTTPException(422, "use_resigned_ipa는 boolean이어야 합니다.")
+    if use_resigned_ipa:
+        if app is None or app_platform != "ios":
+            raise HTTPException(422, "재서명 IPA 설치는 iOS 앱 Run에서만 선택할 수 있습니다.")
+        resigned = (app.analysis_result or {}).get("ios_resigned")
+        if (
+            not isinstance(resigned, dict)
+            or not resigned.get("sha256")
+            or resigned.get("source_sha256") != app.sha256
+        ):
+            raise HTTPException(
+                422,
+                "현재 업로드와 일치하는 재서명 IPA가 없습니다. 프로젝트 화면에서 IPA 재서명을 먼저 실행하세요.",
+            )
     navigation_options = options.get("navigation_limits", {})
     if not isinstance(navigation_options, dict):
         raise HTTPException(422, "navigation_limits는 객체여야 합니다.")
     options.update(
         {
+            "use_resigned_ipa": use_resigned_ipa,
             "assessment_profile": project.assessment_profile,
             "frida_script_ids": selected_script_ids,
             "auto_select_frida": payload.auto_select_frida,
@@ -4243,7 +4314,11 @@ def assessment_execution_matrix(profile: str | None = None):
 def app_assessment_plan(app_id: str, db: Session = Depends(get_db)):
     artifact = _app_or_404(db, app_id)
     project = _project_or_404(db, artifact.project_id)
-    if not stored_plan_is_current(artifact, project.assessment_profile):
+    if not stored_plan_is_current(
+        artifact,
+        project.assessment_profile,
+        current_scope_fingerprint(db, project, artifact),
+    ):
         plan = refresh_app_assessment_plan(
             db,
             project=project,
@@ -4471,6 +4546,7 @@ async def upload_assessment_evidence(
     control = _assessment_control_or_404(db, control_test_id)
     run = _run_or_404(db, control.run_id or "")
     _assert_assessment_recording_state(run)
+    _assert_control_in_scope(control)
     name = Path(file.filename or "evidence.bin").name
     suffix = Path(name).suffix.casefold()
     allowed = {".png", ".jpg", ".jpeg", ".txt", ".log", ".json", ".xml", ".har"}
@@ -4519,6 +4595,73 @@ async def upload_assessment_evidence(
     }
 
 
+def _apply_assessment_summary(
+    request: Request,
+    db: Session,
+    *,
+    run: DiagnosticRun,
+    app: AppArtifact,
+    title: str,
+    review: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Re-evaluate the run ledger and persist summary, gaps and review trail."""
+    summary = evaluate_standard_controls(db, run, app)
+    options = dict(run.options)
+    options["assessment_summary"] = {
+        key: value for key, value in summary.items() if key != "controls"
+    }
+    if summary["confirmed"]:
+        vulnerability_evidence = EvidenceService(_settings(request)).add_json(
+            db,
+            run_id=run.id,
+            filename=f"confirmed-vulnerabilities-{uuid.uuid4()}.json",
+            title=title,
+            evidence_type="vulnerability_assessment",
+            data={
+                "profile": summary["profile"],
+                "confirmed": summary["confirmed"],
+                "controls": [
+                    item for item in summary["controls"] if item["result"] == "confirmed"
+                ],
+            },
+            description="취약 판정이 확정된 항목과 연결 원본 증적만 기록했습니다.",
+        )
+        options["assessment_summary"][
+            "vulnerability_evidence_id"
+        ] = vulnerability_evidence.id
+    if review is not None:
+        reviews = list(options.get("assessment_reviews") or [])
+        reviews.append(review)
+        options["assessment_reviews"] = reviews[-500:]
+    quality_gaps = [
+        item
+        for item in options.get("quality_gaps", [])
+        if item.get("stage") != "domestic_assessment"
+    ]
+    if run.run_mode == RunMode.LIVE.value and summary["unresolved"]:
+        quality_gaps.append(
+            {
+                "stage": "domestic_assessment",
+                "message": f"{summary['unresolved']}개 국내 기준 항목의 점검이 완료되지 않았습니다.",
+            }
+        )
+    options["quality_gaps"] = quality_gaps
+    options["failed_required_stages"] = [item["stage"] for item in quality_gaps]
+    run.options = options
+    if run.status == RunStatus.COMPLETED_WITH_GAPS.value and not quality_gaps:
+        run.status = RunStatus.COMPLETED.value
+        run.current_stage = RunStatus.COMPLETED.value
+    return summary
+
+
+def _assert_control_in_scope(control: ControlTest) -> None:
+    if control.status == EXCLUDED_STATUS:
+        raise HTTPException(
+            409,
+            "프로젝트 범위에서 제외된 항목입니다. 프로젝트 진단 범위에서 제외를 해제한 뒤 새 Run에서 판정하세요.",
+        )
+
+
 class AssessmentRecordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -4541,6 +4684,7 @@ def record_assessment_result(
     control = _assessment_control_or_404(db, control_test_id)
     run = _run_or_404(db, control.run_id or "")
     _assert_assessment_recording_state(run)
+    _assert_control_in_scope(control)
     app = _app_or_404(db, control.app_id)
     requested_ids = (
         list(dict.fromkeys([*control.evidence_ids, *payload.evidence_ids]))
@@ -4628,60 +4772,21 @@ def record_assessment_result(
                 )
         control.finding_ids = []
     db.flush()
-    summary = evaluate_standard_controls(db, run, app)
-    options = dict(run.options)
-    options["assessment_summary"] = {
-        key: value for key, value in summary.items() if key != "controls"
-    }
-    if summary["confirmed"]:
-        vulnerability_evidence = EvidenceService(_settings(request)).add_json(
-            db,
-            run_id=run.id,
-            filename=f"confirmed-vulnerabilities-{uuid.uuid4()}.json",
-            title=f"국내 기준 취약점 확정 원장 갱신 · {control.mastg_id}",
-            evidence_type="vulnerability_assessment",
-            data={
-                "profile": summary["profile"],
-                "confirmed": summary["confirmed"],
-                "controls": [
-                    item for item in summary["controls"] if item["result"] == "confirmed"
-                ],
-            },
-            description="취약 판정이 확정된 항목과 연결 원본 증적만 기록했습니다.",
-        )
-        options["assessment_summary"][
-            "vulnerability_evidence_id"
-        ] = vulnerability_evidence.id
-    reviews = list(options.get("assessment_reviews") or [])
-    reviews.append(
-        {
+    _apply_assessment_summary(
+        request,
+        db,
+        run=run,
+        app=app,
+        title=f"국내 기준 취약점 확정 원장 갱신 · {control.mastg_id}",
+        review={
             "control_test_id": control.id,
             "control_id": control.mastg_id,
             "outcome": payload.outcome,
             "reviewer": payload.reviewer,
             "summary": payload.summary,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
-        }
+        },
     )
-    options["assessment_reviews"] = reviews[-500:]
-    quality_gaps = [
-        item
-        for item in options.get("quality_gaps", [])
-        if item.get("stage") != "domestic_assessment"
-    ]
-    if run.run_mode == RunMode.LIVE.value and summary["unresolved"]:
-        quality_gaps.append(
-            {
-                "stage": "domestic_assessment",
-                "message": f"{summary['unresolved']}개 국내 기준 항목의 점검이 완료되지 않았습니다.",
-            }
-        )
-    options["quality_gaps"] = quality_gaps
-    options["failed_required_stages"] = [item["stage"] for item in quality_gaps]
-    run.options = options
-    if run.status == RunStatus.COMPLETED_WITH_GAPS.value and not quality_gaps:
-        run.status = RunStatus.COMPLETED.value
-        run.current_stage = RunStatus.COMPLETED.value
     db.commit()
     db.refresh(control)
     return _control_to_dict(control)
@@ -4752,6 +4857,8 @@ def read_settings(request: Request):
         "idevicescreenshot": "libimobiledevice Windows 빌드의 idevicescreenshot.exe",
         "burp": "Burp Suite 실행 파일 경로 지정(리스너·HAR 반입은 수동 확인)",
         "fiddler": "Fiddler 실행 파일 경로 지정(리스너·HAR 반입은 수동 확인)",
+        "sslyze": ".\\install_oss_tools.ps1 -SSLyze -AcceptCopyleftLicenses (AGPL-3.0, subprocess)",
+        "zsign": "zsign 릴리스 빌드 경로 지정(macOS 없이 IPA 재서명)",
     }
     tools = []
     for name in settings.tools.model_fields:
@@ -4848,3 +4955,469 @@ def update_tool_settings(payload: ToolSettingsUpdate):
         "restart_required": True,
         "message": "도구 경로를 config.yaml에 저장했습니다. 서버 재시작 후 적용됩니다.",
     }
+
+
+
+# ---------------------------------------------------------------------------
+# Project assessment scope: exception inspections and catalog exclusions
+# ---------------------------------------------------------------------------
+
+
+class CustomControlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=2, max_length=200)
+    group: str = Field(default="사용자 정의 검사", max_length=100)
+    criteria: list[str] = Field(min_length=1, max_length=20)
+    procedure: list[str] = Field(default_factory=list, max_length=30)
+    automation: Literal["static", "dynamic", "hybrid", "manual"] = "manual"
+    evaluator: str = Field(default="manual", max_length=40)
+    risk: Literal["low", "medium", "high"] = "medium"
+    severity: Literal["info", "low", "medium", "high", "critical"] = "medium"
+    platform_scope: Literal["any", "android", "ios"] = "any"
+    finding_categories: list[str] = Field(default_factory=list, max_length=10)
+    reference: str = Field(default="", max_length=2000)
+    reason: str = Field(min_length=1, max_length=2000)
+    recorded_by: str = Field(min_length=1, max_length=100)
+
+
+class CustomControlUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+class ControlExclusionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=5, max_length=2000)
+    recorded_by: str = Field(min_length=1, max_length=100)
+
+
+def _scope_http_error(exc: ScopeError) -> HTTPException:
+    return HTTPException(exc.status_code, str(exc))
+
+
+def _refresh_project_plans(db: Session, project: Project) -> None:
+    for artifact in db.scalars(
+        select(AppArtifact).where(AppArtifact.project_id == project.id)
+    ).all():
+        if artifact.analysis_status == "completed":
+            refresh_app_assessment_plan(db, project=project, artifact=artifact)
+
+
+@router.get("/projects/{project_id}/assessment-scope")
+def get_project_assessment_scope(project_id: str, db: Session = Depends(get_db)):
+    project = _project_or_404(db, project_id)
+    return project_scope_payload(db, project)
+
+
+@router.post("/projects/{project_id}/custom-controls", status_code=201)
+def create_project_custom_control(
+    project_id: str,
+    payload: CustomControlRequest,
+    db: Session = Depends(get_db),
+):
+    project = _project_or_404(db, project_id)
+    try:
+        row = create_custom_control(
+            db,
+            project,
+            title=payload.title,
+            group=payload.group,
+            criteria=payload.criteria,
+            procedure=payload.procedure,
+            automation=payload.automation,
+            evaluator=payload.evaluator,
+            risk=payload.risk,
+            severity=payload.severity,
+            platform_scope=payload.platform_scope,
+            finding_categories=payload.finding_categories,
+            reference=payload.reference,
+            reason=payload.reason,
+            recorded_by=payload.recorded_by,
+        )
+    except ScopeError as exc:
+        db.rollback()
+        raise _scope_http_error(exc) from exc
+    _refresh_project_plans(db, project)
+    db.commit()
+    return scope_row_to_dict(row)
+
+
+@router.patch("/projects/{project_id}/custom-controls/{control_id}")
+def update_project_custom_control(
+    project_id: str,
+    control_id: str,
+    payload: CustomControlUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    project = _project_or_404(db, project_id)
+    try:
+        row = set_custom_control_enabled(db, project, control_id, enabled=payload.enabled)
+    except ScopeError as exc:
+        db.rollback()
+        raise _scope_http_error(exc) from exc
+    _refresh_project_plans(db, project)
+    db.commit()
+    return scope_row_to_dict(row)
+
+
+@router.delete("/projects/{project_id}/custom-controls/{control_id}")
+def delete_project_custom_control(
+    project_id: str,
+    control_id: str,
+    db: Session = Depends(get_db),
+):
+    project = _project_or_404(db, project_id)
+    try:
+        delete_custom_control(db, project, control_id)
+    except ScopeError as exc:
+        db.rollback()
+        raise _scope_http_error(exc) from exc
+    _refresh_project_plans(db, project)
+    db.commit()
+    return {"deleted": control_id}
+
+
+@router.put("/projects/{project_id}/control-exclusions/{control_id}")
+def put_project_control_exclusion(
+    project_id: str,
+    control_id: str,
+    payload: ControlExclusionRequest,
+    db: Session = Depends(get_db),
+):
+    project = _project_or_404(db, project_id)
+    try:
+        row = set_exclusion(
+            db,
+            project,
+            control_id,
+            reason=payload.reason,
+            recorded_by=payload.recorded_by,
+        )
+    except ScopeError as exc:
+        db.rollback()
+        raise _scope_http_error(exc) from exc
+    _refresh_project_plans(db, project)
+    db.commit()
+    return scope_row_to_dict(row)
+
+
+@router.delete("/projects/{project_id}/control-exclusions/{control_id}")
+def delete_project_control_exclusion(
+    project_id: str,
+    control_id: str,
+    db: Session = Depends(get_db),
+):
+    project = _project_or_404(db, project_id)
+    try:
+        clear_exclusion(db, project, control_id)
+    except ScopeError as exc:
+        db.rollback()
+        raise _scope_http_error(exc) from exc
+    _refresh_project_plans(db, project)
+    db.commit()
+    return {"restored": control_id}
+
+
+@router.get("/assessment/guidance")
+def assessment_guidance_source():
+    return guidance_source()
+
+
+@router.get("/assessment/guidance/{profile}/{control_id}")
+def assessment_guidance(
+    profile: str,
+    control_id: str,
+    project_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    if profile not in PROFILE_SOURCES:
+        raise HTTPException(422, "지원하지 않는 국내 진단 기준입니다.")
+    if control_id.startswith("CUS-MA-"):
+        if not project_id:
+            raise HTTPException(422, "사용자 정의 검사는 project_id가 필요합니다.")
+        row = custom_row_for(db, project_id=project_id, control_id=control_id)
+        if row is None or row.profile != profile:
+            raise HTTPException(404, "사용자 정의 검사를 찾을 수 없습니다.")
+        return {
+            "profile": profile,
+            "control_id": control_id,
+            "title": row.title,
+            "custom": True,
+            "description": [row.reason],
+            "threats": [],
+            "diagnostic_criteria": list(row.criteria or []),
+            "diagnostic_examples": list(row.procedure or []),
+            "remediation": [],
+            "remediation_examples": {},
+            "check_scripts": [],
+            "reference": row.reference,
+            "recorded_by": row.recorded_by,
+        }
+    guidance = guidance_for(profile, control_id)
+    if guidance is None:
+        raise HTTPException(404, "보안 권고안 지침을 찾을 수 없습니다.")
+    return {**guidance, "custom": False}
+
+
+
+# ---------------------------------------------------------------------------
+# Server TLS configuration check (sslyze subprocess, approved scope only)
+# ---------------------------------------------------------------------------
+
+
+class TlsScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    targets: list[str] = Field(min_length=1, max_length=5)
+
+
+@router.get("/assessment/tls-scanner")
+async def tls_scanner_health(request: Request):
+    return await TlsScanAdapter(_settings(request)).health()
+
+
+@router.post("/runs/{run_id}/tls-scan")
+async def run_tls_configuration_scan(
+    request: Request,
+    run_id: str,
+    payload: TlsScanRequest,
+    db: Session = Depends(get_db),
+):
+    run = _run_or_404(db, run_id)
+    _assert_assessment_recording_state(run)
+    if not run.app_id:
+        raise HTTPException(409, "대상 앱이 고정된 Run에서만 TLS 구성 점검을 기록할 수 있습니다.")
+    synthetic = run.run_mode == RunMode.MOCK.value
+
+    def approved_hosts(current: DiagnosticRun) -> list[str] | None:
+        if synthetic:
+            return None
+        try:
+            scope = active_control_scope(current.options, current.device_id)
+        except ControlScopeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if scope is None:
+            raise HTTPException(
+                409,
+                "Live TLS 구성 점검에는 유효한 승인 통제 검증 범위와 허용 서버 목록이 필요합니다.",
+            )
+        return normalize_network_hosts(scope.get("allowed_network_hosts"))
+
+    try:
+        targets = parse_tls_targets(payload.targets, approved_hosts(run))
+        if not synthetic:
+            targets = await pin_tls_targets(targets)
+    except TlsScanError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+    settings = _settings(request)
+    evidence_service = EvidenceService(settings)
+    output_dir = evidence_service.run_dir(run.id)
+    orchestrator = _orchestrator(request)
+    manual_claimed = False
+    if run.status == RunStatus.SAFELY_PAUSED.value:
+        # Hold the manual-action slot so the Run cannot resume or stop while
+        # the scan is in flight and the ledger is rewritten afterwards.
+        if not await orchestrator.begin_manual_action(run.id):
+            raise HTTPException(409, "다른 수동 작업이 끝난 뒤 TLS 구성 점검을 실행하세요.")
+        manual_claimed = True
+    try:
+        db.commit()
+        outcome = await TlsScanAdapter(settings).scan(
+            targets, output_dir=output_dir, synthetic=synthetic
+        )
+        if outcome.status == CapabilityStatus.NOT_CONFIGURED:
+            raise HTTPException(409, outcome.message)
+        if outcome.status != CapabilityStatus.AVAILABLE or outcome.raw_path is None:
+            raise HTTPException(502, outcome.message)
+        db.expire_all()
+        run = _run_or_404(db, run_id)
+        app = _app_or_404(db, run.app_id or "")
+        try:
+            _assert_assessment_recording_state(run)
+            allowed_after = approved_hosts(run)
+            if allowed_after is not None and any(
+                not network_host_allowed(item.host, allowed_after) for item in targets
+            ):
+                raise HTTPException(409, "점검 중 승인 서버 범위가 바뀌어 결과를 기록하지 않았습니다.")
+        except HTTPException:
+            outcome.raw_path.unlink(missing_ok=True)
+            raise
+        evidence = evidence_service.add(
+            db,
+            run_id=run.id,
+            evidence_type="tls_scan",
+            title="서버 TLS 구성 점검 · " + ", ".join(item.display for item in targets),
+            description=outcome.message,
+            file_path=outcome.raw_path,
+            mime_type="application/json",
+            command=outcome.command,
+            inline_data={
+                "scanner": "sslyze",
+                "sslyze_version": outcome.sslyze_version,
+                "targets": [item.display for item in targets],
+                "pinned_addresses": {
+                    item.display: item.pinned_ip for item in targets if item.pinned_ip
+                },
+                "servers": outcome.servers,
+                "control_results": outcome.control_results,
+                "decision_policy": "domestic_advisory_efi_41_44",
+                "synthetic": outcome.synthetic,
+            },
+            synthetic=outcome.synthetic or run.synthetic,
+        )
+        summary = _apply_assessment_summary(
+            request,
+            db,
+            run=run,
+            app=app,
+            title="TLS 구성 점검 후 국내 기준 원장 갱신",
+        )
+        db.commit()
+    finally:
+        if manual_claimed:
+            await orchestrator.end_manual_action(run_id)
+    confirmed_ids = sorted(
+        item["control_id"]
+        for item in summary.get("controls", [])
+        if item.get("result") == "confirmed" and evidence.id in (item.get("evidence_ids") or [])
+    )
+    return {
+        "evidence_id": evidence.id,
+        "sha256": evidence.sha256,
+        "synthetic": outcome.synthetic,
+        "targets": [item.display for item in targets],
+        "servers": outcome.servers,
+        "control_results": outcome.control_results,
+        "confirmed_controls": confirmed_ids,
+    }
+
+
+@router.get("/frida/runtime")
+def frida_runtime_status():
+    """Report the Python Frida binding and the Frida 17 bridge bundle readiness."""
+    from backend.app.frida.runtime_compat import bridge_status, parse_version
+
+    try:
+        frida_module = importlib.import_module("frida")
+        version = str(getattr(frida_module, "__version__", "") or "") or None
+    except ImportError:
+        version = None
+    parsed = parse_version(version) if version else None
+    bridges = bridge_status()
+    needs_bridges = bool(parsed and parsed[0] >= 17)
+    if version is None:
+        status = CapabilityStatus.NOT_CONFIGURED.value
+        message = "Python frida 바인딩이 설치되지 않았습니다."
+    elif needs_bridges and not bridges["ready"]:
+        status = CapabilityStatus.NOT_CONFIGURED.value
+        message = "Frida 17 이상입니다. Java·ObjC 브리지 설치가 필요합니다 (install_oss_tools.ps1 -FridaRuntime)."
+    else:
+        status = CapabilityStatus.AVAILABLE.value
+        message = (
+            "Frida 17 브리지 번들과 호환 계층을 사용합니다."
+            if needs_bridges
+            else "Frida 16 이하 런타임에 호환 계층만 적용합니다."
+        )
+    return {
+        "status": status,
+        "message": message,
+        "python_binding_version": version,
+        "bridge_bundle_required": needs_bridges,
+        "bridges": bridges,
+    }
+
+
+# ---------------------------------------------------------------------------
+# iOS IPA re-signing (zsign, no macOS)
+# ---------------------------------------------------------------------------
+
+
+class IpaResignRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requested_by: str = Field(min_length=1, max_length=100)
+    confirm_original_sha256: str = Field(min_length=64, max_length=64)
+
+
+@router.get("/ios/signing")
+async def ios_signing_status(request: Request):
+    return await ZsignAdapter(_settings(request)).health()
+
+
+@router.post("/apps/{app_id}/ios/resign")
+async def resign_ios_app(
+    request: Request,
+    app_id: str,
+    payload: IpaResignRequest,
+    db: Session = Depends(get_db),
+):
+    app = _app_or_404(db, app_id)
+    project = _project_or_404(db, app.project_id)
+    try:
+        platform = normalize_platform(app.platform)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if platform != "ios":
+        raise HTTPException(422, "IPA 재서명은 iOS 앱에서만 실행할 수 있습니다.")
+    if payload.confirm_original_sha256.lower() != app.sha256.lower():
+        raise HTTPException(409, "화면에서 확인한 원본 SHA-256이 현재 업로드와 다릅니다.")
+    leases = request.app.state.analysis_leases
+    # Share the app-scoped analysis lease so a concurrent re-analysis cannot
+    # overwrite analysis_result between our read and write.
+    if not await leases.try_acquire(app.id):
+        raise HTTPException(409, "같은 앱의 분석 또는 재서명이 진행 중입니다.")
+    try:
+        source = Path(app.stored_path)
+        synthetic = bool(app.synthetic or project.run_mode == RunMode.MOCK.value)
+        db.commit()
+        outcome = await ZsignAdapter(_settings(request)).resign(
+            source,
+            output_dir=source.parent / "resigned",
+            synthetic=synthetic,
+        )
+        if outcome.status == CapabilityStatus.NOT_CONFIGURED:
+            raise HTTPException(409, outcome.message)
+        if outcome.status != CapabilityStatus.AVAILABLE or outcome.output_path is None:
+            raise HTTPException(502, outcome.message)
+        db.expire_all()
+        app = _app_or_404(db, app_id)
+        record = resigned_record(
+            outcome, source_sha256=app.sha256, requested_by=payload.requested_by
+        )
+        analysis = dict(app.analysis_result or {})
+        previous = analysis.get("ios_resigned")
+        history = list(analysis.get("ios_resigned_history") or [])
+        if isinstance(previous, dict):
+            history.append(previous)
+        analysis["ios_resigned_history"] = history[-10:]
+        analysis["ios_resigned"] = record
+        app.analysis_result = analysis
+        db.add(
+            ToolRun(
+                app_id=app.id,
+                run_id=None,
+                tool_name="zsign",
+                tool_version=outcome.zsign_version,
+                status=outcome.status.value,
+                command=outcome.command,
+                raw_output_path=None,
+                raw_sha256=outcome.sha256,
+                error=None,
+                metadata_json={
+                    "purpose": "ios_resign",
+                    "source_sha256": app.sha256,
+                    "requested_by": payload.requested_by,
+                    "size_bytes": outcome.size_bytes,
+                },
+                synthetic=outcome.synthetic,
+                finished_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+    finally:
+        await leases.release(app_id)
+    return record

@@ -7,7 +7,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.catalog import controls_for_profile, execution_plan
+import hashlib
+import json
+
+from backend.app.assessment_scope import load_project_scope, project_definitions_for_platform
+from backend.app.catalog import execution_plan
 from backend.app.database.models import AppArtifact, ControlTest, Project, RawFinding
 
 
@@ -21,6 +25,7 @@ _RAW_CATEGORY_ALIASES: dict[str, set[str]] = {
     "webview": {"xss", "navigation"},
     "certificate_pinning": {"certificate_validation"},
     "root_detection": {"root_detection"},
+    "transport_security": {"network_sensitive_exposure"},
 }
 
 _SIGNAL_CATEGORY_ALIASES: dict[str, set[str]] = {
@@ -170,7 +175,11 @@ def refresh_app_assessment_plan(
     artifact: AppArtifact,
 ) -> dict[str, Any]:
     profile = project.assessment_profile
-    definitions = controls_for_profile(profile)
+    scope = load_project_scope(db, project)
+    definitions = project_definitions_for_platform(
+        db, project, artifact.platform, scope=scope
+    )
+    excluded_ids = set(scope.exclusions)
     baseline_rows = db.scalars(
         select(ControlTest).where(
             ControlTest.app_id == artifact.id,
@@ -200,7 +209,8 @@ def refresh_app_assessment_plan(
         ]
         ai_mapped = definition.control_id in ai_control_ids
         candidate_count = len(matches) + int(ai_mapped)
-        queue_status = _queue_status(
+        excluded = definition.control_id in excluded_ids
+        queue_status = "excluded" if excluded else _queue_status(
             lane=execution["lane"],
             analysis_completed=analysis_completed,
             candidate_count=candidate_count,
@@ -246,17 +256,27 @@ def refresh_app_assessment_plan(
                 "next_action": execution["next_action"],
                 "test_account_required": execution["test_account_required"],
                 "state_changing": execution["state_changing"],
+                "custom": definition.control_id.startswith("CUS-MA-"),
+                "excluded": excluded,
+                "exclusion_reason": scope.exclusions[definition.control_id].reason
+                if excluded
+                else None,
             }
         )
 
     lane_counts = Counter(item["lane"] for item in controls)
     queue_counts = Counter(item["queue_status"] for item in controls)
-    ready_rows = [item for item in controls if item["lane"] == "ready_now"]
+    ready_rows = [
+        item
+        for item in controls
+        if item["lane"] == "ready_now" and not item["excluded"]
+    ]
     plan = {
         "version": ASSESSMENT_PLAN_VERSION,
         "app_id": artifact.id,
         "artifact_sha256": artifact.sha256,
         "assessment_profile": profile,
+        "scope_sha256": scope_fingerprint(definitions, excluded_ids),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "generated_by": "local_deterministic_policy",
         "decision_policy": "no_runtime_evidence_no_confirmation",
@@ -275,7 +295,29 @@ def refresh_app_assessment_plan(
     return plan
 
 
-def stored_plan_is_current(artifact: AppArtifact, profile: str) -> bool:
+def scope_fingerprint(definitions: Any, excluded_ids: set[str]) -> str:
+    payload = {
+        "controls": sorted(item.control_id for item in definitions),
+        "excluded": sorted(excluded_ids),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def current_scope_fingerprint(
+    db: Session, project: Project, artifact: AppArtifact
+) -> str:
+    scope = load_project_scope(db, project)
+    definitions = project_definitions_for_platform(
+        db, project, artifact.platform, scope=scope
+    )
+    return scope_fingerprint(definitions, set(scope.exclusions))
+
+
+def stored_plan_is_current(
+    artifact: AppArtifact, profile: str, scope_sha256: str | None = None
+) -> bool:
     analysis = artifact.analysis_result if isinstance(artifact.analysis_result, dict) else {}
     plan = analysis.get("assessment_plan")
     return bool(
@@ -284,4 +326,5 @@ def stored_plan_is_current(artifact: AppArtifact, profile: str) -> bool:
         and plan.get("app_id") == artifact.id
         and plan.get("artifact_sha256") == artifact.sha256
         and plan.get("assessment_profile") == profile
+        and (scope_sha256 is None or plan.get("scope_sha256") == scope_sha256)
     )

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.app.core.command import run_command
+from backend.app.frida.runtime_compat import prepare_cli_source
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus
 
@@ -116,7 +117,9 @@ class FridaManager:
             )
         with tempfile.TemporaryDirectory(prefix="msw-frida-run-") as temp:
             path = Path(temp) / "script.js"
-            path.write_text(script_content, encoding="utf-8")
+            # frida-tools 14+ already bundles the bridges into the CLI agent; the
+            # shim only restores the static Module helpers removed in Frida 17.
+            path.write_text(prepare_cli_source(script_content, None), encoding="utf-8")
             args = [frida, "-D", device_id]
             if mode == "attach":
                 args.extend(["-n", target])

@@ -6,9 +6,11 @@ from typing import Any
 
 CATALOG_SOURCE = {
     "name": "OWASP Mobile Application Security Testing Guide",
-    "repository": "https://github.com/OWASP/owasp-mastg",
+    "repository": "https://github.com/OWASP/mastg",
+    "site": "https://mas.owasp.org/MASTG/",
+    "upstream_release": "v2.0.0 (2026-06)",
     "license": "CC-BY-SA-4.0",
-    "metadata_reviewed_at": "2026-07-30",
+    "metadata_reviewed_at": "2026-10-13",
     "note": "제목과 식별자를 참조하며 진단 절차·판정문은 Workbench에서 자체 작성합니다.",
 }
 
@@ -27,8 +29,8 @@ class ControlDefinition:
     def source_url(self) -> str:
         group = self.masvs_id.split("-")[1]
         return (
-            "https://github.com/OWASP/owasp-mastg/blob/master/tests/"
-            f"{self.platform}/MASVS-{group}/{self.mastg_id}.md"
+            "https://mas.owasp.org/MASTG/tests/"
+            f"{self.platform}/MASVS-{group}/{self.mastg_id}/"
         )
 
     def to_dict(self) -> dict[str, Any]:

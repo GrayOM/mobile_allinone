@@ -1,0 +1,495 @@
+{
+ "invalid_server_strings": [],
+ "server_scan_results": [
+  {
+   "uuid": "3a880dbf-86ea-412e-aa8b-5155f203160e",
+   "server_location": {
+    "hostname": "127.0.0.1",
+    "port": 18443,
+    "connection_type": "DIRECT",
+    "ip_address": "127.0.0.1",
+    "http_proxy_settings": null
+   },
+   "connectivity_status": "COMPLETED",
+   "connectivity_error_trace": null,
+   "scan_status": "COMPLETED",
+   "scan_result": {
+    "ssl_2_0_cipher_suites": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "tls_version_used": "SSL_2_0",
+      "is_tls_version_supported": false,
+      "accepted_cipher_suites": [],
+      "rejected_cipher_suites": []
+     }
+    },
+    "ssl_3_0_cipher_suites": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "tls_version_used": "SSL_3_0",
+      "is_tls_version_supported": false,
+      "accepted_cipher_suites": [],
+      "rejected_cipher_suites": []
+     }
+    },
+    "tls_1_0_cipher_suites": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "tls_version_used": "TLS_1_0",
+      "is_tls_version_supported": false,
+      "accepted_cipher_suites": [],
+      "rejected_cipher_suites": []
+     }
+    },
+    "tls_1_1_cipher_suites": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "tls_version_used": "TLS_1_1",
+      "is_tls_version_supported": false,
+      "accepted_cipher_suites": [],
+      "rejected_cipher_suites": []
+     }
+    },
+    "tls_1_2_cipher_suites": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "tls_version_used": "TLS_1_2",
+      "is_tls_version_supported": true,
+      "accepted_cipher_suites": [
+       {
+        "cipher_suite": {
+         "name": "TLS_RSA_WITH_AES_256_GCM_SHA384",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "AES256-GCM-SHA384"
+        },
+        "ephemeral_key": null
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_RSA_WITH_AES_256_CBC_SHA256",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "AES256-SHA256"
+        },
+        "ephemeral_key": null
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_RSA_WITH_AES_256_CBC_SHA",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "AES256-SHA"
+        },
+        "ephemeral_key": null
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_RSA_WITH_AES_128_GCM_SHA256",
+         "is_anonymous": false,
+         "key_size": 128,
+         "openssl_name": "AES128-GCM-SHA256"
+        },
+        "ephemeral_key": null
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_RSA_WITH_AES_128_CBC_SHA256",
+         "is_anonymous": false,
+         "key_size": 128,
+         "openssl_name": "AES128-SHA256"
+        },
+        "ephemeral_key": null
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_RSA_WITH_AES_128_CBC_SHA",
+         "is_anonymous": false,
+         "key_size": 128,
+         "openssl_name": "AES128-SHA"
+        },
+        "ephemeral_key": null
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "ECDHE-RSA-CHACHA20-POLY1305"
+        },
+        "ephemeral_key": {
+         "type_name": "ECDH",
+         "size": 253,
+         "public_bytes": "E6okQ0217Cfexl0WJfLweMszPx3MPXMQ1XBZ/F+cFHs=",
+         "curve_name": "X25519",
+         "x": null,
+         "y": null,
+         "prime": null,
+         "generator": null
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "ECDHE-RSA-AES256-GCM-SHA384"
+        },
+        "ephemeral_key": {
+         "type_name": "ECDH",
+         "size": 256,
+         "public_bytes": "BGxFltaeaBq0R6VQT2shmlaAeL3f5e67aEu2LSFL/STTJP+zt/WDlscG2mIu0lKwagRg4t6Q4uHKseNu3HSNYVw=",
+         "curve_name": "secp256r1",
+         "x": "bEWW1p5oGrRHpVBPayGaVoB4vd/l7rtoS7YtIUv9JNM=",
+         "y": "JP+zt/WDlscG2mIu0lKwagRg4t6Q4uHKseNu3HSNYVw=",
+         "prime": null,
+         "generator": null
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "ECDHE-RSA-AES256-SHA384"
+        },
+        "ephemeral_key": {
+         "type_name": "ECDH",
+         "size": 256,
+         "public_bytes": "BDmejI29xBO3oE/B5ieG27YAcYuPpEdnj3jFs/IEP3z3AgNM/CeaT2+R1nPLgupEfb65P1CI4agupAyNhRhdVBQ=",
+         "curve_name": "secp256r1",
+         "x": "OZ6Mjb3EE7egT8HmJ4bbtgBxi4+kR2ePeMWz8gQ/fPc=",
+         "y": "AgNM/CeaT2+R1nPLgupEfb65P1CI4agupAyNhRhdVBQ=",
+         "prime": null,
+         "generator": null
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "ECDHE-RSA-AES256-SHA"
+        },
+        "ephemeral_key": {
+         "type_name": "ECDH",
+         "size": 256,
+         "public_bytes": "BLiu3YwGOijx4MLF44w1MxkPhbxmhmSnqS6JV0nSrbOSIOHSDSCgwFTyZOg7y6y+IM31t6Ej5IfDPJaOcsugUkQ=",
+         "curve_name": "secp256r1",
+         "x": "uK7djAY6KPHgwsXjjDUzGQ+FvGaGZKepLolXSdKts5I=",
+         "y": "IOHSDSCgwFTyZOg7y6y+IM31t6Ej5IfDPJaOcsugUkQ=",
+         "prime": null,
+         "generator": null
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+         "is_anonymous": false,
+         "key_size": 128,
+         "openssl_name": "ECDHE-RSA-AES128-GCM-SHA256"
+        },
+        "ephemeral_key": {
+         "type_name": "ECDH",
+         "size": 256,
+         "public_bytes": "BGfPHV4RFPhoHwkXdHwkmUzcLSWKlm2EL4Dh4pacMjgUXkbmtKtAC0VUpYTuuIqHb6sNbTRI+OFxahkjwLK+zMw=",
+         "curve_name": "secp256r1",
+         "x": "Z88dXhEU+GgfCRd0fCSZTNwtJYqWbYQvgOHilpwyOBQ=",
+         "y": "XkbmtKtAC0VUpYTuuIqHb6sNbTRI+OFxahkjwLK+zMw=",
+         "prime": null,
+         "generator": null
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
+         "is_anonymous": false,
+         "key_size": 128,
+         "openssl_name": "ECDHE-RSA-AES128-SHA256"
+        },
+        "ephemeral_key": {
+         "type_name": "ECDH",
+         "size": 256,
+         "public_bytes": "BEWtgYoQn2fbewUFllBZrfQ5KbMKbjChb9LLDcvt7kBI61vYVd7Z1j2OZoTiBJKPSrXS+mYMM/9IaxvQ8Y5i+Mo=",
+         "curve_name": "secp256r1",
+         "x": "Ra2BihCfZ9t7BQWWUFmt9DkpswpuMKFv0ssNy+3uQEg=",
+         "y": "61vYVd7Z1j2OZoTiBJKPSrXS+mYMM/9IaxvQ8Y5i+Mo=",
+         "prime": null,
+         "generator": null
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+         "is_anonymous": false,
+         "key_size": 128,
+         "openssl_name": "ECDHE-RSA-AES128-SHA"
+        },
+        "ephemeral_key": {
+         "type_name": "ECDH",
+         "size": 256,
+         "public_bytes": "BKUjF2u9PFSXsUwb+SjtGMHWzrJ88rEn9RSP1OiYjuv+9J5Ak5iO1oEP22GKZDGllha/My0EIx9J01OTK/0PV/s=",
+         "curve_name": "secp256r1",
+         "x": "pSMXa708VJexTBv5KO0YwdbOsnzysSf1FI/U6JiO6/4=",
+         "y": "9J5Ak5iO1oEP22GKZDGllha/My0EIx9J01OTK/0PV/s=",
+         "prime": null,
+         "generator": null
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "DHE-RSA-CHACHA20-POLY1305"
+        },
+        "ephemeral_key": {
+         "type_name": "DH",
+         "size": 2048,
+         "public_bytes": "f5bOvsPs8VsZBxa9K8r5hb1ifhVicS/qT4bupgSnfBVVSzJ+7kFfMO6BuulbHRrYRMGKDkk9KKHoPzMMvCBwXuTZGILfYVQsOYsMmJrK/w+o/eea0QEIHv5IQXH7PAnLY01iBp98fIhH9Uj80s/3EZjP6qHHoirBvQpI+bzG8xeX/96BS+ScweWBp6l1WNSV6/ymUUx6W9MCljs6GbpvcSot1U4kDheMa95BDsw1DhPALxjkbzF0SCYEKdNggGPTPTvcxOux/GYe/1gyD6kl6wPRdKXYkZE0oEDMYYwatdk9AVr0bfevAJ88bzc0PMU7+QozX99LZ/3lAmW+iRVBTw==",
+         "curve_name": null,
+         "x": null,
+         "y": null,
+         "prime": "///////////JD9qiIWjCNMTGYouA3BzRKQJOCIpnzHQCC76mOxObIlFKCHmONATd75UZs806QxswKwpt8l8UN0/hNW1tUcJF5IW1dmJefsb0TELppjftawv/XLb0Brft7jhr+1qJn6WunyQRfEsf5kkoZlHs5Fs9wgB8uKFjvwWY2kg2HFXTmmkWP6j9JM9fg2VdI9yjrZYcYvNWIIVSu57VKQdwlpZtZww1Tkq8mATxdGwIyhghfDKQXkYuNs474553LBgOhgObJ4Oi7Aeij7XFXfBvTFLJ3ivL9pVYFxg5lUl86pVq5RXSJhiY+gUQFXKOWoqsqmj//////////w==",
+         "generator": "Ag=="
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "DHE-RSA-AES256-GCM-SHA384"
+        },
+        "ephemeral_key": {
+         "type_name": "DH",
+         "size": 2048,
+         "public_bytes": "xhhi/IsrhMFRk/gbE1GHGxuIMtUD+Z8demY1ZtZyaN2TDG0Zs6CEDru0WSkju+HPYt0pg3TEOdna4ANMqWmKMuJDLTglQN1eZ3qAI91TKrSdC4v735hyRcF74CWy9aPLzqj/B+cDPgAudWtLZ1sgyU2PdMY6bPF3SwyGYANIVFnW7G9GT7XCkzJFEu14JXCMMpo+dQhmlwzDY8dmYShsMuv6ydefr1B1YCE6n3cGxazAyyL2YpXJHbI7+nXyqQwnjyame53X4rVRM+xsO77hBGzbiRpR2iZcaAMgY8CfECihErmkJyg66d/FQKKvgoOPwRuEV8KtzWW417vKl8G+cw==",
+         "curve_name": null,
+         "x": null,
+         "y": null,
+         "prime": "///////////JD9qiIWjCNMTGYouA3BzRKQJOCIpnzHQCC76mOxObIlFKCHmONATd75UZs806QxswKwpt8l8UN0/hNW1tUcJF5IW1dmJefsb0TELppjftawv/XLb0Brft7jhr+1qJn6WunyQRfEsf5kkoZlHs5Fs9wgB8uKFjvwWY2kg2HFXTmmkWP6j9JM9fg2VdI9yjrZYcYvNWIIVSu57VKQdwlpZtZww1Tkq8mATxdGwIyhghfDKQXkYuNs474553LBgOhgObJ4Oi7Aeij7XFXfBvTFLJ3ivL9pVYFxg5lUl86pVq5RXSJhiY+gUQFXKOWoqsqmj//////////w==",
+         "generator": "Ag=="
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_DHE_RSA_WITH_AES_256_CBC_SHA256",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "DHE-RSA-AES256-SHA256"
+        },
+        "ephemeral_key": {
+         "type_name": "DH",
+         "size": 2048,
+         "public_bytes": "r7ekMc59f0jrjB8TttDfJ2fkr3RNIyTLzbRkKr554o5WvaiWlWQYFsHDjOjZyOe6wYOL0ZaR3kkDW1cA1tbbY/SzgHuTNsJ5yTvCJRTkdo5Dt9gduu/gP7LVylmwt/UqoRbB1IbyKaYgUsRKtigjF7gVtyOvr+VntYm44bVlCvkafQmCqm9Y7jkOOdJ+CiQgf1U8WqJNsTR5BK5pkdcF1iMPQpyUnIPkhjNwy13tS3Bd/tbPutf/LcduHFQpvc9oobNjNxyUoJK+a76RWD5togoBw9SGsoazDDrppJFrsE0eTaewy/4reL3Mmlm86qwiar8wCCnw4Sr41sOiK2GX9Q==",
+         "curve_name": null,
+         "x": null,
+         "y": null,
+         "prime": "///////////JD9qiIWjCNMTGYouA3BzRKQJOCIpnzHQCC76mOxObIlFKCHmONATd75UZs806QxswKwpt8l8UN0/hNW1tUcJF5IW1dmJefsb0TELppjftawv/XLb0Brft7jhr+1qJn6WunyQRfEsf5kkoZlHs5Fs9wgB8uKFjvwWY2kg2HFXTmmkWP6j9JM9fg2VdI9yjrZYcYvNWIIVSu57VKQdwlpZtZww1Tkq8mATxdGwIyhghfDKQXkYuNs474553LBgOhgObJ4Oi7Aeij7XFXfBvTFLJ3ivL9pVYFxg5lUl86pVq5RXSJhiY+gUQFXKOWoqsqmj//////////w==",
+         "generator": "Ag=="
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_DHE_RSA_WITH_AES_256_CBC_SHA",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "DHE-RSA-AES256-SHA"
+        },
+        "ephemeral_key": {
+         "type_name": "DH",
+         "size": 2048,
+         "public_bytes": "ajut8fd5j2ywnbWW9KMQLPP3GDlrivvDAM6INu/aSlbiIPfONwKZ3vjaBqTM1bEzYEMPz6Wz+8hrU1/7EfQHGr9HikDg56UutXn7a2YLAubp/kx6QpehuOM6pkm4sPDT3bRaL69+TzrhJhjsB6EFEZ/B7GlDzK/a+QFKguESba/q+t98YZkPmliIY9PlxR03OVfgHLEusJOCCNV1xKzi16isoUiD203je9KRZ5Bs5yJQ9h9K+/ISfXSer95GLLAqk66n0PDgNN3/5WMb7cGx0ZzNMWuJb+1KdOmbGg4r+OVs2gzNxrK8vd4xowPR/CeAWnI6Nw2GqT/xrPGoGyHxWQ==",
+         "curve_name": null,
+         "x": null,
+         "y": null,
+         "prime": "///////////JD9qiIWjCNMTGYouA3BzRKQJOCIpnzHQCC76mOxObIlFKCHmONATd75UZs806QxswKwpt8l8UN0/hNW1tUcJF5IW1dmJefsb0TELppjftawv/XLb0Brft7jhr+1qJn6WunyQRfEsf5kkoZlHs5Fs9wgB8uKFjvwWY2kg2HFXTmmkWP6j9JM9fg2VdI9yjrZYcYvNWIIVSu57VKQdwlpZtZww1Tkq8mATxdGwIyhghfDKQXkYuNs474553LBgOhgObJ4Oi7Aeij7XFXfBvTFLJ3ivL9pVYFxg5lUl86pVq5RXSJhiY+gUQFXKOWoqsqmj//////////w==",
+         "generator": "Ag=="
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
+         "is_anonymous": false,
+         "key_size": 128,
+         "openssl_name": "DHE-RSA-AES128-GCM-SHA256"
+        },
+        "ephemeral_key": {
+         "type_name": "DH",
+         "size": 2048,
+         "public_bytes": "udrcj+u0q3GZseBENLyIfvpyxTcLdYbbI0RN7WbwTYcipTT8THzYDGHdj9zSlMwWXomGPRxA1wkCtwc2RfR41vAawnPYtZkpM++cvnffH5Qw6Un7qLB6lwv0GkOEY4SGFWDUBnBlFhKccW129J6i98wdSSIkXonxrGQEy/gnMAFC6lDCtFMTHZ2iAgXjyiRa3rgCEtZBtF8bLATTrZmwZqrzmZ+lTGrgxNKe/x6XaR2LThPDPcW8Bv6TlMtd1YEzENoBpN/ccLd7hWxWRtRJIeHKlefrwMuy5bw7ZKt7ZfBvxPELKe8qPOj2dQb0o4mfWi3srqv/yj5HAmsUKSQWGA==",
+         "curve_name": null,
+         "x": null,
+         "y": null,
+         "prime": "///////////JD9qiIWjCNMTGYouA3BzRKQJOCIpnzHQCC76mOxObIlFKCHmONATd75UZs806QxswKwpt8l8UN0/hNW1tUcJF5IW1dmJefsb0TELppjftawv/XLb0Brft7jhr+1qJn6WunyQRfEsf5kkoZlHs5Fs9wgB8uKFjvwWY2kg2HFXTmmkWP6j9JM9fg2VdI9yjrZYcYvNWIIVSu57VKQdwlpZtZww1Tkq8mATxdGwIyhghfDKQXkYuNs474553LBgOhgObJ4Oi7Aeij7XFXfBvTFLJ3ivL9pVYFxg5lUl86pVq5RXSJhiY+gUQFXKOWoqsqmj//////////w==",
+         "generator": "Ag=="
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256",
+         "is_anonymous": false,
+         "key_size": 128,
+         "openssl_name": "DHE-RSA-AES128-SHA256"
+        },
+        "ephemeral_key": {
+         "type_name": "DH",
+         "size": 2048,
+         "public_bytes": "326Nqls08RhO/G6gMrrSMnKoPoZiyYJ9ghlpJf4XufOCiAdjMw8Xr0wftittk3hLCQx5L5P+IdHtpiDpKIk1bQBxEsE735uE5dZmlrG2wTo8PDroryv+D9LGQVq2/Rp8sm/ut0+tO9dXPn0QWX89FLxzUfhpx/cTkIxTCxSo8AsFJ2tevLZdGfPMmPmIQHgEfqlSvbXFPra7TahZnjy/2OOoRSujrAVKTaVe99p/hDoa1ngX0o0kfjkBX8wxQRntqh7m4Wj2UjwAV695zvrzXb0jk5N9nZJKgGeddHxl4TfqdQK8VY0GClXRpXqmhV6c6lhpy/YOQGOoCSw8/HrHqQ==",
+         "curve_name": null,
+         "x": null,
+         "y": null,
+         "prime": "///////////JD9qiIWjCNMTGYouA3BzRKQJOCIpnzHQCC76mOxObIlFKCHmONATd75UZs806QxswKwpt8l8UN0/hNW1tUcJF5IW1dmJefsb0TELppjftawv/XLb0Brft7jhr+1qJn6WunyQRfEsf5kkoZlHs5Fs9wgB8uKFjvwWY2kg2HFXTmmkWP6j9JM9fg2VdI9yjrZYcYvNWIIVSu57VKQdwlpZtZww1Tkq8mATxdGwIyhghfDKQXkYuNs474553LBgOhgObJ4Oi7Aeij7XFXfBvTFLJ3ivL9pVYFxg5lUl86pVq5RXSJhiY+gUQFXKOWoqsqmj//////////w==",
+         "generator": "Ag=="
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
+         "is_anonymous": false,
+         "key_size": 128,
+         "openssl_name": "DHE-RSA-AES128-SHA"
+        },
+        "ephemeral_key": {
+         "type_name": "DH",
+         "size": 2048,
+         "public_bytes": "BI1DB4vFA07/RE0O6dLyq90YSW5xCkmb7mZnHKpiHK3qxXdgH5sA+TbGWNhqmT4L02PJgRW7mtLYMsNaDTcDHwmfR4JmMXYVdMxJQBYdh1i3m83KlPzyM7ZBLsZFErRMWtC8KmRZyus09ZXFe4xTMMrmDNHl4lSrURgBQcu9JXdgphhj+qLTWmh7tauMSUaVLWVfgAIpluK7ZCLQRHt8Kcwd2wu0NuZJT5TrvuNjL7tVGBe2lNoJJnVU3PebmlkLEi1ZUOwSt5SeCHimHIJBkZ+3KVipd4qqz/II3dcuEs1IbfY26zE1X9uxmHr2mjmmeK3mXfEocnMW7QolDJ1eVQ==",
+         "curve_name": null,
+         "x": null,
+         "y": null,
+         "prime": "///////////JD9qiIWjCNMTGYouA3BzRKQJOCIpnzHQCC76mOxObIlFKCHmONATd75UZs806QxswKwpt8l8UN0/hNW1tUcJF5IW1dmJefsb0TELppjftawv/XLb0Brft7jhr+1qJn6WunyQRfEsf5kkoZlHs5Fs9wgB8uKFjvwWY2kg2HFXTmmkWP6j9JM9fg2VdI9yjrZYcYvNWIIVSu57VKQdwlpZtZww1Tkq8mATxdGwIyhghfDKQXkYuNs474553LBgOhgObJ4Oi7Aeij7XFXfBvTFLJ3ivL9pVYFxg5lUl86pVq5RXSJhiY+gUQFXKOWoqsqmj//////////w==",
+         "generator": "Ag=="
+        }
+       }
+      ],
+      "rejected_cipher_suites": []
+     }
+    },
+    "tls_1_3_cipher_suites": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "tls_version_used": "TLS_1_3",
+      "is_tls_version_supported": true,
+      "accepted_cipher_suites": [
+       {
+        "cipher_suite": {
+         "name": "TLS_CHACHA20_POLY1305_SHA256",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "TLS_CHACHA20_POLY1305_SHA256"
+        },
+        "ephemeral_key": {
+         "type_name": "ECDH",
+         "size": 253,
+         "public_bytes": "pD9oLOLC9JCuXzVkg+uSWfJAKJ+0SKp2Ja3MCawKoQ8=",
+         "curve_name": "X25519",
+         "x": null,
+         "y": null,
+         "prime": null,
+         "generator": null
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_AES_256_GCM_SHA384",
+         "is_anonymous": false,
+         "key_size": 256,
+         "openssl_name": "TLS_AES_256_GCM_SHA384"
+        },
+        "ephemeral_key": {
+         "type_name": "ECDH",
+         "size": 253,
+         "public_bytes": "w6S0CgMSd1O0EXTNQcSyr20XVLOqYR6+prBh9UGTfyE=",
+         "curve_name": "X25519",
+         "x": null,
+         "y": null,
+         "prime": null,
+         "generator": null
+        }
+       },
+       {
+        "cipher_suite": {
+         "name": "TLS_AES_128_GCM_SHA256",
+         "is_anonymous": false,
+         "key_size": 128,
+         "openssl_name": "TLS_AES_128_GCM_SHA256"
+        },
+        "ephemeral_key": {
+         "type_name": "ECDH",
+         "size": 253,
+         "public_bytes": "wMVLRCLvQwrCgw0edFhlALH6+wxm+VSNeqKoXjmlSxo=",
+         "curve_name": "X25519",
+         "x": null,
+         "y": null,
+         "prime": null,
+         "generator": null
+        }
+       }
+      ],
+      "rejected_cipher_suites": []
+     }
+    },
+    "tls_compression": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "supports_compression": false
+     }
+    },
+    "openssl_ccs_injection": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "is_vulnerable_to_ccs_injection": false
+     }
+    },
+    "heartbleed": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "is_vulnerable_to_heartbleed": false
+     }
+    },
+    "robot": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "robot_result": "NOT_VULNERABLE_NO_ORACLE"
+     }
+    },
+    "session_renegotiation": {
+     "status": "COMPLETED",
+     "error_reason": null,
+     "error_trace": null,
+     "result": {
+      "supports_secure_renegotiation": true,
+      "is_vulnerable_to_client_renegotiation_dos": false,
+      "client_renegotiations_success_count": 0
+     }
+    }
+   }
+  }
+ ],
+ "date_scans_started": "2026-10-13T05:36:22.328423Z",
+ "date_scans_completed": "2026-10-13T05:36:24.393701Z",
+ "sslyze_version": "6.3.1",
+ "sslyze_url": "https://github.com/nabla-c0d3/sslyze",
+ "note": "sslyze 6.3.1 against a local openssl s_server on 127.0.0.1; trimmed to the plugins the workbench parses"
+}

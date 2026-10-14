@@ -1,0 +1,10 @@
+{
+  "name": "msw-frida-runtime",
+  "private": true,
+  "description": "Frida 17+ runtime bridges bundled by the workbench loader. Installed by install_oss_tools.ps1 -FridaRuntime or scripts/install_frida_runtime.sh.",
+  "type": "module",
+  "dependencies": {
+    "frida-java-bridge": "7.0.13",
+    "frida-objc-bridge": "8.0.6"
+  }
+}

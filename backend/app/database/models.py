@@ -496,3 +496,36 @@ class ControlTest(Base, TimestampMixin):
     risk: Mapped[str] = mapped_column(String(20), default="low", nullable=False)
 
     app: Mapped["AppArtifact"] = relationship(back_populates="control_tests")
+
+
+class ProjectAssessmentControl(Base, TimestampMixin):
+    """Project-scoped additions to the fixed domestic profile.
+
+    ``kind="custom"`` adds an exception inspection method (``CUS-MA-*``) that
+    is not part of the selected advisory. ``kind="exclusion"`` records that a
+    catalog item is out of the project's agreed scope. Both are recorded with
+    reviewer and reason; neither edits past Run ledgers.
+    """
+
+    __tablename__ = "project_assessment_controls"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    profile: Mapped[str] = mapped_column(String(40), nullable=False)
+    control_id: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    platform_scope: Mapped[str] = mapped_column(String(16), default="any", nullable=False)
+    group: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    title: Mapped[str] = mapped_column(String(300), default="", nullable=False)
+    criteria: Mapped[list[str]] = mapped_column(JSON, default=list)
+    automation: Mapped[str] = mapped_column(String(30), default="manual", nullable=False)
+    evaluator: Mapped[str] = mapped_column(String(40), default="manual", nullable=False)
+    risk: Mapped[str] = mapped_column(String(20), default="medium", nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), default="medium", nullable=False)
+    finding_categories: Mapped[list[str]] = mapped_column(JSON, default=list)
+    procedure: Mapped[list[str]] = mapped_column(JSON, default=list)
+    reference: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    recorded_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    definition_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)

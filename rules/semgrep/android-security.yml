@@ -7,7 +7,7 @@ rules:
       - pattern: $WEBVIEW.addJavascriptInterface($OBJECT, $NAME)
     metadata:
       category: webview
-      confidence_score: 0.86
+      confidence_score: "0.86"
       masvs: MASVS-PLATFORM
       mastg: MASTG-TEST-0031
       cwe: CWE-749
@@ -21,7 +21,7 @@ rules:
       - pattern: $SETTINGS.setAllowUniversalAccessFromFileURLs(true)
     metadata:
       category: webview
-      confidence_score: 0.92
+      confidence_score: "0.92"
       masvs: MASVS-PLATFORM
       mastg: MASTG-TEST-0252
       cwe: CWE-749
@@ -42,7 +42,7 @@ rules:
           }
     metadata:
       category: certificate_pinning
-      confidence_score: 0.95
+      confidence_score: "0.95"
       masvs: MASVS-NETWORK
       mastg: MASTG-TEST-0021
       cwe: CWE-297
@@ -60,7 +60,7 @@ rules:
           }
     metadata:
       category: certificate_pinning
-      confidence_score: 0.96
+      confidence_score: "0.96"
       masvs: MASVS-NETWORK
       mastg: MASTG-TEST-0021
       cwe: CWE-295
@@ -76,7 +76,7 @@ rules:
           regex: '(?i)^".*/ECB(/.*)?".*$'
     metadata:
       category: weak_cryptography
-      confidence_score: 0.9
+      confidence_score: "0.9"
       masvs: MASVS-CRYPTO
       mastg: MASTG-TEST-0013
       cwe: CWE-327
@@ -90,7 +90,7 @@ rules:
       - pattern: $CONTEXT.getSharedPreferences($NAME, Context.MODE_WORLD_WRITEABLE)
     metadata:
       category: insecure_storage
-      confidence_score: 0.94
+      confidence_score: "0.94"
       masvs: MASVS-STORAGE
       mastg: MASTG-TEST-0001
       cwe: CWE-922
@@ -108,7 +108,142 @@ rules:
           regex: '(?i).*(token|authorization|bearer|session|password).*'
     metadata:
       category: sensitive_logging
-      confidence_score: 0.68
+      confidence_score: "0.68"
       masvs: MASVS-STORAGE
       mastg: MASTG-TEST-0003
       cwe: CWE-532
+
+  - id: msw.android.webview.ssl-error-proceed
+    message: WebViewClient continues loading after a TLS certificate error.
+    severity: ERROR
+    languages: [java]
+    patterns:
+      - pattern: |
+          public void onReceivedSslError(WebView $VIEW, SslErrorHandler $HANDLER, SslError $ERROR) {
+            ...
+            $HANDLER.proceed();
+            ...
+          }
+    metadata:
+      category: certificate_validation
+      confidence_score: "0.93"
+      masvs: MASVS-NETWORK
+      mastg: MASTG-TEST-0021
+      cwe: CWE-295
+
+  - id: msw.android.crypto.hardcoded-key
+    message: Symmetric key material is built from a string literal in code.
+    severity: ERROR
+    languages: [java]
+    pattern-either:
+      - pattern: new javax.crypto.spec.SecretKeySpec("...".getBytes(...), ...)
+      - pattern: new javax.crypto.spec.SecretKeySpec("...".getBytes(), ...)
+      - pattern: new SecretKeySpec("...".getBytes(...), ...)
+      - pattern: new SecretKeySpec("...".getBytes(), ...)
+    metadata:
+      category: hardcoded_secret
+      confidence_score: "0.9"
+      masvs: MASVS-CRYPTO
+      mastg: MASTG-TEST-0013
+      cwe: CWE-321
+
+  - id: msw.android.crypto.static-iv
+    message: Cipher IV is built from a constant value.
+    severity: WARNING
+    languages: [java]
+    pattern-either:
+      - pattern: new IvParameterSpec("...".getBytes(...))
+      - pattern: new IvParameterSpec("...".getBytes())
+      - pattern: new IvParameterSpec(new byte[] {...})
+      - pattern: new javax.crypto.spec.IvParameterSpec("...".getBytes())
+    metadata:
+      category: weak_cryptography
+      confidence_score: "0.82"
+      masvs: MASVS-CRYPTO
+      mastg: MASTG-TEST-0014
+      cwe: CWE-329
+
+  - id: msw.android.crypto.weak-digest
+    message: MD5 or SHA-1 digest use needs a purpose review (password, signature or integrity).
+    severity: INFO
+    languages: [java]
+    pattern-either:
+      - pattern: MessageDigest.getInstance("MD5")
+      - pattern: MessageDigest.getInstance("SHA-1")
+      - pattern: MessageDigest.getInstance("SHA1")
+      - pattern: java.security.MessageDigest.getInstance("MD5")
+    metadata:
+      category: weak_cryptography
+      confidence_score: "0.6"
+      masvs: MASVS-CRYPTO
+      mastg: MASTG-TEST-0014
+      cwe: CWE-328
+
+  - id: msw.android.storage.external-storage
+    message: Data is written under shared external storage; check for personal or credential data.
+    severity: WARNING
+    languages: [java]
+    pattern-either:
+      - pattern: Environment.getExternalStorageDirectory()
+      - pattern: Environment.getExternalStoragePublicDirectory(...)
+      - pattern: android.os.Environment.getExternalStorageDirectory()
+    metadata:
+      category: local_storage
+      confidence_score: "0.7"
+      masvs: MASVS-STORAGE
+      mastg: MASTG-TEST-0001
+      cwe: CWE-922
+
+  - id: msw.android.storage.sqlite-raw-query-concat
+    message: SQLite query is built by string concatenation.
+    severity: WARNING
+    languages: [java]
+    pattern-either:
+      - pattern: $DB.rawQuery("..." + $X, ...)
+      - pattern: $DB.execSQL("..." + $X)
+    metadata:
+      category: sql_injection
+      confidence_score: "0.75"
+      masvs: MASVS-CODE
+      mastg: MASTG-TEST-0025
+      cwe: CWE-89
+
+  - id: msw.android.clipboard.sensitive-copy
+    message: Data is copied to the global clipboard; review whether credentials or personal data can be copied.
+    severity: INFO
+    languages: [java]
+    pattern-either:
+      - pattern: $CM.setPrimaryClip(...)
+      - pattern: $CM.setText(...)
+    metadata:
+      category: sensitive_data_exposure
+      confidence_score: "0.5"
+      masvs: MASVS-PLATFORM
+      mastg: MASTG-TEST-0001
+      cwe: CWE-200
+
+  - id: msw.android.intent.mutable-pending-intent
+    message: PendingIntent is created mutable; confirm the wrapped Intent is explicit.
+    severity: WARNING
+    languages: [java]
+    pattern-either:
+      - pattern: PendingIntent.$METHOD(..., PendingIntent.FLAG_MUTABLE)
+      - pattern: PendingIntent.$METHOD(..., $FLAGS | PendingIntent.FLAG_MUTABLE)
+    metadata:
+      category: exposed_component
+      confidence_score: "0.65"
+      masvs: MASVS-PLATFORM
+      mastg: MASTG-TEST-0029
+      cwe: CWE-927
+
+  - id: msw.android.webview.debugging-enabled
+    message: WebView remote debugging is enabled unconditionally.
+    severity: WARNING
+    languages: [java]
+    pattern: WebView.setWebContentsDebuggingEnabled(true)
+    metadata:
+      category: build_configuration
+      confidence_score: "0.85"
+      masvs: MASVS-RESILIENCE
+      mastg: MASTG-TEST-0039
+      cwe: CWE-489

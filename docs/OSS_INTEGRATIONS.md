@@ -17,7 +17,10 @@ own raw output before findings are normalized.
 | [drozer](https://github.com/WithSecureLabs/drozer) | Android IPC and attack-surface inspection | Optional subprocess plus approved device agent | BSD-3-Clause |
 | [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) | Windows USB iOS discovery/apps/launch/forwarding adapters | Optional subprocess | GPL-3.0 |
 | [libimobiledevice](https://github.com/libimobiledevice/libimobiledevice) | Windows iOS info/apps/syslog/screenshot commands | Optional subprocess | LGPL/GPL split by component/tool |
-| [OWASP MASTG](https://github.com/OWASP/owasp-mastg) | Test IDs, source links and a local execution ledger | Attribution-only curated catalog | CC BY-SA 4.0 |
+| [OWASP MASTG](https://github.com/OWASP/mastg) | Test IDs, links to the official mas.owasp.org test pages and a local execution ledger | Attribution-only curated catalog | CC BY-SA 4.0 |
+| [sslyze](https://github.com/nabla-c0d3/sslyze) | Server TLS configuration check for EFI-MA-41~44 and custom TLS items | Optional subprocess, approved hosts only | AGPL-3.0; installed only with `-SSLyze -AcceptCopyleftLicenses` |
+| [zsign](https://github.com/zhlynn/zsign) | iOS IPA re-signing on Windows/Linux with the operator's own certificate | Optional subprocess | MIT |
+| [frida-java-bridge](https://github.com/frida/frida-java-bridge) / [frida-objc-bridge](https://github.com/frida/frida-objc-bridge) | Frida 17+ runtime bridges bundled with approved scripts at load time | Local npm install under `scripts/frida/runtime` | LGPL-2.0 WITH wxWindows-exception-3.1 |
 
 This table is engineering guidance, not legal advice. A subprocess or REST
 boundary does not by itself settle license obligations. Review the exact
@@ -255,6 +258,62 @@ GitHub Actions runs Python 3.12 compile/test and the frontend `npm ci`, build an
 high-severity audit on Windows. Hardware, external API keys and live analyzer
 services are not required; CI exercises unit and synthetic Mock paths only.
 
+## Frida 17 runtime compatibility
+
+Frida 17 removed the Java/ObjC bridges from GumJS and the static `Module`
+lookup helpers. The session loader (`backend/app/frida/runtime_compat.py`)
+never edits an approved script or its SHA-256. It prepends a small shim that
+restores `Module.findExportByName`, `getExportByName`, `findBaseAddress` and
+`getBaseAddress` on top of the instance APIs. When the connected Python
+binding is 17+ and the script references `Java` or `ObjC`, the loader bundles
+the shim and the pinned bridges with `frida.Compiler` and embeds the untouched
+script as a string that runs through a global indirect `eval`, so it keeps
+classic non-module, non-strict semantics.
+Missing bridges end the session as `not_configured` before any app is spawned.
+The wrapper mode and the SHA-256 of the actually loaded source are kept in the
+Run's Frida health. The frida-tools CLI path only receives the shim because the
+CLI agent already bundles the bridges. Verified against Frida 17.23.3 on a local
+process: the bundled `Java` object is present and the restored helpers resolve
+exports.
+
+## Server TLS configuration check
+
+`POST /api/runs/{id}/tls-scan` runs `sslyze` against at most five `host[:port]`
+targets. Live Runs require an active approved control-validation scope, and
+every target must match its allowed host list exactly or by `*.` subdomain rule.
+URLs, wildcards and out-of-scope hosts are rejected before any socket opens.
+The workbench resolves each hostname once and passes `host:port{ip}` to sslyze
+so a DNS rebinding answer cannot redirect the probes. On a safely paused Run
+the scan holds the manual-action slot, and the Run state and approval scope are
+checked again before anything is recorded.
+Mock projects return a deterministic SYNTHETIC result without network access.
+The raw sslyze JSON becomes `tls_scan` evidence, and EFI-MA-41~44 are decided
+from the customer advisory: SSLv2/v3·TLS 1.0/1.1 accepted, INSECURE ciphers
+(NULL·EXPORT·anonymous·RC4·single DES·RC2·MD5), Heartbleed·CCS Injection·SSLv3
+(POODLE)·EXPORT RSA (FREAK), and client-initiated renegotiation without secure
+renegotiation. 3DES·CBC·static RSA stay observations because the advisory treats
+SSL Labs "WEAK" as not vulnerable. Incomplete plugin results never count as secure.
+
+## iOS IPA re-signing without macOS
+
+`POST /api/apps/{id}/ios/resign` copies the uploaded IPA, signs the copy with
+`zsign` and the signing material named in `.env`
+(`MSW_IOS_SIGNING_PROVISION` plus P12+password or PEM key+certificate), and
+records the result SHA-256, source SHA-256 and requester. The request must echo
+the current upload SHA-256. A P12 is decrypted in memory and handed to zsign as
+a short-lived PEM pair in a private temporary directory, so its password never
+appears on a process command line. The record survives re-analysis. A Run
+installs the re-signed copy only when `use_resigned_ipa` is selected; the
+orchestrator re-hashes the file and refuses a stale or modified copy.
+
+## Semgrep rule pack
+
+Current Semgrep releases reject float metadata, so `confidence_score` values are
+strings. The adapter passes `--no-git-ignore` because analysis output under
+`data/` is gitignored inside a checkout and Semgrep would otherwise scan nothing.
+Both were latent defects found while extending the pack; `tests/test_semgrep_rules.py`
+pins them.
+
 ## Windows installation
 
 The base installer includes Androguard because it is the default isolated APK
@@ -262,9 +321,11 @@ parser worker. Other tools are opt-in:
 
 ```powershell
 .\install_oss_tools.ps1 -Frida -Mitmproxy -Semgrep
-.\install_oss_tools.ps1 -APKiD -Objection -Pymobiledevice3 -Drozer -AcceptCopyleftLicenses
+.\install_oss_tools.ps1 -APKiD -Objection -Pymobiledevice3 -Drozer -SSLyze -AcceptCopyleftLicenses
+.\install_oss_tools.ps1 -FridaRuntime
 ```
 
-MobSF, jadx, apktool, Android SDK and libimobiledevice are configured by path or
-URL. A failed installation is not converted into success; the settings page
+`-Frida` also installs the Frida 17 runtime bridges. On Linux/macOS use
+`scripts/install_frida_runtime.sh`. MobSF, jadx, apktool, Android SDK,
+libimobiledevice and zsign are configured by path or URL. A failed installation is not converted into success; the settings page
 will continue to show `not_configured` or `failed`.

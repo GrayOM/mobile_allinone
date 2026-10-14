@@ -56,6 +56,8 @@ class ToolPaths(BaseModel):
     semgrep: str = "semgrep"
     objection: str = "objection"
     drozer: str = "drozer"
+    sslyze: str = "sslyze"
+    zsign: str = "zsign"
     pymobiledevice3: str = "pymobiledevice3"
     idevice_id: str = "idevice_id"
     ideviceinfo: str = "ideviceinfo"

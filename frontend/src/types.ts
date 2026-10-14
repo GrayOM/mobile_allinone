@@ -325,6 +325,15 @@ export interface ControlTest {
   finding_categories: string[];
   finding_ids: string[];
   risk: string;
+  custom?: boolean;
+  excluded?: boolean;
+  guidance?: {
+    available: boolean;
+    threat_count: number;
+    criteria_count: number;
+    remediation_count: number;
+    example_platforms: string[];
+  } | null;
   execution?: {
     lane: "ready_now" | "device_required" | "server_scope_required" | "manual_review";
     capability: string;
@@ -426,6 +435,9 @@ export interface AssessmentPlanControl {
   next_action: string;
   test_account_required: boolean;
   state_changing: boolean;
+  custom?: boolean;
+  excluded?: boolean;
+  exclusion_reason?: string | null;
 }
 
 export interface AssessmentPlan {
@@ -697,4 +709,122 @@ export interface NetworkTestingSummary {
   pending_approval: NetworkTestCandidateSummary[];
   synthetic: boolean;
   truncated: boolean;
+}
+
+
+export interface ControlGuidance {
+  profile: string;
+  control_id: string;
+  title: string;
+  custom: boolean;
+  description: string[];
+  threats: string[];
+  diagnostic_criteria: string[];
+  diagnostic_examples: string[];
+  remediation: string[];
+  remediation_examples: Record<string, string[]>;
+  check_scripts: string[];
+  reference?: string;
+  recorded_by?: string;
+}
+
+export interface ScopeEvaluatorOption {
+  key: string;
+  label: string;
+  evidence_requirements: string[][];
+}
+
+export interface ScopeControlRecord {
+  id: string;
+  kind: "custom" | "exclusion";
+  profile: string;
+  control_id: string;
+  title: string;
+  group: string;
+  reason: string;
+  recorded_by: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  platform_scope?: "any" | "android" | "ios";
+  criteria?: string[];
+  procedure?: string[];
+  automation?: string;
+  evaluator?: string;
+  evaluator_label?: string;
+  evidence_requirements?: string[][];
+  risk?: string;
+  severity?: string;
+  finding_categories?: string[];
+  reference?: string;
+  definition_sha256?: string;
+  run_usage?: number;
+}
+
+export interface ProjectAssessmentScope {
+  project_id: string;
+  profile: string;
+  catalog_total: number;
+  excluded_total: number;
+  custom_total: number;
+  custom_enabled: number;
+  effective_total: number;
+  catalog: Array<{
+    control_id: string;
+    group: string;
+    title: string;
+    evaluator: string;
+    automation: string;
+    risk: string;
+    excluded: boolean;
+  }>;
+  exclusions: ScopeControlRecord[];
+  custom: ScopeControlRecord[];
+  options: {
+    custom_prefix: string;
+    automation: string[];
+    risk: string[];
+    severity: string[];
+    platform_scope: string[];
+    evaluators: ScopeEvaluatorOption[];
+  };
+}
+
+export interface TlsControlResult {
+  vulnerable: boolean;
+  reasons: string[];
+  observations: string[];
+  complete: boolean;
+}
+
+export interface TlsScanResponse {
+  evidence_id: string;
+  sha256: string | null;
+  synthetic: boolean;
+  targets: string[];
+  servers: Array<Record<string, unknown>>;
+  control_results: Record<string, TlsControlResult>;
+  confirmed_controls: string[];
+}
+
+export interface CapabilityHealth {
+  name?: string;
+  status: string;
+  message: string;
+  version?: string | null;
+  python_binding_version?: string | null;
+  bridge_bundle_required?: boolean;
+  bridges?: { ready: boolean; installed: Record<string, boolean> };
+  signing?: { provision_configured: boolean; credential_type: string | null; problems: string[] };
+}
+
+export interface IpaResignRecord {
+  id: string;
+  file_name: string | null;
+  sha256: string | null;
+  size_bytes: number;
+  source_sha256: string;
+  requested_by: string;
+  synthetic: boolean;
+  created_at: string;
 }

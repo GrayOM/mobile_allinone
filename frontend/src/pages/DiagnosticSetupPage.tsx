@@ -185,6 +185,7 @@ export default function DiagnosticSetupPage() {
             data.get("pause_for_approval_candidates") === "on",
           pause_for_security_bypass:
             data.get("pause_for_security_bypass") === "on",
+          use_resigned_ipa: data.get("use_resigned_ipa") === "on",
           ...(controlValidationEnabled ? {
             control_validation: {
               enabled: true,
@@ -461,6 +462,24 @@ export default function DiagnosticSetupPage() {
                 <span />
                 <div><strong>루팅·탈옥 탐지 우회 준비</strong><small>앱 설치 후 첫 실행 전에 멈춥니다. Frida 라이브러리에서 고위험 우회 코드를 검토·승인·Spawn한 뒤 재개합니다.</small></div>
               </label>
+              {selectedApp?.platform.endsWith("ios") && (
+                <label className="toggle-line">
+                  <input
+                    type="checkbox"
+                    name="use_resigned_ipa"
+                    disabled={!selectedApp.analysis_result.ios_resigned}
+                  />
+                  <span />
+                  <div>
+                    <strong>재서명 IPA로 설치</strong>
+                    <small>
+                      {selectedApp.analysis_result.ios_resigned
+                        ? "프로젝트 화면에서 zsign으로 재서명한 IPA를 SHA-256 재확인 후 설치합니다."
+                        : "프로젝트 화면에서 IPA 재서명을 먼저 실행하세요."}
+                    </small>
+                  </div>
+                </label>
+              )}
               <label className="toggle-line">
                 <input type="checkbox" name="simulate_nvidia_failure" />
                 <span />

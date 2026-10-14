@@ -15,3 +15,14 @@ output/playwright/
 
 # Local authorized test artifacts must never be published.
 /test_apk/
+
+# Frida 17+ runtime bridges are installed locally.
+scripts/frida/runtime/node_modules/
+scripts/frida/runtime/package-lock.json
+scripts/frida/runtime/.build/
+
+# Advisory guidance extracted locally from customer DOCX files. Never commit.
+backend/app/catalog/data/
+
+# Local editable-install metadata.
+*.egg-info/
