@@ -181,6 +181,7 @@ export default function DiagnosticSetupPage() {
           auto_navigation: data.get("auto_navigation") === "on",
           ai_rank_navigation: data.get("ai_rank_navigation") === "on",
           dynamic_storage: data.get("dynamic_storage") === "on",
+          background_screen_check: data.get("background_screen_check") === "on",
           pause_for_approval_candidates:
             data.get("pause_for_approval_candidates") === "on",
           pause_for_security_bypass:
@@ -443,7 +444,12 @@ export default function DiagnosticSetupPage() {
                   <label className="toggle-line">
                     <input type="checkbox" name="dynamic_storage" defaultChecked />
                     <span />
-                    <div><strong>앱 저장소 Before/After</strong><small>Root Android에서 대상 package의 /data/data 범위만 수집하고 SQLite Preview는 기본 마스킹합니다.</small></div>
+                    <div><strong>앱 저장소 Before/After</strong><small>Root Android에서 대상 package의 /data/data와 앱 전용 외부 저장소(Android/data·media·obb)만 수집하고 SQLite Preview는 기본 마스킹합니다. Clipboard는 소유 uid·appops 시각으로 대상 앱 귀속만 기록하며 원문은 저장하지 않습니다.</small></div>
+                  </label>
+                  <label className="toggle-line">
+                    <input type="checkbox" name="background_screen_check" defaultChecked />
+                    <span />
+                    <div><strong>백그라운드 화면 보호 관찰</strong><small>대상 앱 창의 FLAG_SECURE 속성을 읽고 HOME·최근 앱 키 입력 뒤 최근 화면을 캡처합니다. Root 단말에서는 대상 Task의 시스템 스냅샷 파일을 함께 보존하며 판정은 검토자가 합니다.</small></div>
                   </label>
                 </>
               )}

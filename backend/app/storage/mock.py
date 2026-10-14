@@ -53,6 +53,54 @@ class MockAndroidStorageCollector:
     async def capture(self, phase: str, destination: Path) -> StorageCapture:
         return await asyncio.to_thread(self._capture, phase, destination)
 
+    async def capture_external(self, phase: str, destination: Path) -> StorageCapture:
+        return await asyncio.to_thread(self._capture_external, phase, destination)
+
+    def _capture_external(self, phase: str, destination: Path) -> StorageCapture:
+        after = phase == "after_interaction"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        package = self.package_name
+        contents = {
+            f"data/{package}/files/export/statement.csv": (
+                b"account,balance\nsynthetic-100,0\n" if after else b"account,balance\n"
+            ),
+            f"media/{package}/receipts/.nomedia": b"",
+        }
+        if after:
+            contents[f"data/{package}/cache/last_login.json"] = (
+                b'{"user":"synthetic","remember":true}'
+            )
+        with tarfile.open(destination, mode="w") as archive:
+            for name, content in contents.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(content)
+                member.mtime = int(time.time())
+                archive.addfile(member, io.BytesIO(content))
+        files = {
+            path: self._metadata(
+                path,
+                "external_data" if path.startswith("data/") else "external_media",
+                content,
+            )
+            for path, content in contents.items()
+        }
+        snapshot = StorageSnapshot(
+            phase=phase,
+            package_name=package,
+            root=f"/storage/emulated/0/Android/{{data,media,obb}}/{package}",
+            files=files,
+            scope="external",
+            synthetic=True,
+        )
+        return StorageCapture(
+            CapabilityStatus.AVAILABLE.value,
+            f"Mock 앱 전용 외부 저장소 {len(files)}개 파일을 합성 수집했습니다.",
+            snapshot=snapshot,
+            archive_path=str(destination),
+            command=f"mock external storage capture {phase}",
+            synthetic=True,
+        )
+
     def _capture(self, phase: str, destination: Path) -> StorageCapture:
         self._capture_count += 1
         after = self._capture_count > 1 or phase == "after_interaction"
@@ -104,10 +152,28 @@ class MockAndroidStorageCollector:
             clipboard={
                 "phase": phase,
                 "status": CapabilityStatus.AVAILABLE.value,
+                "message": (
+                    "Mock 대상 앱 uid가 Clipboard 소유 uid와 일치합니다."
+                    if after
+                    else "Mock Clipboard가 비어 있습니다."
+                ),
                 "changed_signal": after,
                 "sha256": hashlib.sha256(clipboard_value.encode()).hexdigest(),
                 "preview": "<empty>" if not clipboard_value else "<masked:21>",
+                "digest_source": "item_text",
+                "owner_uid": 10242 if after else None,
+                "owner_package": self.package_name if after else None,
+                "target_uid": 10242,
+                "attributed": after,
+                "signals": ["owner_uid_match", "appops_write_within_window"] if after else ["clip_empty"],
+                "appops": {
+                    "read_mode": "allow",
+                    "read_age_seconds": None,
+                    "write_mode": "allow",
+                    "write_age_seconds": 4.2 if after else None,
+                },
                 "masked": True,
+                "raw_text_stored": False,
                 "synthetic": True,
             },
             synthetic=True,

@@ -59,10 +59,14 @@ class StorageSnapshot:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     synthetic: bool = False
+    # "internal" is /data/data/<package>; "external" is the app-specific
+    # Android/{data,media,obb}/<package> tree on shared storage.
+    scope: str = "internal"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "phase": self.phase,
+            "scope": self.scope,
             "package_name": self.package_name,
             "root": self.root,
             "files": [item.to_dict() for item in self.files.values()],
@@ -100,6 +104,8 @@ def diff_snapshots(
 ) -> list[FileChange]:
     if before.package_name != after.package_name:
         raise ValueError("Storage snapshots belong to different packages")
+    if before.scope != after.scope:
+        raise ValueError("Storage snapshots belong to different scopes")
     changes: list[FileChange] = []
     for path in sorted(set(before.files) | set(after.files)):
         old = before.files.get(path)

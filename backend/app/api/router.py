@@ -2837,6 +2837,14 @@ async def create_run(
         raise HTTPException(422, "dynamic_storage는 boolean이어야 합니다.")
     if dynamic_storage and app_platform != "android":
         raise HTTPException(422, "동적 저장소 수집은 현재 Android에서만 지원합니다.")
+    background_screen_check = options.get(
+        "background_screen_check",
+        run_mode == RunMode.MOCK and app_platform == "android",
+    )
+    if not isinstance(background_screen_check, bool):
+        raise HTTPException(422, "background_screen_check는 boolean이어야 합니다.")
+    if background_screen_check and app_platform != "android":
+        raise HTTPException(422, "백그라운드 화면 보호 점검은 현재 Android에서만 지원합니다.")
     pause_for_approval_candidates = options.get(
         "pause_for_approval_candidates", False
     )
@@ -2877,6 +2885,7 @@ async def create_run(
             "auto_navigation": auto_navigation,
             "ai_rank_navigation": ai_rank_navigation,
             "dynamic_storage": dynamic_storage,
+            "background_screen_check": background_screen_check,
             "pause_for_approval_candidates": pause_for_approval_candidates,
             "pause_for_security_bypass": pause_for_security_bypass,
             "navigation_limits": NavigationLimits.from_options(

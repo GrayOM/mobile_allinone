@@ -77,6 +77,10 @@ DELETE /api/projects/{id}/control-exclusions/{control-id}
 
 HTTPS 항목(`EFI-MA-41`~`44`)은 `tls_configuration` 판정 방식을 사용한다. 승인 서버 범위 안에서 실행한 같은 Run의 `tls_scan` 증적이 권고안의 INSECURE 조건을 보여 줄 때만 자동 확정하고, 점검이 일부라도 미완료이면 양호로 바꾸지 않는다. 판정 방식이 `tls_configuration`인 예외 검사는 네 항목 중 하나라도 취약하면 확정된다.
 
+백그라운드 화면 보호 항목(`EFI-MA-50`)은 `background_screen` 판정 방식을 사용한다. Android Run 옵션 `background_screen_check`가 켜지면 Run이 대상 앱 창의 FLAG_SECURE 속성(`dumpsys window`)을 읽고 백그라운드 전환 전 화면을 캡처한 뒤 HOME·APP_SWITCH 키 입력으로 최근 앱 화면을 캡처한다. Root 단말에서는 대상 Task의 시스템 스냅샷 파일을 `task_snapshot` 증적으로 보존하고, 마지막에 앱을 다시 전면으로 복귀시킨 뒤 프로세스를 확인한다. 관찰 결과는 `background_screen_check` JSON 증적이며 창별 FLAG_SECURE 상태·캡처 이미지의 검은 화면 비율·스냅샷 파일 목록을 담는다. 이 항목은 자동 확정하지 않는다. 최근 화면·스냅샷에 중요정보가 남았는지는 검토자가 `needs_review` 행에서 판정하며, 수동 확정에는 같은 Run의 `background_screen_check` 또는 원본 첨부가 필요하다.
+
+단말 중요정보 저장 항목(`CII-MA-24`, `EFI-MA-21`)의 `local_storage` 판정 방식은 `/data/data/<package>` 외에 앱 전용 외부 저장소 `Android/{data,media,obb}/<package>` Before/After도 같은 `storage_snapshot`·`storage_diff` 유형으로 수집한다. 공용 Download 등 다른 앱과 섞이는 경로는 읽지 않는다. Clipboard는 원문을 저장하지 않고 SHA-256·길이·소유 uid·`appops` WRITE_CLIPBOARD 시각으로 대상 앱 귀속만 기록한다. 소유 uid가 다르거나 비어 있으면 `attributed=false`, 소유 정보가 없으면 `null`로 남겨 다른 앱 데이터를 대상 앱 결과에 섞지 않는다.
+
 루팅·탈옥 항목(`CII-MA-22`, `EFI-MA-07`)의 자동 취약 확정에는 다음 세 가지가 필요하다.
 
 1. 단말의 루팅·탈옥 상태를 보여 주는 `device_state`

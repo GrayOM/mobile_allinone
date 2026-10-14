@@ -652,8 +652,65 @@ export interface StorageSummary {
   change_count: number;
   changes: StorageFileChange[];
   databases: StorageDatabaseArtifact[];
-  clipboard: Record<string, unknown>;
+  clipboard: ClipboardAttribution;
+  external?: ExternalStorageSummary;
   evidence_ids: string[];
+  synthetic: boolean;
+}
+
+export interface ClipboardAttribution {
+  phase?: string;
+  status?: CapabilityStatus;
+  message?: string;
+  changed_signal?: boolean;
+  sha256?: string;
+  preview?: string;
+  owner_uid?: number | null;
+  owner_package?: string | null;
+  target_uid?: number | null;
+  attributed?: boolean | null;
+  signals?: string[];
+  appops?: {
+    read_mode: string | null;
+    read_age_seconds: number | null;
+    write_mode: string | null;
+    write_age_seconds: number | null;
+  };
+  masked?: boolean;
+  raw_text_stored?: boolean;
+  synthetic?: boolean;
+}
+
+export interface ExternalStorageSummary {
+  status: CapabilityStatus;
+  message: string;
+  before_file_count: number;
+  after_file_count: number;
+  change_count: number;
+  changes: StorageFileChange[];
+  root: string | null;
+}
+
+export interface BackgroundScreenSummary {
+  status: CapabilityStatus;
+  message: string;
+  package_name?: string;
+  windows: Array<{ name: string; secure: boolean | null; focused: boolean; flags: string }>;
+  focused_window_secure: boolean | null;
+  task_id: number | null;
+  foreground_dark_ratio: number | null;
+  recents_dark_ratio: number | null;
+  task_snapshot: {
+    status?: string;
+    message?: string;
+    entries?: Array<{ name: string; size: number }>;
+    evidence_id?: string;
+    file_size?: number;
+  };
+  steps: Array<{ step: string; ok: boolean; [key: string]: unknown }>;
+  restored_foreground: boolean | null;
+  evidence_ids?: string[];
+  check_evidence_id?: string;
   synthetic: boolean;
 }
 

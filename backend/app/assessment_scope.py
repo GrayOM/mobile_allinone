@@ -68,6 +68,7 @@ EVALUATOR_LABELS: dict[str, str] = {
     "network_review": "네트워크 흐름 검토",
     "tls_configuration": "서버 TLS 구성 점검",
     "ui_review": "화면·UI 트리 검토",
+    "background_screen": "백그라운드 화면 보호 점검",
     "dynamic_review": "동적 런타임 검토",
     "manual": "수동 원본 첨부",
 }

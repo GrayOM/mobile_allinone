@@ -79,6 +79,12 @@ from backend.app.proxy import (
     MockProxyAdapter,
 )
 from backend.app.runtime import DrozerRuntimeAdapter, ObjectionRuntimeAdapter
+from backend.app.screen_protection import (
+    AndroidScreenProtectionInspector,
+    MockScreenProtectionInspector,
+    ScreenProtectionObservation,
+    dark_pixel_ratio,
+)
 from backend.app.storage import (
     AndroidStorageCollector,
     MockAndroidStorageCollector,
@@ -456,6 +462,192 @@ class DiagnosticOrchestrator:
                 settings=self.settings,
             )
         return None
+
+    def screen_protection_inspector_for_run(
+        self,
+        run: DiagnosticRun,
+        package_name: str,
+        *,
+        privileged: bool | None,
+    ):
+        if run.device_adapter == "mock" and "ios" not in run.device_id.lower():
+            return MockScreenProtectionInspector(package_name)
+        if run.device_adapter == "android_adb":
+            return AndroidScreenProtectionInspector(
+                run.device_id,
+                package_name,
+                privileged=privileged,
+                settings=self.settings,
+            )
+        return None
+
+    @staticmethod
+    def _dark_ratio_for(path: Path) -> float | None:
+        try:
+            return dark_pixel_ratio(path.read_bytes()) if path.is_file() else None
+        except OSError:
+            return None
+
+    async def _run_background_screen_check(
+        self,
+        db: Session,
+        run: DiagnosticRun,
+        device,
+        package_name: str,
+        *,
+        privileged: bool | None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Observe FLAG_SECURE, the recents card and the system task snapshot.
+
+        The sequence is observation only: read window attributes, press HOME
+        and APP_SWITCH, take screenshots, read the target task's snapshot on a
+        rooted device, then bring the app back. No verdict is produced here;
+        the ledger keeps the item at ``needs_review`` for the analyst.
+        """
+        inspector = self.screen_protection_inspector_for_run(
+            run, package_name, privileged=privileged
+        )
+        evidence_ids: list[str] = []
+        synthetic = run.run_mode == RunMode.MOCK.value
+        if inspector is None or not inspector.available:
+            observation = ScreenProtectionObservation(
+                CapabilityStatus.NOT_CONFIGURED.value,
+                "이 단말 Adapter 또는 ADB 설정으로는 백그라운드 화면 보호를 관찰할 수 없습니다.",
+                synthetic=synthetic,
+            )
+            return observation.to_dict(), evidence_ids
+        settle = 0.05 if synthetic else 1.0
+        steps: list[dict[str, Any]] = []
+        run_dir = self.evidence.run_dir(run.id)
+
+        windows, focused_secure, command = await inspector.window_protection()
+        steps.append(
+            {
+                "step": "window_attributes",
+                "ok": bool(windows),
+                "command": command,
+                "window_count": len(windows),
+            }
+        )
+        foreground_path = run_dir / "06-background-check-foreground.png"
+        foreground = await self._capture(
+            db,
+            run,
+            device,
+            foreground_path.name,
+            "백그라운드 전환 전 대상 앱 화면",
+            "FLAG_SECURE가 적용된 창은 screencap에서 검게 캡처됩니다. 이 화면이 백그라운드로 전환됩니다.",
+        )
+        if foreground:
+            evidence_ids.append(foreground.id)
+        foreground_dark = self._dark_ratio_for(foreground_path)
+        task_id = await inspector.task_id()
+        steps.append({"step": "task_lookup", "ok": task_id is not None, "task_id": task_id})
+
+        home_ok = await inspector.press_home()
+        steps.append({"step": "keyevent_home", "ok": home_ok})
+        await asyncio.sleep(settle)
+        recents_ok = await inspector.open_recents()
+        steps.append({"step": "keyevent_app_switch", "ok": recents_ok})
+        await asyncio.sleep(settle)
+        recents_path = run_dir / "07-background-check-recents.png"
+        recents = await self._capture(
+            db,
+            run,
+            device,
+            recents_path.name,
+            "최근 앱 화면(Recents)",
+            "대상 앱을 백그라운드로 전환한 뒤 최근 앱 목록에 노출되는 카드입니다.",
+        )
+        if recents:
+            evidence_ids.append(recents.id)
+        recents_dark = self._dark_ratio_for(recents_path)
+
+        snapshot = await inspector.task_snapshot(task_id, run_dir / "task-snapshot.jpg")
+        snapshot_file = snapshot.get("file_path")
+        if snapshot_file:
+            snapshot_evidence = self.evidence.add(
+                db,
+                run_id=run.id,
+                evidence_type="task_snapshot",
+                title="시스템 Task 스냅샷 파일",
+                description=str(snapshot.get("message") or ""),
+                file_path=snapshot_file,
+                mime_type="image/jpeg",
+                command=str(snapshot.get("command") or "") or None,
+                inline_data={
+                    "task_id": task_id,
+                    "directory": snapshot.get("directory"),
+                    "entries": snapshot.get("entries"),
+                    "synthetic": synthetic,
+                },
+            )
+            await self._emit_evidence(run.id, snapshot_evidence)
+            evidence_ids.append(snapshot_evidence.id)
+            snapshot["evidence_id"] = snapshot_evidence.id
+        steps.append(
+            {
+                "step": "task_snapshot",
+                "ok": snapshot.get("status") == CapabilityStatus.AVAILABLE.value,
+                "status": snapshot.get("status"),
+            }
+        )
+
+        await inspector.press_home()
+        restored = await inspector.restore_foreground()
+        await asyncio.sleep(settle)
+        process = await self._wait_for_process_state(
+            device, run.device_id, package_name, expected_running=True
+        )
+        running = process is not None and self._process_running(process, package_name)
+        steps.append({"step": "restore_foreground", "ok": restored and running})
+
+        if focused_secure is True:
+            signal = "FLAG_SECURE 적용 신호"
+        elif focused_secure is False:
+            signal = "FLAG_SECURE 미적용 신호"
+        else:
+            signal = "FLAG_SECURE 상태 미확인"
+        observation = ScreenProtectionObservation(
+            status=(
+                CapabilityStatus.AVAILABLE.value
+                if windows and recents is not None
+                else CapabilityStatus.FAILED.value
+                if not windows
+                else CapabilityStatus.MANUAL_REQUIRED.value
+            ),
+            message=(
+                f"{signal}. 최근 화면·스냅샷 증적에서 중요정보 노출 여부는 검토자가 판정합니다."
+                if windows
+                else "대상 앱 창 속성을 읽지 못해 백그라운드 화면 보호를 관찰하지 못했습니다."
+            ),
+            windows=windows,
+            focused_window_secure=focused_secure,
+            task_id=task_id,
+            foreground_dark_ratio=foreground_dark,
+            recents_dark_ratio=recents_dark,
+            task_snapshot=snapshot,
+            steps=steps,
+            restored_foreground=restored and running,
+            synthetic=synthetic,
+        )
+        summary = observation.to_dict()
+        summary["package_name"] = package_name
+        check_evidence = self.evidence.add_json(
+            db,
+            run_id=run.id,
+            filename="background-screen-check.json",
+            title="백그라운드 화면 보호 관찰",
+            evidence_type="background_screen_check",
+            data={**summary, "screenshot_evidence_ids": list(evidence_ids)},
+            description=observation.message,
+            command=command,
+        )
+        await self._emit_evidence(run.id, check_evidence)
+        evidence_ids.append(check_evidence.id)
+        summary["evidence_ids"] = list(evidence_ids)
+        summary["check_evidence_id"] = check_evidence.id
+        return summary, evidence_ids
 
     def _proxy(self, run: DiagnosticRun):
         adapter = run.proxy_adapter
@@ -946,18 +1138,22 @@ class DiagnosticOrchestrator:
     ) -> list[Evidence]:
         recorded: list[Evidence] = []
         snapshot = capture.snapshot
+        scope = snapshot.scope if snapshot else "internal"
+        label = "앱 전용 외부 저장소" if scope == "external" else "앱 전용 저장소"
+        suffix = f"external-{phase}" if scope == "external" else phase
         if capture.archive_path:
             archive_evidence = self.evidence.add(
                 db,
                 run_id=run.id,
                 evidence_type="storage_archive",
-                title=f"앱 전용 저장소 원본 · {phase}",
+                title=f"{label} 원본 · {phase}",
                 description=capture.message,
                 file_path=capture.archive_path,
                 mime_type="application/x-tar",
                 command=capture.command,
                 inline_data={
                     "phase": phase,
+                    "scope": scope,
                     "status": capture.status,
                     "package": snapshot.package_name if snapshot else None,
                     "root": snapshot.root if snapshot else None,
@@ -970,8 +1166,8 @@ class DiagnosticOrchestrator:
         metadata = self.evidence.add_json(
             db,
             run_id=run.id,
-            filename=f"storage-{phase}.json",
-            title=f"앱 전용 저장소 구조 · {phase}",
+            filename=f"storage-{suffix}.json",
+            title=f"{label} 구조 · {phase}",
             evidence_type="storage_snapshot",
             data=capture.to_dict(),
             description=capture.message,
@@ -2163,6 +2359,7 @@ class DiagnosticOrchestrator:
                 storage_enabled = bool(run.options.get("dynamic_storage"))
                 storage_collector = None
                 storage_before: StorageCapture | None = None
+                external_before: StorageCapture | None = None
                 storage_evidence_ids: list[str] = []
                 if storage_enabled and app_platform == "android":
                     await self._stage(
@@ -2188,6 +2385,17 @@ class DiagnosticOrchestrator:
                         )
                         storage_evidence_ids.extend(
                             item.id for item in before_records
+                        )
+                        external_before = await storage_collector.capture_external(
+                            "before_interaction",
+                            self.evidence.run_dir(run.id)
+                            / "storage-external-before-interaction.tar",
+                        )
+                        storage_evidence_ids.extend(
+                            item.id
+                            for item in await self._record_storage_capture(
+                                db, run, "before_interaction", external_before
+                            )
                         )
 
                 if run.options.get("pause_for_login"):
@@ -2362,6 +2570,80 @@ class DiagnosticOrchestrator:
                         )
                         await self._emit_evidence(run.id, diff_evidence)
                         storage_evidence_ids.append(diff_evidence.id)
+                    external_summary: dict[str, Any] = {
+                        "status": CapabilityStatus.UNSUPPORTED.value,
+                        "message": "현재 단말에는 앱 외부 저장소 Collector가 없습니다.",
+                        "before_file_count": 0,
+                        "after_file_count": 0,
+                        "change_count": 0,
+                        "changes": [],
+                        "root": None,
+                    }
+                    if storage_collector is not None:
+                        external_after = await storage_collector.capture_external(
+                            "after_interaction",
+                            self.evidence.run_dir(run.id)
+                            / "storage-external-after-interaction.tar",
+                        )
+                        storage_evidence_ids.extend(
+                            item.id
+                            for item in await self._record_storage_capture(
+                                db, run, "after_interaction", external_after
+                            )
+                        )
+                        external_changes = []
+                        if (
+                            external_before
+                            and external_before.snapshot
+                            and external_after.snapshot
+                        ):
+                            external_changes = diff_snapshots(
+                                external_before.snapshot, external_after.snapshot
+                            )
+                            external_diff = self.evidence.add_json(
+                                db,
+                                run_id=run.id,
+                                filename="storage-external-diff.json",
+                                title="앱 전용 외부 저장소 Before/After Diff",
+                                evidence_type="storage_diff",
+                                data={
+                                    "package_name": package_name,
+                                    "scope": "external",
+                                    "root": external_after.snapshot.root,
+                                    "before_phase": external_before.snapshot.phase,
+                                    "after_phase": external_after.snapshot.phase,
+                                    "changes": [
+                                        item.to_dict() for item in external_changes
+                                    ],
+                                    "synthetic": run.synthetic,
+                                },
+                                description=(
+                                    f"앱 전용 외부 저장소 파일 변화 {len(external_changes)}건을 식별했습니다."
+                                ),
+                            )
+                            await self._emit_evidence(run.id, external_diff)
+                            storage_evidence_ids.append(external_diff.id)
+                        external_summary = {
+                            "status": external_after.status,
+                            "message": external_after.message,
+                            "before_file_count": (
+                                len(external_before.snapshot.files)
+                                if external_before and external_before.snapshot
+                                else 0
+                            ),
+                            "after_file_count": (
+                                len(external_after.snapshot.files)
+                                if external_after.snapshot
+                                else 0
+                            ),
+                            "change_count": len(external_changes),
+                            "changes": [item.to_dict() for item in external_changes[:500]],
+                            "root": (
+                                external_after.snapshot.root
+                                if external_after.snapshot
+                                else None
+                            ),
+                        }
                     storage_ok = (
                         storage_before is not None
                         and storage_before.status
@@ -2406,6 +2688,7 @@ class DiagnosticOrchestrator:
                         "clipboard": (
                             after_snapshot.clipboard if after_snapshot else {}
                         ),
+                        "external": external_summary,
                         "evidence_ids": storage_evidence_ids,
                         "synthetic": run.synthetic,
                     }
@@ -2423,6 +2706,46 @@ class DiagnosticOrchestrator:
                                 else "앱 전용 저장소 자동 수집을 완료하지 못했습니다."
                             ),
                             evidence_ids=storage_evidence_ids,
+                        )
+
+                if (
+                    run.options.get("background_screen_check")
+                    and app_platform == "android"
+                ):
+                    await self._stage(
+                        db,
+                        run,
+                        "background_screen",
+                        69,
+                        "대상 앱을 백그라운드로 전환해 FLAG_SECURE·최근 화면·시스템 스냅샷을 관찰합니다.",
+                    )
+                    background_summary, background_ids = (
+                        await self._run_background_screen_check(
+                            db,
+                            run,
+                            device,
+                            package_name,
+                            privileged=selected_device_info.privileged,
+                        )
+                    )
+                    options = dict(run.options)
+                    options["background_screen"] = background_summary
+                    run.options = options
+                    db.commit()
+                    record_check(
+                        "background_screen",
+                        background_summary["status"] == CapabilityStatus.AVAILABLE.value,
+                        background_summary["message"],
+                        required=False,
+                    )
+                    if background_ids:
+                        self._complete_controls(
+                            db,
+                            run.id,
+                            {"MASTG-TEST-0010"},
+                            result="needs_review",
+                            summary=background_summary["message"],
+                            evidence_ids=background_ids,
                         )
 
                 await self._stage(

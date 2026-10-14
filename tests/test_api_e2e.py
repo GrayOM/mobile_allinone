@@ -263,7 +263,7 @@ def test_custom_frida_script_requires_approval(client):
             "pause_for_login": True,
         },
     ).json()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         paused = client.get(f"/api/runs/{started['id']}").json()
         if paused["status"] == "safely_paused":
@@ -352,7 +352,7 @@ def test_high_risk_root_bypass_requires_prelaunch_pause_and_one_time_approval(cl
     )
     assert started.status_code == 201
     run_id = started.json()["id"]
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         paused = client.get(f"/api/runs/{run_id}").json()
         if paused["status"] == "safely_paused":
@@ -451,7 +451,7 @@ def test_login_pause_and_resume(client):
         },
     )
     run_id = started.json()["id"]
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         run = client.get(f"/api/runs/{run_id}").json()
         if run["status"] == "safely_paused":

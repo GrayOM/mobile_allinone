@@ -14,6 +14,7 @@ import type {
   PendingNavigationAction,
   ProxyFlow,
   StorageSummary,
+  BackgroundScreenSummary,
 } from "../types";
 import { EmptyState, StatusChip, formatDate } from "../components/UI";
 import { AuthenticatedImage } from "../components/AuthenticatedFile";
@@ -297,6 +298,14 @@ export default function LiveRunPage() {
     ? navigation.ai_rankings[navigation.ai_rankings.length - 1]
     : null;
   const storage = readStorage(run.options.storage);
+  const backgroundScreen = readBackgroundScreen(run.options.background_screen);
+  const clipboard = storage?.clipboard ?? {};
+  const storageChanges = [
+    ...(storage?.changes ?? []).map((change) => ({ ...change, scope: "internal" })),
+    ...(storage?.external?.changes ?? []).map((change) => ({ ...change, scope: "external" })),
+  ];
+  const clipboardAttribution =
+    clipboard.attributed === true ? "attributed to target" : clipboard.attributed === false ? "not attributed" : "attribution unknown";
   const networkTesting = readNetworkTesting(run.options.network_testing);
   const controlValidation = readControlValidation(run.options.control_validation);
   const controlScopeEnforcement = readControlScopeEnforcement(
@@ -697,16 +706,23 @@ export default function LiveRunPage() {
             <div><span>FILES</span><strong>{storage?.before_file_count ?? 0} → {storage?.after_file_count ?? 0}</strong><small>before / after</small></div>
             <div><span>DIFF</span><strong>{storage?.change_count ?? 0}</strong><small>created · modified · deleted</small></div>
             <div><span>SQLITE</span><strong>{storage?.databases.length ?? 0}</strong><small>masked preview</small></div>
-            <div><span>CLIPBOARD</span><strong>{String(storage?.clipboard.status ?? "not tested").toUpperCase()}</strong><small>{storage?.clipboard.changed_signal ? "change signal" : "no attributed change"}</small></div>
+            <div><span>CLIPBOARD</span><strong>{String(clipboard.status ?? "not tested").toUpperCase()}</strong><small>{clipboard.changed_signal ? "change signal" : "no change signal"}</small></div>
+          </div>
+          <div className="storage-ledger storage-ledger--secondary">
+            <div><span>EXTERNAL SCOPE</span><strong>{storage?.external ? String(storage.external.status).toUpperCase() : "NOT TESTED"}</strong><small>{storage?.external?.root ?? "Android/{data,media,obb}/<package>"}</small></div>
+            <div><span>EXTERNAL FILES</span><strong>{storage?.external?.before_file_count ?? 0} → {storage?.external?.after_file_count ?? 0}</strong><small>before / after</small></div>
+            <div><span>EXTERNAL DIFF</span><strong>{storage?.external?.change_count ?? 0}</strong><small>app-specific only</small></div>
+            <div><span>CLIP OWNER</span><strong>{clipboard.owner_uid != null ? `uid ${clipboard.owner_uid}` : clipboard.preview ?? "—"}</strong><small>target uid {clipboard.target_uid ?? "?"} · {clipboardAttribution}</small></div>
+            <div><span>CLIP SIGNALS</span><strong>{clipboard.signals?.length ? clipboard.signals.join(", ") : "none"}</strong><small>{clipboard.appops?.write_age_seconds != null ? `WRITE_CLIPBOARD ${clipboard.appops.write_age_seconds}s ago` : "no appops write time"} · raw text never stored</small></div>
           </div>
           <div className="storage-detail-grid">
             <div>
               <h4>FILESYSTEM CHANGES</h4>
               <div className="storage-change-list">
-                {storage?.changes.length ? storage.changes.slice(0, 100).map((change) => (
-                  <div key={`${change.change_type}-${change.path}`}>
+                {storageChanges.length ? storageChanges.slice(0, 100).map((change) => (
+                  <div key={`${change.scope}-${change.change_type}-${change.path}`}>
                     <span className={`storage-change storage-change--${change.change_type}`}>{change.change_type}</span>
-                    <strong>{change.path}</strong>
+                    <strong>{change.scope === "external" ? `ext:${change.path}` : change.path}</strong>
                     <small>{formatBytes(change.before_size ?? 0)} → {formatBytes(change.after_size ?? 0)}</small>
                   </div>
                 )) : <div className="console-empty">수집된 앱 전용 파일 변화가 없습니다.</div>}
@@ -727,6 +743,55 @@ export default function LiveRunPage() {
                     ))}
                   </details>
                 )) : <div className="console-empty">구조화된 SQLite 파일이 없습니다.</div>}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="console-panel background-console">
+          <div className="console-head">
+            <span>BACKGROUND SCREEN PROTECTION</span>
+            <small>{backgroundScreen ? `${String(backgroundScreen.status).toUpperCase()} · ${backgroundScreen.windows.length} windows` : "not requested"}</small>
+          </div>
+          <div className="storage-ledger">
+            <div><span>FLAG_SECURE</span><strong>{backgroundScreen?.focused_window_secure === true ? "APPLIED" : backgroundScreen?.focused_window_secure === false ? "NOT APPLIED" : "UNKNOWN"}</strong><small>focused window attribute</small></div>
+            <div><span>FOREGROUND CAP</span><strong>{backgroundScreen?.foreground_dark_ratio != null ? `${Math.round(backgroundScreen.foreground_dark_ratio * 100)}% dark` : "—"}</strong><small>screencap blank ratio</small></div>
+            <div><span>RECENTS CAP</span><strong>{backgroundScreen?.recents_dark_ratio != null ? `${Math.round(backgroundScreen.recents_dark_ratio * 100)}% dark` : "—"}</strong><small>after HOME · APP_SWITCH</small></div>
+            <div><span>TASK SNAPSHOT</span><strong>{String(backgroundScreen?.task_snapshot?.status ?? "not tested").toUpperCase()}</strong><small>{backgroundScreen?.task_id != null ? `task #${backgroundScreen.task_id}` : "task unknown"} · {backgroundScreen?.task_snapshot?.entries?.length ?? 0} files</small></div>
+            <div className={backgroundScreen && backgroundScreen.restored_foreground === false ? "health-warn" : ""}><span>RESTORED</span><strong>{backgroundScreen?.restored_foreground === true ? "YES" : backgroundScreen?.restored_foreground === false ? "NO" : "—"}</strong><small>app brought back to front</small></div>
+          </div>
+          <div className="storage-detail-grid">
+            <div>
+              <h4>TARGET WINDOWS</h4>
+              <div className="storage-change-list">
+                {backgroundScreen?.windows.length ? backgroundScreen.windows.map((window) => (
+                  <div key={window.name} title={window.flags || "no flags parsed"}>
+                    <span className={`storage-change storage-change--${window.secure ? "deleted" : window.secure === false ? "created" : "modified"}`}>{window.secure ? "secure" : window.secure === false ? "open" : "unknown"}</span>
+                    <strong>{window.name}</strong>
+                    <small>{window.focused ? "focused" : "background"} · {window.flags ? `${window.flags.split(/\s+/).length} flags` : "no flags"}</small>
+                  </div>
+                )) : <div className="console-empty">{backgroundScreen?.message ?? "백그라운드 화면 보호 관찰이 요청되지 않았습니다."}</div>}
+              </div>
+            </div>
+            <div>
+              <h4>OBSERVATION / VERDICT</h4>
+              <div className="storage-change-list">
+                {backgroundScreen ? (
+                  <>
+                    {backgroundScreen.steps.map((step) => (
+                      <div key={step.step}>
+                        <span className={`storage-change storage-change--${step.ok ? "created" : "deleted"}`}>{step.ok ? "ok" : "fail"}</span>
+                        <strong>{step.step}</strong>
+                        <small>{"status" in step && step.status ? String(step.status) : ""}</small>
+                      </div>
+                    ))}
+                    <div>
+                      <span className="storage-change storage-change--modified">review</span>
+                      <strong>{backgroundScreen.message}</strong>
+                      <small>{backgroundScreen.synthetic ? "SYNTHETIC MOCK · " : ""}needs_review only · no automatic confirmation</small>
+                    </div>
+                  </>
+                ) : <div className="console-empty">관찰 결과가 없습니다.</div>}
               </div>
             </div>
           </div>
@@ -987,6 +1052,13 @@ function readStorage(value: unknown): StorageSummary | null {
   const item = value as Partial<StorageSummary>;
   if (!Array.isArray(item.changes) || !Array.isArray(item.databases)) return null;
   return item as StorageSummary;
+}
+
+function readBackgroundScreen(value: unknown): BackgroundScreenSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as Partial<BackgroundScreenSummary>;
+  if (!Array.isArray(item.windows) || !Array.isArray(item.steps)) return null;
+  return item as BackgroundScreenSummary;
 }
 
 function readNetworkTesting(value: unknown): NetworkTestingSummary | null {

@@ -14,6 +14,7 @@ DEVICE_EVALUATORS = {
     "forced_screen",
     "deep_link",
     "ui_review",
+    "background_screen",
     "dynamic_review",
 }
 NETWORK_EVALUATORS = {"network_plaintext", "network_review", "tls_configuration"}
