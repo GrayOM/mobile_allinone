@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
 from pathlib import Path
+from typing import Any
 
 from backend.app.core.command import (
     CommandResult,
     capture_command_for_duration,
     run_command,
+    stream_command_to_file_for_duration,
 )
 from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus, Platform
@@ -19,6 +22,73 @@ from backend.app.core.targets import (
 )
 from backend.app.devices.base import DeviceAdapter, DeviceInfo, DeviceOperation
 from backend.app.frida.target import FridaTarget
+
+
+class _UsbmuxForwards:
+    """Workbench-owned ``pymobiledevice3 usbmux forward`` processes, one per device/port.
+
+    They exist only while the server runs and are reaped on shutdown. They
+    are needed when the Python Frida binding cannot see the phone over USB
+    directly (WSL2 behind the usbmuxd tunnel) and must use host:port instead.
+    """
+
+    def __init__(self) -> None:
+        self._processes: dict[tuple[str, int, int], asyncio.subprocess.Process] = {}
+        self._lock = asyncio.Lock()
+
+    async def ensure(
+        self,
+        executable: str,
+        udid: str,
+        local_port: int,
+        remote_port: int,
+        env: dict[str, str],
+    ) -> bool:
+        key = (udid, local_port, remote_port)
+        async with self._lock:
+            current = self._processes.get(key)
+            if current is not None and current.returncode is None:
+                return True
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    executable,
+                    "usbmux",
+                    "forward",
+                    str(local_port),
+                    str(remote_port),
+                    "--serial",
+                    udid,
+                    env=env,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            except OSError:
+                return False
+            await asyncio.sleep(0.6)
+            if process.returncode is not None:
+                return False
+            self._processes[key] = process
+            return True
+
+    async def shutdown(self) -> None:
+        async with self._lock:
+            processes = list(self._processes.values())
+            self._processes.clear()
+        for process in processes:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    process.kill()
+
+
+USBMUX_FORWARDS = _UsbmuxForwards()
+_DVT_READY: set[str] = set()
+
+
+async def shutdown_ios_forwards() -> None:
+    await USBMUX_FORWARDS.shutdown()
 
 
 class IOSDeviceAdapter(DeviceAdapter):
@@ -64,6 +134,10 @@ class IOSDeviceAdapter(DeviceAdapter):
     def ssh_device_id(host: str, port: int) -> str:
         return f"ios-ssh:{host}:{port}"
 
+    @property
+    def usbmux_tunnel(self) -> bool:
+        return bool(self.settings.ios_usbmux_address)
+
     def frida_target(self, device_id: str) -> FridaTarget:
         if device_id.startswith("ios-ssh:"):
             if not self.remote_frida_target:
@@ -71,7 +145,89 @@ class IOSDeviceAdapter(DeviceAdapter):
                     "SSH iOS 단말은 실제 Frida remote endpoint를 프로필에 설정해야 합니다."
                 )
             return self.remote_frida_target
+        if self.usbmux_tunnel:
+            # The binding cannot enumerate USB devices through a TCP usbmuxd;
+            # frida-server is reached through a workbench-owned port forward.
+            return FridaTarget.remote(f"127.0.0.1:{self.settings.ios_frida_forward_port}")
         return FridaTarget.usb(device_id)
+
+    async def ensure_frida_forward(self, device_id: str) -> bool:
+        if device_id.startswith("ios-ssh:") or not self.usbmux_tunnel or not self.pymobiledevice3:
+            return not self.usbmux_tunnel
+        return await USBMUX_FORWARDS.ensure(
+            self.pymobiledevice3,
+            device_id,
+            self.settings.ios_frida_forward_port,
+            27042,
+            self._pmd_env(device_id),
+        )
+
+    def _pmd_env(self, device_id: str | None = None) -> dict[str, str]:
+        env = os.environ.copy()
+        if device_id:
+            env["PYMOBILEDEVICE3_UDID"] = device_id
+        if self.settings.ios_usbmux_address:
+            # Honoured by pymobiledevice3 and libimobiledevice alike.
+            env["USBMUXD_SOCKET_ADDRESS"] = self.settings.ios_usbmux_address
+            env["PYMOBILEDEVICE3_USBMUX"] = self.settings.ios_usbmux_address
+        return env
+
+    async def _ensure_dvt(self, device_id: str) -> DeviceOperation | None:
+        """Mount the Developer Disk Image once so DVT services are available."""
+        if device_id in _DVT_READY or not self.pymobiledevice3:
+            return None
+        listed = await self._pmd(device_id, "mounter", "list", timeout=60)
+        if listed.ok:
+            try:
+                mounted = json.loads(listed.stdout or "[]")
+            except json.JSONDecodeError:
+                mounted = []
+            if mounted:
+                _DVT_READY.add(device_id)
+                return None
+        mounted_result = await self._pmd(device_id, "mounter", "auto-mount", timeout=300)
+        if mounted_result.ok:
+            _DVT_READY.add(device_id)
+            return None
+        return self._operation(mounted_result, "Developer Disk Image를 마운트했습니다.")
+
+    async def _app_inventory(self, device_id: str) -> dict[str, dict[str, Any]]:
+        result = await self._pmd(device_id, "developer", "dvt", "applist", timeout=90)
+        if not result.ok:
+            return {}
+        try:
+            payload = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            return {}
+        return {
+            str(item.get("CFBundleIdentifier")): item
+            for item in payload
+            if isinstance(item, dict) and item.get("CFBundleIdentifier")
+        }
+
+    async def _app_pids(self, device_id: str, package_name: str) -> tuple[list[int], CommandResult]:
+        processes = await self._pmd(device_id, "developer", "dvt", "proclist", timeout=90)
+        if not processes.ok:
+            return [], processes
+        try:
+            payload = json.loads(processes.stdout or "[]")
+        except json.JSONDecodeError:
+            return [], processes
+        inventory = await self._app_inventory(device_id)
+        app = inventory.get(package_name) or {}
+        bundle_path = str(app.get("BundlePath") or app.get("ContainerBundlePath") or "")
+        executable = str(app.get("ExecutableName") or "")
+        pids = [
+            int(item["pid"])
+            for item in payload
+            if isinstance(item, dict)
+            and isinstance(item.get("pid"), int)
+            and (
+                (bundle_path and str(item.get("realAppName") or "").startswith(bundle_path))
+                or (executable and item.get("name") == executable)
+            )
+        ]
+        return pids, processes
 
     def _manual(self, message: str) -> DeviceOperation:
         return DeviceOperation(CapabilityStatus.MANUAL_REQUIRED, message)
@@ -126,10 +282,8 @@ class IOSDeviceAdapter(DeviceAdapter):
                 ["pymobiledevice3", *command],
                 error="pymobiledevice3를 찾을 수 없습니다.",
             )
-        env = os.environ.copy()
-        env["PYMOBILEDEVICE3_UDID"] = device_id
         return await run_command(
-            [self.pymobiledevice3, *command], timeout=timeout, env=env
+            [self.pymobiledevice3, *command], timeout=timeout, env=self._pmd_env(device_id)
         )
 
     async def _libimobile_info(self, udid: str) -> dict[str, str]:
@@ -192,7 +346,7 @@ class IOSDeviceAdapter(DeviceAdapter):
         if not self.pymobiledevice3:
             return []
         command = await run_command(
-            [self.pymobiledevice3, "usbmux", "list"], timeout=20
+            [self.pymobiledevice3, "usbmux", "list"], timeout=20, env=self._pmd_env()
         )
         if not command.ok:
             return []
@@ -213,6 +367,10 @@ class IOSDeviceAdapter(DeviceAdapter):
             )
             if not udid:
                 continue
+            frida = await self.frida_status(str(udid))
+            # A reachable frida-server as a system daemon only exists on a
+            # jailbroken device; without it the state stays unknown.
+            privileged = True if frida.status == CapabilityStatus.AVAILABLE else None
             devices.append(
                 DeviceInfo(
                     id=str(udid),
@@ -221,14 +379,18 @@ class IOSDeviceAdapter(DeviceAdapter):
                     os_version=str(properties.get("ProductVersion") or "unknown"),
                     architecture=str(properties.get("CPUArchitecture") or "unknown"),
                     connection=str(properties.get("ConnectionType") or "usb").lower(),
-                    privileged=None,
-                    frida_status=(await self.frida_status(str(udid))).status,
+                    privileged=privileged,
+                    frida_status=frida.status,
                     proxy_status=CapabilityStatus.NOT_CONFIGURED,
                     availability=CapabilityStatus.AVAILABLE,
                     capabilities=[
                         "packages",
-                        "launch_adapter",
+                        "install",
+                        "uninstall",
+                        "launch",
+                        "screenshot",
                         "logs",
+                        "process",
                         "port_forward",
                         "pcap",
                         "frida_status",
@@ -236,7 +398,11 @@ class IOSDeviceAdapter(DeviceAdapter):
                     adapter=self.name,
                     details={
                         "connection_backend": "pymobiledevice3",
-                        "frida_target": FridaTarget.usb(str(udid)).to_dict(),
+                        "usbmux_address": self.settings.ios_usbmux_address,
+                        "jailbreak_signal": (
+                            "frida_server_reachable" if privileged else None
+                        ),
+                        "frida_target": self.frida_target(str(udid)).to_dict(),
                         **properties,
                     },
                 )
@@ -304,13 +470,25 @@ class IOSDeviceAdapter(DeviceAdapter):
                 "-name",
                 "*.app",
             )
+        if self.pymobiledevice3:
+            result = await self._pmd(device_id, "apps", "list", timeout=60)
+            operation = self._operation(result, "iOS 설치 앱 목록을 조회했습니다.")
+            if result.ok:
+                try:
+                    payload = json.loads(result.stdout or "{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                operation.data["packages"] = sorted(
+                    bundle
+                    for bundle, info in payload.items()
+                    if isinstance(info, dict) and info.get("ApplicationType") == "User"
+                )
+                operation.output = "\n".join(operation.data["packages"])
+            return operation
         if self.ideviceinstaller:
             result = await run_command(
                 [self.ideviceinstaller, "-u", device_id, "-l"], timeout=60
             )
-            return self._operation(result, "iOS 설치 앱 목록을 조회했습니다.")
-        if self.pymobiledevice3:
-            result = await self._pmd(device_id, "apps", "list", timeout=60)
             return self._operation(result, "iOS 설치 앱 목록을 조회했습니다.")
         return DeviceOperation(
             CapabilityStatus.NOT_CONFIGURED,
@@ -318,6 +496,11 @@ class IOSDeviceAdapter(DeviceAdapter):
         )
 
     async def install_app(self, device_id: str, app_path: Path) -> DeviceOperation:
+        if self.pymobiledevice3 and not device_id.startswith("ios-ssh:"):
+            result = await self._pmd(
+                device_id, "apps", "install", str(app_path), timeout=300
+            )
+            return self._operation(result, "서명된 IPA 설치를 요청했습니다.")
         if self.ideviceinstaller and not device_id.startswith("ios-ssh:"):
             result = await run_command(
                 [self.ideviceinstaller, "-u", device_id, "-i", str(app_path)],
@@ -336,6 +519,9 @@ class IOSDeviceAdapter(DeviceAdapter):
         invalid = self._invalid_bundle_id(package_name)
         if invalid:
             return invalid
+        if self.pymobiledevice3 and not device_id.startswith("ios-ssh:"):
+            result = await self._pmd(device_id, "apps", "uninstall", package_name, timeout=120)
+            return self._operation(result, "iOS 앱 삭제를 요청했습니다.")
         if self.ideviceinstaller and not device_id.startswith("ios-ssh:"):
             result = await run_command(
                 [self.ideviceinstaller, "-u", device_id, "-U", package_name],
@@ -351,6 +537,9 @@ class IOSDeviceAdapter(DeviceAdapter):
         if device_id.startswith("ios-ssh:"):
             return await self._ssh("open", package_name)
         if self.pymobiledevice3:
+            blocked = await self._ensure_dvt(device_id)
+            if blocked is not None:
+                return blocked
             result = await self._pmd(
                 device_id,
                 "developer",
@@ -374,9 +563,55 @@ class IOSDeviceAdapter(DeviceAdapter):
             return invalid
         if device_id.startswith("ios-ssh:"):
             return await self._ssh("killall", package_name)
+        if self.pymobiledevice3:
+            blocked = await self._ensure_dvt(device_id)
+            if blocked is not None:
+                return blocked
+            pids, listed = await self._app_pids(device_id, package_name)
+            if not listed.ok:
+                return self._operation(listed, "iOS 프로세스 목록을 조회했습니다.")
+            if not pids:
+                return DeviceOperation(
+                    CapabilityStatus.AVAILABLE,
+                    "대상 앱 프로세스가 이미 실행 중이 아닙니다.",
+                    command=listed.display_command,
+                    data={"pids": []},
+                )
+            failures = []
+            for pid in pids:
+                killed = await self._pmd(device_id, "developer", "dvt", "kill", str(pid), timeout=30)
+                if not killed.ok:
+                    failures.append(f"{pid}: {killed.error or killed.stderr.strip()}")
+            if failures:
+                return DeviceOperation(
+                    CapabilityStatus.FAILED,
+                    "일부 프로세스를 종료하지 못했습니다: " + "; ".join(failures),
+                    data={"pids": pids},
+                )
+            return DeviceOperation(
+                CapabilityStatus.AVAILABLE,
+                f"대상 앱 프로세스 {len(pids)}개를 DVT로 종료했습니다.",
+                command=f"pymobiledevice3 developer dvt kill {' '.join(map(str, pids))}",
+                data={"pids": pids},
+            )
         return self._manual("비탈옥 iOS 앱 종료는 현재 수동 작업이 필요합니다.")
 
     async def screenshot(self, device_id: str, destination: Path) -> DeviceOperation:
+        if self.pymobiledevice3 and not device_id.startswith("ios-ssh:"):
+            blocked = await self._ensure_dvt(device_id)
+            if blocked is not None:
+                return blocked
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            result = await self._pmd(
+                device_id, "developer", "dvt", "screenshot", str(destination), timeout=60
+            )
+            operation = self._operation(result, "iOS 화면을 캡처했습니다.")
+            if result.ok and destination.is_file() and destination.stat().st_size > 0:
+                operation.file_path = str(destination)
+            elif result.ok:
+                operation.status = CapabilityStatus.FAILED
+                operation.message = "명령은 완료됐지만 스크린샷 파일을 찾지 못했습니다."
+            return operation
         if not self.idevicescreenshot or device_id.startswith("ios-ssh:"):
             return self._manual(
                 "idevicescreenshot와 Developer Disk Image를 설정하거나 수동 캡처하세요."
@@ -412,6 +647,24 @@ class IOSDeviceAdapter(DeviceAdapter):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_text(operation.output, encoding="utf-8")
                 operation.file_path = str(destination)
+            return operation
+        if self.pymobiledevice3:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            result = await stream_command_to_file_for_duration(
+                [self.pymobiledevice3, "syslog", "live"],
+                destination,
+                duration_seconds=max(1, min(duration_seconds, 60)),
+                max_bytes=self.settings.capture_segment_max_bytes,
+                shutdown_timeout=10,
+                env=self._pmd_env(device_id),
+            )
+            operation = self._operation(result, "iOS syslog 스트림을 수집했습니다.")
+            if result.ok and destination.is_file():
+                operation.file_path = str(destination)
+                try:
+                    operation.output = destination.read_text(encoding="utf-8", errors="replace")[-20000:]
+                except OSError:
+                    operation.output = ""
             return operation
         if not self.idevicesyslog:
             return self._manual("idevicesyslog 또는 SSH 로그 수집 도구를 설정하세요.")
@@ -457,6 +710,17 @@ class IOSDeviceAdapter(DeviceAdapter):
     async def process_info(self, device_id: str, package_name: str) -> DeviceOperation:
         if device_id.startswith("ios-ssh:"):
             return await self._ssh("ps", "aux")
+        if self.pymobiledevice3:
+            blocked = await self._ensure_dvt(device_id)
+            if blocked is not None:
+                return blocked
+            pids, listed = await self._app_pids(device_id, package_name)
+            operation = self._operation(listed, "iOS 앱 프로세스를 확인했습니다.")
+            if listed.ok:
+                operation.data["pids"] = [str(pid) for pid in pids]
+                operation.data["running"] = bool(pids)
+                operation.output = f"{package_name}: pids={pids}"
+            return operation
         return self._manual(
             "비탈옥 단말 프로세스 조회는 pymobiledevice3 DVT 터널 구성 후 수동 확인이 필요합니다."
         )
@@ -479,6 +743,12 @@ class IOSDeviceAdapter(DeviceAdapter):
             return DeviceOperation(
                 CapabilityStatus.NOT_CONFIGURED,
                 "frida-ps를 찾을 수 없습니다.",
+                data={"frida_target": target.to_dict()},
+            )
+        if not await self.ensure_frida_forward(device_id):
+            return DeviceOperation(
+                CapabilityStatus.NOT_CONFIGURED,
+                "usbmux 터널의 frida-server 포트 포워딩을 시작하지 못했습니다.",
                 data={"frida_target": target.to_dict()},
             )
         target_args = [target.command_option, target.display]

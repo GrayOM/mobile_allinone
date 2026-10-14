@@ -3919,6 +3919,7 @@ async def execute_frida_script(
         frida_target = _orchestrator(request).frida_target_for_device(
             device_adapter, run.device_id
         )
+        await _orchestrator(request).prepare_frida_transport(device_adapter, run.device_id)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     action_scope = f"execute:{script.id}"

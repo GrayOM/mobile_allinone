@@ -40,10 +40,37 @@ Claude Code 세션이 MCP로 로컬 작업대를 조작하는 방법과, WSL2에
 - Frida: 단말의 `frida-server`는 Magisk 모듈 또는 수동 push로 실행한다. Python `frida`가 USB 장치를 보려면 `usbipd-win`으로 USB를 WSL에 attach하거나, `adb forward tcp:27042 tcp:27042` 뒤 `127.0.0.1:27042` 원격 장치를 쓴다.
 - Root tar 수집·외부 저장소·Task 스냅샷 읽기는 Magisk `su`가 있으면 그대로 동작한다.
 
-### iOS 16.7.10 (palera1n)
+### iOS 16.7.10 (palera1n) — 검증 완료 경로
 
-- palera1n은 Linux/macOS에서 실행하므로 탈옥 자체는 WSL이 아니라 별도 Linux 부팅 또는 macOS에서 수행한다. 탈옥 후 OpenSSH와 Frida(Sileo/Zebra)를 설치한다.
-- WSL에서 `usbipd-win`으로 단말을 attach하고 `usbmuxd`를 띄우면 libimobiledevice·pymobiledevice3가 USB를 인식한다. 간단한 대안은 Wi-Fi SSH 프로필이다. `/api/devices/ios/profiles`에 host·username·`frida_endpoint`(예: `127.0.0.1:27042`를 `iproxy`로 포워딩)를 등록한다.
+Apple Mobile Device Service(usbmuxd)는 Windows의 127.0.0.1:27015에만 열려 있고 Windows 방화벽이 WSL→Windows 연결을 막는다. 반대로 Windows→WSL 연결은 허용되므로 **역방향 터널**로 usbmuxd를 WSL에 노출한다. 2026-10-14 iPhone 8(iOS 16.7.10, palera1n)에서 아래 순서로 단말 인식·앱 목록·DVT 프로세스·앱 실행·종료·스크린샷·syslog·Frida 16 연결까지 확인했다.
+
+```bash
+# 1) WSL: 허브 (loopback 27016 = usbmuxd 클라이언트용, 27018 = Windows agent용)
+.venv/bin/python scripts/windows/usbmuxd_reverse_tunnel.py hub --token <랜덤토큰>
+# 2) Windows Python(3.13)으로 agent 실행 (WSL에서 interop으로 띄워도 된다)
+py -3.13 \\wsl$\Ubuntu\home\...\scripts\windows\usbmuxd_reverse_tunnel.py agent --hub 127.0.0.1:27018 --token <같은토큰>
+# 3) WSL 확인
+pymobiledevice3 usbmux list --usbmux 127.0.0.1:27016
+pymobiledevice3 mounter auto-mount --usbmux 127.0.0.1:27016   # DVT(스크린샷·프로세스·실행)용 Developer Disk Image, 1회
+```
+
+작업대 설정(`config.yaml` 또는 `.env`):
+
+```yaml
+ios_usbmux_address: 127.0.0.1:27016      # MSW_IOS_USBMUX_ADDRESS
+ios_frida_forward_port: 27042            # MSW_IOS_FRIDA_FORWARD_PORT
+tools:
+  pymobiledevice3: /path/.venv/bin/pymobiledevice3
+  frida_ps: /path/.venv/bin/frida-ps
+```
+
+- 작업대는 모든 pymobiledevice3 호출에 `USBMUXD_SOCKET_ADDRESS`를 넣고, Frida는 `usbmux forward 27042`를 작업대가 직접 띄워 `127.0.0.1:27042` 원격 대상으로 연결한다(서버 종료 시 정리).
+- 단말의 frida-server가 16.x이면 WSL의 `frida`/`frida-tools`도 16.x로 맞춘다(`uv pip install "frida==16.2.1" "frida-tools<13"`). Frida 17 런타임 호환 shim은 16에서도 동작한다.
+- agent의 `--hub`는 반드시 `127.0.0.1`을 쓴다. `localhost`는 Windows에서 IPv6를 먼저 시도해 서비스 포트 연결이 수 초 지연되고 iOS가 StartService 포트를 닫아 `Connect` 실패(Result 3)가 난다.
+- `privileged`는 frida-server(시스템 데몬)가 응답할 때만 `True`로 표시한다(`jailbreak_signal=frida_server_reachable`). SSH(22)가 열려 있어도 자격 증명은 저장하지 않는다.
+
+
+- palera1n 탈옥 자체는 Linux/macOS에서 수행한다. 탈옥 후 OpenSSH와 Frida(Sileo/Zebra)를 설치한다. `usbipd-win`으로 USB를 WSL에 직접 붙이는 방법도 있지만 관리자 권한과 커널 usbmuxd가 필요해 위 역방향 터널을 기본 경로로 쓴다.
 - IPA 설치·재서명은 zsign으로 하고 실제 서명 자료는 `.env`에서만 읽는다.
 
 ## 4. 아직 실단말에서 검증되지 않은 것

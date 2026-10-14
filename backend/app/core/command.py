@@ -418,6 +418,7 @@ async def stream_command_to_file_for_duration(
     duration_seconds: int,
     max_bytes: int,
     shutdown_timeout: int = 10,
+    env: Mapping[str, str] | None = None,
 ) -> CommandResult:
     """Stream bounded subprocess stdout to a file and always reap its process tree."""
     command = [str(part) for part in args]
@@ -459,6 +460,7 @@ async def stream_command_to_file_for_duration(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=dict(env) if env is not None else None,
             **subprocess_group_options(),
         )
         assert process.stdout is not None and process.stderr is not None

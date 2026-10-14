@@ -44,6 +44,7 @@ from backend.app.database.models import (
 )
 from backend.app.database.session import SessionLocal
 from backend.app.devices import AndroidDeviceAdapter, IOSDeviceAdapter, MockDeviceAdapter
+from backend.app.devices.ios import shutdown_ios_forwards
 from backend.app.evidence import EvidencePolicyEngine, EvidenceService
 from backend.app.frida import (
     FridaManager,
@@ -299,6 +300,7 @@ class DiagnosticOrchestrator:
                 return_exceptions=True,
             )
         await self.frida_sessions.shutdown()
+        await shutdown_ios_forwards()
 
     async def _checkpoint(self, run_id: str) -> None:
         if run_id in self._stop_requested:
@@ -418,6 +420,13 @@ class DiagnosticOrchestrator:
         if callable(resolver):
             return resolver(device_id)
         return FridaTarget.usb(device_id)
+
+    @staticmethod
+    async def prepare_frida_transport(device, device_id: str) -> None:
+        """Start adapter-owned transport (e.g. usbmux port forward) before a session."""
+        ensure = getattr(device, "ensure_frida_forward", None)
+        if callable(ensure) and not await ensure(device_id):
+            raise ValueError("Frida 전송 경로(usbmux 포워딩)를 준비하지 못했습니다.")
 
     def ui_driver_for_run(
         self, run: DiagnosticRun, device, package_name: str
@@ -2047,6 +2056,7 @@ class DiagnosticOrchestrator:
                             frida_target = self.frida_target_for_device(
                                 device, run.device_id
                             )
+                            await self.prepare_frida_transport(device, run.device_id)
                         except ValueError as exc:
                             record_check("frida_session", False, str(exc))
                             raise DiagnosticManualRequired(str(exc)) from exc
