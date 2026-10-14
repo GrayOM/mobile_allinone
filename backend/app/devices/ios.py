@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -233,14 +234,30 @@ class IOSDeviceAdapter(DeviceAdapter):
         return DeviceOperation(CapabilityStatus.MANUAL_REQUIRED, message)
 
     @staticmethod
-    def _operation(result: CommandResult, success: str) -> DeviceOperation:
+    def _failure_summary(result: CommandResult) -> str:
+        """Reduce a pymobiledevice3 traceback to its final error line."""
+        text = (result.stderr or result.stdout or "").strip()
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        cleaned = [
+            line
+            for line in lines
+            if not line.startswith(("│", "╭", "╰", "❱"))
+        ]
+        for line in reversed(cleaned):
+            if re.match(r"^[A-Za-z]\w*(Error|Exception)\b", line):
+                return line[:600]
+        for line in reversed(cleaned):
+            if " ERROR " in line or line.startswith("ERROR"):
+                return line[:600]
+        return (result.error or (cleaned[-1] if cleaned else "") or "iOS 도구 실행 실패")[:600]
+
+    @classmethod
+    def _operation(cls, result: CommandResult, success: str) -> DeviceOperation:
         return DeviceOperation(
             result.status,
-            success
-            if result.ok
-            else result.error or result.stderr.strip() or "iOS 도구 실행 실패",
+            success if result.ok else cls._failure_summary(result),
             command=result.display_command,
-            output=result.stdout or result.stderr,
+            output=(result.stdout or result.stderr)[-20000:],
         )
 
     async def _ssh(self, *command: str) -> DeviceOperation:

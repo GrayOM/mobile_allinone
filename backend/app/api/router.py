@@ -2857,9 +2857,14 @@ async def create_run(
     pause_for_security_bypass = options.get("pause_for_security_bypass", False)
     if not isinstance(pause_for_security_bypass, bool):
         raise HTTPException(422, "pause_for_security_bypass는 boolean이어야 합니다.")
+    reuse_installed_app = options.get("reuse_installed_app", False)
+    if not isinstance(reuse_installed_app, bool):
+        raise HTTPException(422, "reuse_installed_app는 boolean이어야 합니다.")
     use_resigned_ipa = options.get("use_resigned_ipa", False)
     if not isinstance(use_resigned_ipa, bool):
         raise HTTPException(422, "use_resigned_ipa는 boolean이어야 합니다.")
+    if use_resigned_ipa and reuse_installed_app:
+        raise HTTPException(422, "재서명 IPA 설치와 설치된 앱 재사용은 함께 선택할 수 없습니다.")
     if use_resigned_ipa:
         if app is None or app_platform != "ios":
             raise HTTPException(422, "재서명 IPA 설치는 iOS 앱 Run에서만 선택할 수 있습니다.")
@@ -2879,6 +2884,7 @@ async def create_run(
     options.update(
         {
             "use_resigned_ipa": use_resigned_ipa,
+            "reuse_installed_app": reuse_installed_app,
             "assessment_profile": project.assessment_profile,
             "frida_script_ids": selected_script_ids,
             "auto_select_frida": payload.auto_select_frida,

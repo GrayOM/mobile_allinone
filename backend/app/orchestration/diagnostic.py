@@ -1818,15 +1818,47 @@ class DiagnosticOrchestrator:
 
                 if app:
                     await self._stage(db, run, "install", 22, "대상 앱을 단말에 설치합니다.")
-                    install_path = Path(app.stored_path)
-                    if bool(run.options.get("use_resigned_ipa")):
-                        install_path = await asyncio.to_thread(resolved_resigned_ipa, app)
-                    install = await device.install_app(run.device_id, install_path)
-                    await self._record_operation(db, run.id, "앱 설치", install)
-                    if install.status == CapabilityStatus.MANUAL_REQUIRED:
-                        raise DiagnosticManualRequired(install.message)
-                    if install.status != CapabilityStatus.AVAILABLE:
-                        raise RuntimeError(install.message)
+                    reused_installed = False
+                    if bool(run.options.get("reuse_installed_app")):
+                        # Store/TestFlight builds cannot be re-installed from a
+                        # decrypted IPA; verify the same bundle is present instead.
+                        installed = await device.list_packages(run.device_id)
+                        present = package_name in (installed.data.get("packages") or [])
+                        await self._record_operation(
+                            db,
+                            run.id,
+                            (
+                                "설치된 앱 재사용 확인"
+                                if present
+                                else "설치된 앱 재사용 확인 실패"
+                            ),
+                            installed,
+                        )
+                        if present:
+                            reused_installed = True
+                            options = dict(run.options)
+                            options["install"] = {
+                                "status": "reused_installed",
+                                "package_name": package_name,
+                                "upload_sha256": app.sha256,
+                                "note": (
+                                    "업로드 파일을 설치하지 않고 단말에 이미 설치된 동일 "
+                                    "식별자의 앱을 사용했습니다. 업로드본과 단말 설치본의 "
+                                    "동일성은 별도 확인이 필요합니다."
+                                ),
+                            }
+                            run.options = options
+                            db.commit()
+                    if not reused_installed:
+                        install_path = Path(app.stored_path)
+                        if bool(run.options.get("use_resigned_ipa")):
+                            install_path = await asyncio.to_thread(resolved_resigned_ipa, app)
+                        install = await device.install_app(run.device_id, install_path)
+                        await self._record_operation(db, run.id, "앱 설치", install)
+                        if install.status == CapabilityStatus.MANUAL_REQUIRED:
+                            raise DiagnosticManualRequired(install.message)
+                        if install.status != CapabilityStatus.AVAILABLE:
+                            raise RuntimeError(install.message)
 
                 if bool(run.options.get("pause_for_security_bypass")):
                     run.current_stage = "security_bypass_preparation"
