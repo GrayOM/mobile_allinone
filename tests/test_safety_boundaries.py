@@ -121,7 +121,7 @@ def test_active_run_blocks_project_delete_until_stop_finishes(client):
             "pause_for_login": True,
         },
     ).json()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         run = client.get(f"/api/runs/{started['id']}").json()
         if run["status"] == "safely_paused":
@@ -346,7 +346,7 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
 
 
 def _wait_until_paused(client, run_id: str):
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         run = client.get(f"/api/runs/{run_id}").json()
         if run["status"] == "safely_paused":

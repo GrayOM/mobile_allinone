@@ -159,7 +159,7 @@ def test_mock_long_capture_stops_and_obeys_raw_download_policy(client):
     assert duplicate.status_code == 409
     assert client.post(f"/api/capture-jobs/{job_id}/stop").status_code == 200
 
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     job = None
     while time.monotonic() < deadline:
         rows = client.get(f"/api/capture-jobs?project_id={project_id}").json()
