@@ -121,12 +121,7 @@ def test_active_run_blocks_project_delete_until_stop_finishes(client):
             "pause_for_login": True,
         },
     ).json()
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        run = client.get(f"/api/runs/{started['id']}").json()
-        if run["status"] == "safely_paused":
-            break
-        time.sleep(0.05)
+    run = _wait_until_paused(client, started["id"])
     assert run["status"] == "safely_paused"
     assert client.delete(f"/api/projects/{demo['project']['id']}").status_code == 409
     stopped = client.post(f"/api/runs/{started['id']}/stop")
@@ -347,12 +342,19 @@ def test_explicit_sqlite_migration_backs_up_and_classifies_legacy_mock(tmp_path:
 
 def _wait_until_paused(client, run_id: str):
     deadline = time.monotonic() + 30
+    run: dict = {}
     while time.monotonic() < deadline:
         run = client.get(f"/api/runs/{run_id}").json()
         if run["status"] == "safely_paused":
             return run
         time.sleep(0.05)
-    raise AssertionError("진단이 일시정지 상태에 도달하지 못했습니다.")
+    options = run.get("options") or {}
+    raise AssertionError(
+        "진단이 일시정지 상태에 도달하지 못했습니다: "
+        f"status={run.get('status')} stage={run.get('current_stage')} "
+        f"progress={run.get('progress')} error={run.get('error')} "
+        f"checks={options.get('completion_checks')} gaps={options.get('quality_gaps')}"
+    )
 
 
 def test_run_rejects_app_device_and_frida_platform_mismatch(client):
