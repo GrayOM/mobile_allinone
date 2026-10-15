@@ -539,10 +539,14 @@ class IOSDeviceAdapter(DeviceAdapter):
                     payload = json.loads(result.stdout or "{}")
                 except json.JSONDecodeError:
                     payload = {}
+                # TrollStore and other sideloaders register apps as "System";
+                # keep every non-Apple bundle rather than only "User" ones.
                 operation.data["packages"] = sorted(
                     bundle
                     for bundle, info in payload.items()
-                    if isinstance(info, dict) and info.get("ApplicationType") == "User"
+                    if isinstance(info, dict)
+                    and info.get("ApplicationType") in {"User", "System"}
+                    and not str(bundle).startswith("com.apple.")
                 )
                 operation.output = "\n".join(operation.data["packages"])
             return operation
@@ -611,9 +615,20 @@ class IOSDeviceAdapter(DeviceAdapter):
             )
             operation = self._operation(result, "iOS 앱 실행을 요청했습니다.")
             if not result.ok:
+                # Sideloaded builds that the launch service refuses can still be
+                # started by the user from the home screen; adopt that process.
+                pids, listed = await self._app_pids(device_id, package_name)
+                if listed.ok and pids:
+                    return DeviceOperation(
+                        CapabilityStatus.AVAILABLE,
+                        f"DVT 실행 요청은 거부됐지만 대상 앱이 이미 실행 중(pid {pids})이어서 해당 프로세스를 사용합니다.",
+                        command=result.display_command,
+                        output=f"main_executable_pids={pids}",
+                        data={"pids": [str(pid) for pid in pids], "running": True, "adopted_running_process": True},
+                    )
                 operation.message += (
                     " iOS 17 이상은 pymobiledevice3 터널과 Developer Disk Image가 "
-                    "필요할 수 있습니다."
+                    "필요할 수 있습니다. 사이드로드 앱은 홈 화면에서 직접 실행한 뒤 다시 시도할 수 있습니다."
                 )
             return operation
         return self._manual("pymobiledevice3 또는 SSH 실행 환경을 설정하세요.")
@@ -711,14 +726,27 @@ class IOSDeviceAdapter(DeviceAdapter):
             return operation
         if self.pymobiledevice3:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            result = await stream_command_to_file_for_duration(
-                [self.pymobiledevice3, "syslog", "live"],
-                destination,
-                duration_seconds=max(1, min(duration_seconds, 60)),
-                max_bytes=self.settings.capture_segment_max_bytes,
-                shutdown_timeout=10,
-                env=self._pmd_env(device_id),
-            )
+            window = max(1, min(duration_seconds, 60))
+            try:
+                # Hard outer bound: a usbmux tunnel reset mid-stream must not
+                # leave the Run waiting on a dead syslog pipe.
+                result = await asyncio.wait_for(
+                    stream_command_to_file_for_duration(
+                        [self.pymobiledevice3, "syslog", "live"],
+                        destination,
+                        duration_seconds=window,
+                        max_bytes=self.settings.capture_segment_max_bytes,
+                        shutdown_timeout=10,
+                        env=self._pmd_env(device_id),
+                    ),
+                    timeout=window + 45,
+                )
+            except asyncio.TimeoutError:
+                return DeviceOperation(
+                    CapabilityStatus.FAILED,
+                    "iOS syslog 스트림이 제한시간 안에 종료되지 않아 중단했습니다(usbmux 연결 재설정 가능성).",
+                    command=f"{self.pymobiledevice3} syslog live",
+                )
             operation = self._operation(result, "iOS syslog 스트림을 수집했습니다.")
             if result.ok and destination.is_file():
                 operation.file_path = str(destination)
