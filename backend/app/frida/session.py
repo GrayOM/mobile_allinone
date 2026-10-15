@@ -498,7 +498,22 @@ class FridaSessionManager:
                 active.spawned_pid = active.device.spawn([target])
                 active.session = active.device.attach(active.spawned_pid)
             else:
-                active.session = active.device.attach(target)
+                # Frida attaches by process name or pid; iOS targets are bundle
+                # identifiers, so resolve the running app to its pid first.
+                attach_target: str | int = target
+                enumerate_apps = getattr(active.device, "enumerate_applications", None)
+                if callable(enumerate_apps):
+                    try:
+                        for application in enumerate_apps():
+                            if (
+                                getattr(application, "identifier", None) == target
+                                and int(getattr(application, "pid", 0) or 0) > 0
+                            ):
+                                attach_target = int(application.pid)
+                                break
+                    except Exception:  # pragma: no cover - device enumeration is best effort
+                        attach_target = target
+                active.session = active.device.attach(attach_target)
             if hasattr(active.session, "on"):
                 def detached(reason, crash=None) -> None:
                     active.detached_reason = str(reason)

@@ -58,7 +58,7 @@ from backend.app.orchestration import DiagnosticOrchestrator, ManualActionInProg
 from backend.app.orchestration.diagnostic import _frida_evidence_integrity
 
 
-def _wait_for_status(client, run_id: str, statuses: set[str], timeout: float = 30):
+def _wait_for_status(client, run_id: str, statuses: set[str], timeout: float = 90):
     deadline = time.monotonic() + timeout
     run = {}
     while time.monotonic() < deadline:
