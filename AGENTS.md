@@ -609,11 +609,13 @@ npm audit --audit-level=high
 
 ## 12. 다음 확장 우선순위
 
-사용자가 별도 우선순위를 주지 않으면 다음 순서가 합리적이다.
+사용자가 별도 우선순위를 주지 않으면 `docs/NEXT_SESSION.md`의 순서를 따른다(2026-10-15 기준).
 
-1. 실제 Android 단말에서 외부 저장소·Clipboard 귀속·백그라운드 화면 보호 관찰 검증과 iOS 대응(AFC/HouseArrest·Keychain·백그라운드 스냅샷)
-2. 실제 Android/iOS 단말 매트릭스 검증
-3. 실제 제품 버전에 고정된 Burp/Fiddler Extension/API Adapter가 필요한 고객 환경 검증
+1. 실제 네트워크 증적 확보(폰 프록시 → Windows측 Burp/mitmproxy, WSL NAT 우회)
+2. iOS 동적 자동화 보강(수동 조작 가이드, SSH 프로필 저장소 수집, 백그라운드 스냅샷)
+3. cyberone.ipa(자체 OJT 앱) 실단말 진단과 벤더 DOCX
+4. Android 14(Magisk) 실단말 검증(외부 저장소·Clipboard·백그라운드 화면·Frida 17 브리지)
+5. Run 시작 시 내장 우회 스크립트 포괄 승인 옵션(미구현, 정책 플럼빙으로 한정)
 
 ## 13. 참고 문서
 
@@ -622,6 +624,7 @@ npm audit --audit-level=high
 - `docs/DOMESTIC_ASSESSMENT.md`: 국내 2종 진단 프로필·증적 판정 정책·예외 검사·범위 제외
 - `docs/VALIDATION_LAB.md`: 고객 앱 없이 쓰는 공개 연습 앱과 검증 순서
 - `docs/CLAUDE_CODE_OPERATION.md`: Claude Code MCP 조작 흐름과 WSL2 실단말(Android 14·iOS 16.7.10) 연결
+- `docs/NEXT_SESSION.md`: 새 세션 시작 절차(터널·서버·설정), 검증된 상태, 다음 할 일, 함정
 - `THIRD_PARTY_NOTICES.md`: 제3자 고지
 - `.env.example`, `config.example.yaml`: 설정 예시
 
