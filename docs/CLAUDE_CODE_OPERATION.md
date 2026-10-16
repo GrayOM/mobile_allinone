@@ -20,13 +20,17 @@ Claude Code 세션이 MCP로 로컬 작업대를 조작하는 방법과, WSL2에
 
 ```text
 프로젝트 생성 → 앱 업로드(정적 분석 자동) → /apps/{id}/analysis/overview 로 보안통제 신호 확인
-→ 단말 확인(/devices) → Run 시작(pause_for_login, pause_for_security_bypass 등 옵션)
-→ msw_wait_run 으로 safely_paused 대기 → 필요한 수동 작업·승인(/approvals → 실행 API)
+→ 단말 확인(/devices) → Run 시작(interactive_session, pause_for_security_bypass 등 옵션)
+→ msw_wait_run 으로 safely_paused 대기 → 앱을 직접 재현하고 /runs/{id}/checkpoints를 필요한 만큼 반복
+→ 필요한 승인 작업(/approvals → 실행 API)
 → resume → 종료 후 /coverage?run_id=…&scope=run 원장 검토 → 증적 다운로드·판정 기록
 → 취약 확정 항목만 /runs/{id}/report/docx 로 DOCX 생성
 ```
 
 - 고위험 작업(우회 스크립트 Spawn, 중위험 UI 동작, Live GET/HEAD 재현, 컴포넌트 호출)은 `safely_paused` 상태에서 `/api/approvals`로 5분 만료 1회 토큰을 받은 뒤 실행 API에 넘긴다. 승인 요청 전에 Claude Code는 대상·코드 SHA-256·범위를 사용자에게 보여 주고 확인을 받는다.
+- iOS 설치본을 재사용하는 단말 진단은 `proxy_adapter=none`, `options.reuse_installed_app=true`, `interactive_session=true`, `network_capture_required=false`로 시작할 수 있다. 이 모드는 네트워크 검증을 성공한 것으로 위장하지 않고 Run 범위에서 명시적으로 제외한다. 설치본의 Bundle ID와 버전을 대조하며 버전이 다르면 별도 허용 없이는 중단한다.
+- 대화형 Session은 `safely_paused`의 `manual_interaction` 단계에서 `POST /api/runs/{id}/checkpoints`에 `label`, `note`, `control_ids`를 보내 화면·대상 프로세스·단말 로그·현재 Frida 상태를 하나의 체크포인트로 고정한다. 여러 번 호출할 수 있고, 재개 후에도 Run 원장에 보존된다.
+- Run의 `completed`는 선택한 증적 수집 범위가 완료됐다는 뜻이다. 국내 기준 전체 판정은 `options.assessment_status`와 `assessment_open_items`로 별도 표시하며, 한 Run에서 전 항목 판정까지 강제할 때만 `assessment_completion_required=true`를 쓴다.
 - ALL 프로필에서는 `POST /api/findings`로 Run에 묶인 발견항목을 만들고, 단말에서 직접 찍은 화면은 `POST /api/findings/{id}/evidence`로 첨부한 뒤 `POST /api/findings/{id}/record`로 확정한다. 국내 기준 항목에서 만든 발견항목은 이 경로로 판정할 수 없다(409).
 - 판정은 `/api/assessment-controls/{id}/record`로 남긴다. `confirmed`는 같은 Run의 필수 증적 ID가 있어야 하며 정적 신호나 AI 추천만으로는 422로 거부된다.
 - NVIDIA 추천(`/apps/{id}/ai/triage`, `/runs/{id}/ai/evidence-priority`)은 `needs_review` 후보일 뿐이다. 최종 판정은 Claude Code가 증적을 직접 확인한 뒤 사용자와 함께 기록한다.

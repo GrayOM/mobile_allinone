@@ -548,6 +548,26 @@ class IOSDeviceAdapter(DeviceAdapter):
                     and info.get("ApplicationType") in {"User", "System"}
                     and not str(bundle).startswith("com.apple.")
                 )
+                operation.data["package_metadata"] = {
+                    str(bundle): {
+                        "app_name": str(
+                            info.get("CFBundleDisplayName")
+                            or info.get("CFBundleName")
+                            or bundle
+                        ),
+                        "version": str(
+                            info.get("CFBundleShortVersionString")
+                            or info.get("CFBundleVersion")
+                            or ""
+                        ),
+                        "build": str(info.get("CFBundleVersion") or ""),
+                        "executable": str(info.get("CFBundleExecutable") or ""),
+                        "application_type": str(info.get("ApplicationType") or ""),
+                    }
+                    for bundle, info in payload.items()
+                    if isinstance(info, dict)
+                    and bundle in operation.data["packages"]
+                }
                 operation.output = "\n".join(operation.data["packages"])
             return operation
         if self.ideviceinstaller:

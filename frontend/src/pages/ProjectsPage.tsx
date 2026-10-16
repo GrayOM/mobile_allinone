@@ -1,6 +1,12 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, post, remove, upload } from "../api";
-import type { AnalysisOverview, AppArtifact, Project } from "../types";
+import type {
+  AnalysisOverview,
+  AppArtifact,
+  Device,
+  Project,
+  SecuritySolutionAnalysis,
+} from "../types";
 import { AssessmentScopePanel } from "../components/AssessmentScopePanel";
 import { IpaResignPanel } from "../components/IpaResignPanel";
 import {
@@ -29,6 +35,12 @@ export default function ProjectsPage() {
   const [selectedApp, setSelectedApp] = useState<AppArtifact | null>(null);
   const [overview, setOverview] = useState<AnalysisOverview | null>(null);
   const [reanalyzing, setReanalyzing] = useState(false);
+  const [registerInstalledOpen, setRegisterInstalledOpen] = useState(false);
+  const [registerDevices, setRegisterDevices] = useState<Device[]>([]);
+  const [registerDeviceId, setRegisterDeviceId] = useState("");
+  const [installedPackages, setInstalledPackages] = useState<string[]>([]);
+  const [installedPackage, setInstalledPackage] = useState("");
+  const [registeringInstalled, setRegisteringInstalled] = useState(false);
   const [error, setError] = useState("");
 
   const project = useMemo(
@@ -115,6 +127,69 @@ export default function ProjectsPage() {
     } catch (reason) {
       setUploading(0);
       setError(reason instanceof Error ? reason.message : "업로드 실패");
+    }
+  }
+
+  async function openInstalledRegistry() {
+    setRegisterInstalledOpen(true);
+    setInstalledPackages([]);
+    setInstalledPackage("");
+    setError("");
+    try {
+      const result = await api<{ devices: Device[] }>("/devices");
+      const available = result.devices.filter(
+        (item) => item.adapter !== "mock" && item.availability === "available",
+      );
+      setRegisterDevices(available);
+      setRegisterDeviceId(available[0]?.id ?? "");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "단말 목록을 불러오지 못했습니다.");
+    }
+  }
+
+  async function loadInstalledPackages() {
+    const device = registerDevices.find((item) => item.id === registerDeviceId);
+    if (!device) return;
+    setRegisteringInstalled(true);
+    setError("");
+    try {
+      const result = await post<{ data?: { packages?: string[] } }>("/devices/action", {
+        adapter: device.adapter,
+        device_id: device.id,
+        action: "list_packages",
+      });
+      const packages = [...(result.data?.packages ?? [])].sort();
+      setInstalledPackages(packages);
+      setInstalledPackage(packages[0] ?? "");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "설치 앱 목록을 읽지 못했습니다.");
+    } finally {
+      setRegisteringInstalled(false);
+    }
+  }
+
+  async function registerInstalledApp() {
+    const device = registerDevices.find((item) => item.id === registerDeviceId);
+    if (!project || !device || !installedPackage) return;
+    setRegisteringInstalled(true);
+    setError("");
+    try {
+      const created = await post<AppArtifact>(
+        `/projects/${project.id}/apps/register-installed`,
+        {
+          device_adapter: device.adapter,
+          device_id: device.id,
+          package_name: installedPackage,
+        },
+      );
+      setApps((items) => [created, ...items]);
+      setSelectedApp(created);
+      localStorage.setItem("msw.app", created.id);
+      setRegisterInstalledOpen(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "설치 앱 등록에 실패했습니다.");
+    } finally {
+      setRegisteringInstalled(false);
     }
   }
 
@@ -310,6 +385,52 @@ export default function ProjectsPage() {
                 {uploading > 0 && <i style={{ width: `${uploading}%` }} />}
               </label>
 
+              {project.run_mode === "live" && (
+                <section className="installed-registry">
+                  <div>
+                    <span className="eyebrow">DEVICE APP REGISTRY</span>
+                    <strong>이미 설치된 앱으로 진단</strong>
+                    <small>Store·TestFlight·TrollStore 앱은 IPA 재설치 없이 Bundle ID를 Run 대상에 고정합니다.</small>
+                  </div>
+                  <button type="button" className="button button--quiet" onClick={() => void openInstalledRegistry()}>
+                    단말 앱 선택
+                  </button>
+                </section>
+              )}
+
+              {registerInstalledOpen && (
+                <section className="installed-registry__sheet">
+                  <div className="form-grid">
+                    <div className="field">
+                      <label htmlFor="installed-device">연결 단말</label>
+                      <select id="installed-device" value={registerDeviceId} onChange={(event) => {
+                        setRegisterDeviceId(event.target.value);
+                        setInstalledPackages([]);
+                        setInstalledPackage("");
+                      }}>
+                        {registerDevices.map((device) => <option key={device.id} value={device.id}>{device.model} · {device.os_version}</option>)}
+                      </select>
+                    </div>
+                    <div className="field installed-registry__load">
+                      <button type="button" className="button button--primary" disabled={!registerDeviceId || registeringInstalled} onClick={() => void loadInstalledPackages()}>
+                        {registeringInstalled ? "조회 중…" : "설치 앱 조회"}
+                      </button>
+                    </div>
+                    <div className="field field--wide">
+                      <label htmlFor="installed-package">대상 Bundle ID / Package</label>
+                      <select id="installed-package" value={installedPackage} onChange={(event) => setInstalledPackage(event.target.value)} disabled={!installedPackages.length}>
+                        {!installedPackages.length && <option value="">먼저 설치 앱을 조회하세요</option>}
+                        {installedPackages.map((item) => <option key={item} value={item}>{item}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="form-actions">
+                    <button type="button" className="button button--quiet" onClick={() => setRegisterInstalledOpen(false)}>취소</button>
+                    <button type="button" className="button button--signal" disabled={!installedPackage || registeringInstalled} onClick={() => void registerInstalledApp()}>설치 앱 등록</button>
+                  </div>
+                </section>
+              )}
+
               <div className="artifact-grid">
                 <div className="artifact-list">
                   <div className="panel-label">등록 앱 {apps.length}</div>
@@ -327,7 +448,7 @@ export default function ProjectsPage() {
                       </span>
                       <div>
                         <strong>{app.app_name || app.original_name}</strong>
-                        <small>{app.package_name || "패키지 미확인"} · {formatBytes(app.size_bytes)}</small>
+                        <small>{app.package_name || "패키지 미확인"} · {app.analysis_result.source === "device_installed" ? "단말 설치본" : formatBytes(app.size_bytes)}</small>
                       </div>
                       <StatusChip value={app.analysis_status} />
                     </button>
@@ -458,6 +579,7 @@ function AnalysisSummary({
           <a href="/coverage">통제 원장 열기 →</a>
         </div>
       </div>
+      <SecuritySolutionPanel analysis={overview?.security_solution_analysis ?? null} />
       <div className="summary-block">
         <span>상위 권한</span>
         <div className="tag-cloud">
@@ -477,5 +599,107 @@ function AnalysisSummary({
         <pre className="code-view">{JSON.stringify(app.analysis_result, null, 2)}</pre>
       </details>
     </div>
+  );
+}
+
+const CONTROL_AREA_LABELS: Record<string, string> = {
+  tamper_detection: "변조 탐지",
+  root_jailbreak_detection: "루팅·탈옥 탐지",
+  hook_debug_detection: "후킹·디버거 탐지",
+  code_obfuscation: "코드 난독화",
+  reverse_engineering_resistance: "역공학 저항",
+  sensitive_input_protection: "민감 입력 보호",
+  screen_input_isolation: "입력 화면 격리",
+  malicious_app_detection: "악성앱 탐지",
+  device_risk_response: "단말 위험 대응",
+  runtime_threat_detection: "런타임 위협 탐지",
+  device_risk_telemetry: "위협 원격 측정",
+  app_integrity_attestation: "앱 무결성 증명",
+  device_integrity_attestation: "단말 무결성 증명",
+};
+
+function SecuritySolutionPanel({ analysis }: { analysis: SecuritySolutionAnalysis | null }) {
+  if (!analysis) {
+    return (
+      <section className="solution-analyzer solution-analyzer--loading">
+        <span className="eyebrow">MOBILE DEFENSE FINGERPRINT</span>
+        <p>보안솔루션 분석 결과를 읽는 중입니다.</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="solution-analyzer">
+      <header className="solution-analyzer__head">
+        <div>
+          <span className="eyebrow">MOBILE DEFENSE FINGERPRINT</span>
+          <h4>앱에 포함된 보호 계층</h4>
+          <p>패키지·프레임워크·네이티브 라이브러리·제품 문자열을 교차 확인합니다.</p>
+        </div>
+        <div className="solution-analyzer__catalog" aria-label="보안솔루션 시그니처 카탈로그">
+          <strong>{analysis.catalog_signature_count}</strong>
+          <span>known signatures</span>
+          <code>{analysis.catalog_version ?? "legacy"}</code>
+        </div>
+      </header>
+
+      {analysis.solutions.length ? (
+        <div className="solution-stack">
+          {analysis.solutions.map((solution, index) => (
+            <article className="solution-card" key={solution.signature_id}>
+              <div className="solution-card__index">{String(index + 1).padStart(2, "0")}</div>
+              <div className="solution-card__body">
+                <div className="solution-card__title">
+                  <div>
+                    <small>{solution.vendor}</small>
+                    <strong>{solution.product}</strong>
+                  </div>
+                  <span className={`solution-confidence solution-confidence--${solution.confidence_label}`}>
+                    {Math.round(solution.confidence * 100)}% · {solution.confidence_label}
+                  </span>
+                </div>
+                <div className="solution-card__meter" aria-label={`정적 식별 신뢰도 ${Math.round(solution.confidence * 100)}%`}>
+                  <i style={{ width: `${Math.round(solution.confidence * 100)}%` }} />
+                </div>
+                <div className="solution-card__meta">
+                  <span>{solution.category_label}</span>
+                  <span>강한 지표 {solution.strong_indicator_count}</span>
+                  <span>교차 근거 {solution.evidence_types.length}종</span>
+                  <span>동적 검증 필요</span>
+                </div>
+                <div className="solution-card__controls">
+                  {solution.expected_control_areas.map((area) => (
+                    <span key={area}>{CONTROL_AREA_LABELS[area] ?? area}</span>
+                  ))}
+                </div>
+                <details className="solution-card__evidence">
+                  <summary>식별 근거 {solution.evidence.length}건 보기</summary>
+                  <div>
+                    {solution.evidence.map((evidence, evidenceIndex) => (
+                      <div key={`${evidence.indicator}-${evidence.location}-${evidenceIndex}`}>
+                        <span className={`evidence-strength evidence-strength--${evidence.strength}`} />
+                        <strong>{evidence.indicator}</strong>
+                        <small>{evidence.kind_label}</small>
+                        <code>{evidence.location}</code>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="solution-analyzer__empty">
+          <strong>알려진 솔루션 지표를 식별하지 못했습니다</strong>
+          <p>미적용을 의미하지 않습니다. 패킹·난독화 또는 카탈로그에 없는 제품은 고객 자료와 실단말 동작으로 확인하세요.</p>
+        </div>
+      )}
+
+      <footer className="solution-analyzer__limits">
+        <strong>STATIC IDENTIFICATION ONLY</strong>
+        <span>제품 활성화·정책·보호 성공·우회 가능성은 자동 판정하지 않습니다.</span>
+      </footer>
+    </section>
   );
 }

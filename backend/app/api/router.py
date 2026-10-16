@@ -75,6 +75,7 @@ from backend.app.analyzers import (
     StaticAnalyzer,
     replace_analysis_records,
 )
+from backend.app.analyzers.security_solutions import security_solution_summary
 from backend.app.catalog import (
     CATALOG_SOURCE,
     MASTG_CONTROLS,
@@ -169,6 +170,7 @@ from backend.app.orchestration.resources import allocate_available_port
 from backend.app.ai.storage import save_ai_raw_response
 from backend.app.proxy import (
     BurpProxyAdapter,
+    DisabledProxyAdapter,
     FiddlerProxyAdapter,
     MitmProxyAdapter,
     MockProxyAdapter,
@@ -285,7 +287,14 @@ def _normalize_control_validation_options(
     if not selected_device_id:
         raise HTTPException(422, "통제 검증에는 승인된 테스트 단말 식별값이 필요합니다.")
     try:
-        return normalize_control_validation_request(raw, run_mode, selected_device_id)
+        return normalize_control_validation_request(
+            raw,
+            run_mode,
+            selected_device_id,
+            network_scope_required=bool(
+                options.get("network_capture_required", True)
+            ),
+        )
     except ControlScopeError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -964,6 +973,11 @@ async def reanalyze_app(
 @router.get("/apps/{app_id}/analysis/overview")
 def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
     artifact = _app_or_404(db, app_id)
+    analysis_structure = (artifact.analysis_result or {}).get("structure") or {}
+    security_solutions = analysis_structure.get("security_solutions") or []
+    security_analysis = analysis_structure.get("security_solution_analysis")
+    if not isinstance(security_analysis, dict):
+        security_analysis = security_solution_summary(security_solutions)
     analysis_runs = db.scalars(
         select(AnalysisRun)
         .where(AnalysisRun.app_id == app_id)
@@ -1016,9 +1030,8 @@ def app_analysis_overview(app_id: str, db: Session = Depends(get_db)):
         "catalog_source": CATALOG_SOURCE,
         "assessment_profile": artifact.project.assessment_profile,
         "assessment_source": PROFILE_SOURCES[artifact.project.assessment_profile],
-        "security_solutions": (
-            (artifact.analysis_result or {}).get("structure") or {}
-        ).get("security_solutions", []),
+        "security_solutions": security_solutions,
+        "security_solution_analysis": security_analysis,
         "tool_runs": [
             {
                 "id": item.id,
@@ -1559,6 +1572,17 @@ class DeviceAction(BaseModel):
     remote_path: str | None = None
     local_port: int | None = Field(default=None, ge=1, le=65535)
     remote_port: int | None = Field(default=None, ge=1, le=65535)
+
+
+class RunCheckpointRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=2, max_length=120)
+    note: str = Field(default="", max_length=1000)
+    control_ids: list[str] = Field(default_factory=list, max_length=20)
+    capture_screenshot: bool = True
+    capture_logs: bool = True
+    capture_process: bool = True
 
 
 class ApprovalIssueRequest(BaseModel):
@@ -2799,7 +2823,7 @@ async def create_run(
 ):
     project = _project_or_404(db, payload.project_id)
     allowed_devices = {"mock", "android_adb", "ios_windows"}
-    allowed_proxies = {"mock", "mitmproxy", "burp", "fiddler"}
+    allowed_proxies = {"mock", "mitmproxy", "burp", "fiddler", "none"}
     if payload.device_adapter not in allowed_devices:
         raise HTTPException(422, "지원하지 않는 단말 Adapter입니다.")
     if payload.proxy_adapter not in allowed_proxies:
@@ -2910,6 +2934,19 @@ async def create_run(
                 f"대상 앱 적용 조건을 충족하지 않는 Frida 스크립트입니다: {', '.join(not_applicable)}",
             )
     options = dict(payload.options)
+    network_capture_required = options.get(
+        "network_capture_required", payload.proxy_adapter != "none"
+    )
+    if not isinstance(network_capture_required, bool):
+        raise HTTPException(422, "network_capture_required는 boolean이어야 합니다.")
+    if payload.proxy_adapter == "none" and network_capture_required:
+        raise HTTPException(422, "단말 전용 진단에서는 네트워크 캡처를 필수로 설정할 수 없습니다.")
+    if payload.proxy_adapter != "none" and not network_capture_required:
+        raise HTTPException(
+            422,
+            "네트워크 캡처를 제외하려면 프록시 Adapter를 단말 전용(none)으로 선택하세요.",
+        )
+    options["network_capture_required"] = network_capture_required
     control_validation = _normalize_control_validation_options(
         options,
         run_mode,
@@ -2967,9 +3004,30 @@ async def create_run(
     pause_for_security_bypass = options.get("pause_for_security_bypass", False)
     if not isinstance(pause_for_security_bypass, bool):
         raise HTTPException(422, "pause_for_security_bypass는 boolean이어야 합니다.")
-    reuse_installed_app = options.get("reuse_installed_app", False)
+    interactive_session = options.get(
+        "interactive_session", payload.pause_for_login
+    )
+    if not isinstance(interactive_session, bool):
+        raise HTTPException(422, "interactive_session은 boolean이어야 합니다.")
+    assessment_completion_required = options.get(
+        "assessment_completion_required", False
+    )
+    if not isinstance(assessment_completion_required, bool):
+        raise HTTPException(
+            422, "assessment_completion_required는 boolean이어야 합니다."
+        )
+    reuse_installed_app = options.get(
+        "reuse_installed_app", bool(app and _is_device_registered(app))
+    )
     if not isinstance(reuse_installed_app, bool):
         raise HTTPException(422, "reuse_installed_app는 boolean이어야 합니다.")
+    allow_installed_version_mismatch = options.get(
+        "allow_installed_version_mismatch", False
+    )
+    if not isinstance(allow_installed_version_mismatch, bool):
+        raise HTTPException(
+            422, "allow_installed_version_mismatch는 boolean이어야 합니다."
+        )
     use_resigned_ipa = options.get("use_resigned_ipa", False)
     if not isinstance(use_resigned_ipa, bool):
         raise HTTPException(422, "use_resigned_ipa는 boolean이어야 합니다.")
@@ -2995,15 +3053,19 @@ async def create_run(
         {
             "use_resigned_ipa": use_resigned_ipa,
             "reuse_installed_app": reuse_installed_app,
+            "allow_installed_version_mismatch": allow_installed_version_mismatch,
             "assessment_profile": project.assessment_profile,
             "frida_script_ids": selected_script_ids,
             "auto_select_frida": payload.auto_select_frida,
-            "pause_for_login": payload.pause_for_login,
+            "pause_for_login": payload.pause_for_login or interactive_session,
+            "interactive_session": interactive_session,
+            "assessment_completion_required": assessment_completion_required,
             "frida_mode": frida_mode,
             "auto_navigation": auto_navigation,
             "ai_rank_navigation": ai_rank_navigation,
             "dynamic_storage": dynamic_storage,
             "background_screen_check": background_screen_check,
+            "network_capture_required": network_capture_required,
             "pause_for_approval_candidates": pause_for_approval_candidates,
             "pause_for_security_bypass": pause_for_security_bypass,
             "navigation_limits": NavigationLimits.from_options(
@@ -3115,6 +3177,182 @@ async def create_run(
 @router.get("/runs/{run_id}", response_model=RunOut)
 def get_run(run_id: str, db: Session = Depends(get_db)):
     return _run_or_404(db, run_id)
+
+
+@router.post("/runs/{run_id}/checkpoints")
+async def capture_run_checkpoint(
+    request: Request,
+    run_id: str,
+    payload: RunCheckpointRequest,
+    db: Session = Depends(get_db),
+):
+    """Capture a repeatable, read-only analyst checkpoint while a Run is paused."""
+    run = _run_or_404(db, run_id)
+    project, run, app = _scoped_run(
+        db,
+        project_id=run.project_id,
+        run_id=run.id,
+    )
+    if app is None:
+        raise HTTPException(422, "진단 체크포인트에는 대상 앱이 필요합니다.")
+    package_name = _target_for_app(app, live=run.run_mode == RunMode.LIVE.value)
+    valid_control_ids = {
+        item.mastg_id
+        for item in db.scalars(
+            select(ControlTest).where(ControlTest.run_id == run.id)
+        ).all()
+    }
+    unknown = [item for item in payload.control_ids if item not in valid_control_ids]
+    if unknown:
+        raise HTTPException(
+            422,
+            f"현재 Run 원장에 없는 진단 항목입니다: {', '.join(unknown)}",
+        )
+
+    orchestrator = _orchestrator(request)
+    if not await orchestrator.begin_manual_action(run.id):
+        raise HTTPException(409, "다른 수동 작업이 끝난 뒤 체크포인트를 캡처하세요.")
+    lease_acquired = False
+    try:
+        lease_acquired = await orchestrator.leases.acquire(
+            run.id, run.device_id, None
+        )
+        device = orchestrator.device_for_run(db, run)
+        evidence_service = EvidenceService(_settings(request))
+        checkpoint_id = uuid.uuid4().hex
+        checkpoint_dir = evidence_service.run_dir(run.id) / "checkpoints" / checkpoint_id
+        checkpoint_dir.mkdir(parents=True, exist_ok=False)
+        captured: list[Evidence] = []
+        operations: dict[str, Any] = {}
+
+        if payload.capture_screenshot:
+            operation = await device.screenshot(
+                run.device_id, checkpoint_dir / "screen.png"
+            )
+            operations["screenshot"] = operation.to_dict()
+            if operation.status == CapabilityStatus.AVAILABLE:
+                captured.append(
+                    evidence_service.add(
+                        db,
+                        run_id=run.id,
+                        evidence_type="screenshot",
+                        title=f"수동 진단 · {payload.label}",
+                        description=payload.note or "검토자가 지정한 수동 재현 시점의 화면입니다.",
+                        command=operation.command,
+                        file_path=operation.file_path,
+                        mime_type="image/png",
+                        inline_data={
+                            "checkpoint_id": checkpoint_id,
+                            "control_ids": payload.control_ids,
+                            "operation": operation.to_dict(),
+                        },
+                    )
+                )
+
+        if payload.capture_process:
+            operation = await device.process_info(run.device_id, package_name)
+            operations["process"] = operation.to_dict()
+            captured.append(
+                evidence_service.add(
+                    db,
+                    run_id=run.id,
+                    evidence_type="command_log",
+                    title=f"수동 진단 프로세스 · {payload.label}",
+                    description=operation.message,
+                    command=operation.command,
+                    inline_data={
+                        **operation.to_dict(),
+                        "checkpoint_id": checkpoint_id,
+                        "control_ids": payload.control_ids,
+                    },
+                )
+            )
+
+        if payload.capture_logs:
+            operation = await device.collect_logs(
+                run.device_id, checkpoint_dir / "device.log", duration_seconds=3
+            )
+            operations["logs"] = operation.to_dict()
+            if operation.status == CapabilityStatus.AVAILABLE:
+                captured.append(
+                    evidence_service.add(
+                        db,
+                        run_id=run.id,
+                        evidence_type="device_log",
+                        title=f"수동 진단 로그 · {payload.label}",
+                        description=operation.message,
+                        command=operation.command,
+                        file_path=operation.file_path,
+                        mime_type="text/plain",
+                        inline_data={
+                            "checkpoint_id": checkpoint_id,
+                            "control_ids": payload.control_ids,
+                            "operation": operation.to_dict(),
+                        },
+                    )
+                )
+
+        frida_health = orchestrator.frida_sessions.health(run.id)
+        checkpoint = evidence_service.add_json(
+            db,
+            run_id=run.id,
+            filename=f"checkpoint-{checkpoint_id}.json",
+            title=f"수동 진단 체크포인트 · {payload.label}",
+            evidence_type="interaction_checkpoint",
+            data={
+                "checkpoint_id": checkpoint_id,
+                "label": payload.label.strip(),
+                "note": payload.note.strip(),
+                "control_ids": payload.control_ids,
+                "target": package_name,
+                "operations": operations,
+                "frida_health": frida_health,
+                "evidence_ids": [item.id for item in captured],
+            },
+            description=(
+                payload.note.strip()
+                or "검토자가 앱 기능을 조작한 뒤 화면·프로세스·로그 상태를 고정했습니다."
+            ),
+        )
+        captured.append(checkpoint)
+        options = dict(run.options)
+        checkpoints = list(options.get("manual_checkpoints") or [])
+        checkpoints.append(
+            {
+                "id": checkpoint_id,
+                "label": payload.label.strip(),
+                "note": payload.note.strip(),
+                "control_ids": payload.control_ids,
+                "evidence_ids": [item.id for item in captured],
+                "captured_at": checkpoint.captured_at.isoformat(),
+            }
+        )
+        options["manual_checkpoints"] = checkpoints
+        run.options = options
+        db.commit()
+        for item in captured:
+            await event_bus.publish(
+                run.id,
+                "evidence",
+                {
+                    "id": item.id,
+                    "type": item.evidence_type,
+                    "title": item.title,
+                    "sequence": item.sequence,
+                    "captured_at": item.captured_at.isoformat(),
+                },
+            )
+        return {
+            "status": "captured",
+            "checkpoint_id": checkpoint_id,
+            "evidence_ids": [item.id for item in captured],
+            "operations": operations,
+            "frida_health": frida_health,
+        }
+    finally:
+        if lease_acquired:
+            await orchestrator.leases.release(run.id)
+        await orchestrator.end_manual_action(run.id)
 
 
 @router.get("/runs/{run_id}/frida/health")
@@ -4552,6 +4790,7 @@ async def proxy_adapters(request: Request):
     settings = _settings(request)
     adapters = [
         MockProxyAdapter(),
+        DisabledProxyAdapter(),
         MitmProxyAdapter(settings),
         FiddlerProxyAdapter(settings=settings),
         BurpProxyAdapter(settings=settings),
@@ -5060,6 +5299,13 @@ def _apply_assessment_summary(
     review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Re-evaluate the run ledger and persist summary, gaps and review trail."""
+    options = dict(run.options)
+    if review is not None:
+        reviews = list(options.get("assessment_reviews") or [])
+        reviews.append(review)
+        options["assessment_reviews"] = reviews[-500:]
+        run.options = options
+        db.flush()
     summary = evaluate_standard_controls(db, run, app)
     options = dict(run.options)
     options["assessment_summary"] = {
@@ -5085,10 +5331,6 @@ def _apply_assessment_summary(
         options["assessment_summary"][
             "vulnerability_evidence_id"
         ] = vulnerability_evidence.id
-    if review is not None:
-        reviews = list(options.get("assessment_reviews") or [])
-        reviews.append(review)
-        options["assessment_reviews"] = reviews[-500:]
     quality_gaps = [
         item
         for item in options.get("quality_gaps", [])

@@ -40,7 +40,20 @@ def _evidence_for_requirements(
     evidence: Iterable[Evidence],
 ) -> list[Evidence]:
     relevant = {kind for group in requirements for kind in group}
-    return [item for item in evidence if item.evidence_type in relevant]
+    rows: list[Evidence] = []
+    for item in evidence:
+        if item.evidence_type not in relevant:
+            continue
+        # An empty capture proves that collection ran, not that a network
+        # control has evidence to review. Keeping it out of the relevance
+        # mapper prevents dozens of unrelated needs_review rows.
+        if item.evidence_type == "network_capture" and item.inline_data == []:
+            continue
+        if item.evidence_type == "network_test" and isinstance(item.inline_data, dict):
+            if int(item.inline_data.get("flow_count") or 0) == 0:
+                continue
+        rows.append(item)
+    return rows
 
 
 def _finding_evidence_ids(db: Session, finding: Finding) -> list[str]:
@@ -305,6 +318,15 @@ def evaluate_standard_controls(
             if isinstance(control_id, str):
                 ai_recommendations.setdefault(control_id, []).append(item)
 
+    manual_reviews: dict[str, dict[str, Any]] = {}
+    for item in run.options.get("assessment_reviews") or []:
+        if not isinstance(item, dict):
+            continue
+        control_test_id = item.get("control_test_id")
+        if not isinstance(control_test_id, str):
+            continue
+        manual_reviews[control_test_id] = item
+
     manual_confirmed = db.scalars(
         select(Finding).where(
             Finding.run_id == run.id,
@@ -345,6 +367,18 @@ def evaluate_standard_controls(
             control.result = "needs_review"
             control.status = "completed"
             control.summary = "기존 확정 판정의 필수 증적이 현재 Run에 없어 재검토가 필요합니다."
+
+        manual_review = manual_reviews.get(control.id)
+        if manual_review and manual_review.get("outcome") == "needs_review":
+            control.status = "completed"
+            control.result = "needs_review"
+            control.summary = str(
+                manual_review.get("summary")
+                or "점검자가 추가 검토가 필요하다고 기록했습니다."
+            )
+            control.evidence_ids = []
+            control.finding_ids = []
+            continue
 
         relevant = _evidence_for_requirements(
             control.evidence_requirements,

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.core.status import CapabilityStatus
+from backend.app.core.config import AppSettings
 from backend.app.devices import IOSDeviceAdapter, MockDeviceAdapter
 from backend.app.proxy import BurpProxyAdapter, MockProxyAdapter
 
@@ -29,7 +30,15 @@ async def test_mock_device_supports_evidence_operations(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_ios_windows_install_is_explicitly_manual(tmp_path: Path):
-    result = await IOSDeviceAdapter().install_app("ios-test", tmp_path / "sample.ipa")
+    settings = AppSettings(
+        tools={
+            "pymobiledevice3": "__missing_pymobiledevice3__",
+            "ideviceinstaller": "__missing_ideviceinstaller__",
+        }
+    )
+    result = await IOSDeviceAdapter(settings).install_app(
+        "ios-test", tmp_path / "sample.ipa"
+    )
     assert result.status == CapabilityStatus.MANUAL_REQUIRED
 
 

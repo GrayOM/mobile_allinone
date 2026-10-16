@@ -47,6 +47,7 @@ export default function DiagnosticSetupPage() {
   const [proxyListenHost, setProxyListenHost] = useState("");
   const [proxyAllowedClientIp, setProxyAllowedClientIp] = useState("");
   const [proxyPort, setProxyPort] = useState("8080");
+  const [reuseInstalledApp, setReuseInstalledApp] = useState(false);
   const [scripts, setScripts] = useState<FridaScript[]>([]);
   const [selectedScripts, setSelectedScripts] = useState<string[]>([]);
   const [autoSelectFrida, setAutoSelectFrida] = useState(false);
@@ -114,7 +115,16 @@ export default function DiagnosticSetupPage() {
 
   useEffect(() => {
     if (!project) return;
-    setProxyAdapter(project.run_mode === "mock" ? "mock" : "mitmproxy");
+    setProxyAdapter(
+      project.run_mode === "mock"
+        ? "mock"
+        : selectedApp?.platform === "ios"
+          ? "none"
+          : "mitmproxy",
+    );
+    setReuseInstalledApp(
+      project.run_mode === "live" && selectedApp?.platform === "ios",
+    );
     if (project.run_mode !== "live") {
       setControlValidationEnabled(false);
       setControlValidationDialogOpen(false);
@@ -144,7 +154,14 @@ export default function DiagnosticSetupPage() {
 
   function applyGuidedDefaults() {
     if (!project) return;
-    setProxyAdapter(project.run_mode === "mock" ? "mock" : "mitmproxy");
+    setProxyAdapter(
+      project.run_mode === "mock"
+        ? "mock"
+        : selectedApp?.platform === "ios"
+          ? "none"
+          : "mitmproxy",
+    );
+    setReuseInstalledApp(project.run_mode === "live" && selectedApp?.platform === "ios");
     setSelectedScripts([]);
     setAutoSelectFrida(false);
     setControlValidationEnabled(false);
@@ -153,7 +170,9 @@ export default function DiagnosticSetupPage() {
     setGuideNote(
       project.run_mode === "mock"
         ? "Mock 데모에 맞는 안전한 기본값을 적용했습니다. 단말과 앱을 확인한 뒤 진단을 시작하세요."
-        : "Live 진단의 보수적인 기본값을 적용했습니다. 단말 IP와 프록시 정보를 확인한 뒤 진단을 시작하세요.",
+        : selectedApp?.platform === "ios"
+          ? "iOS 설치 앱 재사용과 단말 전용 수동 진단 Session을 적용했습니다. 네트워크 진단은 준비된 Windows 프록시가 있을 때 별도 선택하세요."
+          : "Live 진단의 보수적인 기본값을 적용했습니다. 단말 IP와 프록시 정보를 확인한 뒤 진단을 시작하세요.",
     );
   }
 
@@ -182,6 +201,11 @@ export default function DiagnosticSetupPage() {
           ai_rank_navigation: data.get("ai_rank_navigation") === "on",
           dynamic_storage: data.get("dynamic_storage") === "on",
           background_screen_check: data.get("background_screen_check") === "on",
+          interactive_session: data.get("interactive_session") === "on",
+          assessment_completion_required:
+            data.get("assessment_completion_required") === "on",
+          reuse_installed_app: reuseInstalledApp,
+          network_capture_required: proxyAdapter !== "none",
           pause_for_approval_candidates:
             data.get("pause_for_approval_candidates") === "on",
           pause_for_security_bypass:
@@ -195,7 +219,8 @@ export default function DiagnosticSetupPage() {
               authorization_expires_at: new Date(authorizationExpiresAt).toISOString(),
               authorized_device_id: authorizedDeviceId,
               test_account_reference: testAccountReference,
-              allowed_network_hosts: networkHostLines(allowedNetworkHosts),
+              allowed_network_hosts:
+                proxyAdapter === "none" ? [] : networkHostLines(allowedNetworkHosts),
               scope_description: scopeDescription,
               authorized_scope_confirmed: authorizationConfirmed,
               test_environment_confirmed: testEnvironmentConfirmed,
@@ -260,8 +285,8 @@ export default function DiagnosticSetupPage() {
             <div className={selectedDevice?.availability === "available" ? "guide-check guide-check--done" : "guide-check"}>
               <span>3</span><div><strong>단말 준비</strong><small>{selectedDevice?.availability === "available" ? `${selectedDevice.model} 연결 확인` : "연결·권한·도구 상태를 확인하세요"}</small></div>
             </div>
-            <div className={project?.run_mode === "mock" || (proxyListenHost && (proxyAdapter !== "mitmproxy" || proxyAllowedClientIp)) ? "guide-check guide-check--done" : "guide-check"}>
-              <span>4</span><div><strong>캡처 범위</strong><small>{project?.run_mode === "mock" ? "합성 프록시 사용" : "프록시 Listener와 단말 IP를 입력하세요"}</small></div>
+            <div className={project?.run_mode === "mock" || proxyAdapter === "none" || (proxyListenHost && (proxyAdapter !== "mitmproxy" || proxyAllowedClientIp)) ? "guide-check guide-check--done" : "guide-check"}>
+              <span>4</span><div><strong>캡처 범위</strong><small>{project?.run_mode === "mock" ? "합성 프록시 사용" : proxyAdapter === "none" ? "단말 증적만 수집" : "프록시 Listener와 단말 IP를 입력하세요"}</small></div>
             </div>
           </div>
           {guideNote && <div className="inline-alert inline-alert--ok">{guideNote}</div>}
@@ -320,7 +345,11 @@ export default function DiagnosticSetupPage() {
             <div className="form-grid">
               <div className="field">
                 <label htmlFor="proxy">프록시 Adapter</label>
-                <select id="proxy" name="proxy" value={proxyAdapter} onChange={(event) => setProxyAdapter(event.target.value)}>
+                <select id="proxy" name="proxy" value={proxyAdapter} onChange={(event) => {
+                  setProxyAdapter(event.target.value);
+                  setControlValidationEnabled(false);
+                  setGuideNote("프록시 범위가 변경되어 통제 검증 승인이 해제됐습니다. 현재 범위로 다시 확인하세요.");
+                }}>
                   {project?.run_mode === "mock" ? (
                     <option value="mock">Mock Proxy · 합성 데모 전용</option>
                   ) : (
@@ -328,11 +357,12 @@ export default function DiagnosticSetupPage() {
                       <option value="mitmproxy">mitmproxy · 실제 캡처</option>
                       <option value="burp">Burp Suite · 수동 연동</option>
                       <option value="fiddler">Fiddler · 수동 연동</option>
+                      <option value="none">단말 전용 · 네트워크 제외</option>
                     </>
                   )}
                 </select>
               </div>
-              {project?.run_mode === "live" && proxyAdapter !== "mock" && (
+              {project?.run_mode === "live" && !["mock", "none"].includes(proxyAdapter) && (
                 <>
                   <div className="field">
                     <label htmlFor="proxy-listen-host">Windows Listener IP</label>
@@ -370,6 +400,20 @@ export default function DiagnosticSetupPage() {
                 </select>
                 <small>진단 자동 흐름에서는 읽기 전용 작업만 실행합니다. 상태 변경 작업은 별도 승인 API가 필요합니다.</small>
               </div>
+              {project?.run_mode === "live" && selectedApp?.platform === "ios" && (
+                <label className="toggle-line field--wide">
+                  <input
+                    type="checkbox"
+                    checked={reuseInstalledApp}
+                    onChange={(event) => setReuseInstalledApp(event.target.checked)}
+                  />
+                  <span />
+                  <div>
+                    <strong>단말에 설치된 iOS 앱 재사용</strong>
+                    <small>IPA를 다시 설치하지 않고 같은 Bundle ID의 실행 중 앱을 사용합니다. 버전이 다르면 서버가 Run을 중단합니다.</small>
+                  </div>
+                </label>
+              )}
             </div>
           </div>
         </section>
@@ -459,6 +503,20 @@ export default function DiagnosticSetupPage() {
                 <div><strong>로그인 전 자동 일시정지</strong><small>사용자가 로그인한 뒤 재개합니다.</small></div>
               </label>
               <label className="toggle-line">
+                <input
+                  type="checkbox"
+                  name="interactive_session"
+                  defaultChecked={project?.run_mode === "live"}
+                />
+                <span />
+                <div><strong>수동 진단 Session 열기</strong><small>Frida·프록시를 유지한 안전 일시정지 상태에서 앱을 조작하고 여러 체크포인트를 캡처합니다.</small></div>
+              </label>
+              <label className="toggle-line">
+                <input type="checkbox" name="assessment_completion_required" />
+                <span />
+                <div><strong>이번 Run에서 전체 기준 판정 완료 요구</strong><small>켜면 미판정 항목도 실행 Gap으로 계산합니다. 일반 증적 수집 Session에서는 끄고 원장에서 계속 판정합니다.</small></div>
+              </label>
+              <label className="toggle-line">
                 <input type="checkbox" name="pause_for_approval_candidates" />
                 <span />
                 <div><strong>승인 후보에서 자동 일시정지</strong><small>중위험 UI 동작 또는 Live GET/HEAD 후보가 만들어지면 현재 화면·Flow를 고정해 1회 승인 검토를 기다립니다.</small></div>
@@ -473,7 +531,7 @@ export default function DiagnosticSetupPage() {
                   <input
                     type="checkbox"
                     name="use_resigned_ipa"
-                    disabled={!selectedApp.analysis_result.ios_resigned}
+                    disabled={!selectedApp.analysis_result.ios_resigned || reuseInstalledApp}
                   />
                   <span />
                   <div>
@@ -537,7 +595,7 @@ export default function DiagnosticSetupPage() {
           <li><span>3</span>POST·PUT·PATCH·DELETE 요청은 자동 재전송하지 않습니다.</li>
           <li><span>4</span>도구가 없으면 성공으로 위장하지 않고 상태를 남깁니다.</li>
         </ol>
-        <button className="button button--signal button--full" disabled={starting || !appId || !deviceId || selectedDevice?.availability !== "available" || (project?.run_mode === "live" && !proxyListenHost) || (proxyAdapter === "mitmproxy" && !proxyAllowedClientIp) || (["burp", "fiddler"].includes(proxyAdapter) && !proxyPort)}>
+        <button className="button button--signal button--full" disabled={starting || !appId || !deviceId || selectedDevice?.availability !== "available" || (project?.run_mode === "live" && proxyAdapter !== "none" && !proxyListenHost) || (proxyAdapter === "mitmproxy" && !proxyAllowedClientIp) || (["burp", "fiddler"].includes(proxyAdapter) && !proxyPort)}>
           {starting ? "실행 준비 중…" : "진단 실행"}
         </button>
       </aside>
@@ -546,10 +604,14 @@ export default function DiagnosticSetupPage() {
           <section className="consent-dialog consent-dialog--scope panel" role="dialog" aria-modal="true" aria-labelledby="control-validation-title">
             <span className="eyebrow">APPROVED CONTROL VALIDATION</span>
             <h3 id="control-validation-title">승인 범위를 확인하세요</h3>
-            <p>승인 단말과 테스트 서버를 실행에 고정합니다. mitmproxy는 범위 밖 목적지를 upstream 전송 전에 차단하고, 수동 프록시에서 발견하면 Run을 즉시 중단합니다.</p>
+            <p>{proxyAdapter === "none" ? "승인 단말과 앱 조작 범위를 실행에 고정합니다. 이번 Session은 네트워크 목적지를 사용하지 않습니다." : "승인 단말과 테스트 서버를 실행에 고정합니다. mitmproxy는 범위 밖 목적지를 upstream 전송 전에 차단하고, 수동 프록시에서 발견하면 Run을 즉시 중단합니다."}</p>
             <div className="control-scope-sheet" aria-label="실행에 고정되는 승인 경계">
               <div><span>DEVICE LOCK</span><strong>{selectedDevice?.model ?? "단말 선택 필요"}</strong><code>{authorizedDeviceId || "—"}</code></div>
-              <div><span>NETWORK POLICY</span><strong>DEFAULT DENY</strong><code>범위 밖 → 차단·수동 검토</code></div>
+              <div>
+                <span>NETWORK POLICY</span>
+                <strong>{proxyAdapter === "none" ? "NOT IN SCOPE" : "DEFAULT DENY"}</strong>
+                <code>{proxyAdapter === "none" ? "단말 증적만 수집" : "범위 밖 → 차단·수동 검토"}</code>
+              </div>
               <div><span>DATA POLICY</span><strong>TEST ONLY</strong><code>승인 기록 외부 AI 제외</code></div>
             </div>
             <div className="consent-dialog__grid">
@@ -573,8 +635,8 @@ export default function DiagnosticSetupPage() {
               </div>
               <div className="field field--wide">
                 <label htmlFor="allowed-network-hosts">허용 테스트 서버</label>
-                <textarea id="allowed-network-hosts" value={allowedNetworkHosts} onChange={(event) => setAllowedNetworkHosts(event.target.value)} placeholder={"api.test.example\n*.sandbox.example\n192.0.2.15"} rows={4} />
-                <small>한 줄에 하나씩 호스트·IP·*.하위도메인을 입력합니다. URL 경로와 단일 *는 허용되지 않습니다.</small>
+                <textarea id="allowed-network-hosts" value={allowedNetworkHosts} onChange={(event) => setAllowedNetworkHosts(event.target.value)} placeholder={proxyAdapter === "none" ? "단말 전용 Session에서는 비워둘 수 있습니다." : "api.test.example\n*.sandbox.example\n192.0.2.15"} rows={4} disabled={proxyAdapter === "none"} />
+                <small>{proxyAdapter === "none" ? "네트워크 캡처를 선택하면 허용 테스트 서버를 반드시 입력합니다." : "한 줄에 하나씩 호스트·IP·*.하위도메인을 입력합니다. URL 경로와 단일 *는 허용되지 않습니다."}</small>
               </div>
               <div className="field field--wide">
                 <label htmlFor="control-validation-scope">승인된 테스트 범위</label>
@@ -598,7 +660,7 @@ export default function DiagnosticSetupPage() {
                   || authorizationReference.trim().length < 4
                   || approvedBy.trim().length < 2
                   || testAccountReference.trim().length < 2
-                  || networkHostLines(allowedNetworkHosts).length < 1
+                  || (proxyAdapter !== "none" && networkHostLines(allowedNetworkHosts).length < 1)
                   || scopeDescription.trim().length < 10
                   || Number.isNaN(Date.parse(authorizationExpiresAt))
                   || Date.parse(authorizationExpiresAt) <= Date.now()

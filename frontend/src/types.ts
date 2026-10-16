@@ -467,6 +467,51 @@ export interface AnalysisOverview {
   assessment_profile: string;
   assessment_source: Record<string, unknown>;
   assessment_controls: ControlTest[];
+  security_solutions: SecuritySolution[];
+  security_solution_analysis: SecuritySolutionAnalysis;
+}
+
+export interface SecuritySolutionEvidence {
+  indicator: string;
+  kind: "package" | "native_library" | "framework" | "product_marker";
+  kind_label: string;
+  strength: "strong" | "supporting";
+  weight: number;
+  source: string;
+  location: string;
+}
+
+export interface SecuritySolution {
+  signature_id: string;
+  vendor: string;
+  product: string;
+  category: string;
+  category_label: string;
+  catalog_version: string;
+  indicators: string[];
+  locations: string[];
+  evidence: SecuritySolutionEvidence[];
+  confidence: number;
+  confidence_label: "high" | "medium" | "low";
+  match_count: number;
+  strong_indicator_count: number;
+  evidence_types: string[];
+  static_assessment: "likely_integrated" | "integration_candidate";
+  expected_control_areas: string[];
+  verification_status: "dynamic_verification_required";
+  analysis_scope: "static_identification_only";
+  recommended_checks: string[];
+}
+
+export interface SecuritySolutionAnalysis {
+  status: "detected" | "no_known_signature" | "not_analyzed";
+  catalog_version: string | null;
+  catalog_signature_count: number;
+  detected_count: number;
+  high_confidence_count: number;
+  category_counts: Record<string, number>;
+  solutions: SecuritySolution[];
+  limitations: string[];
 }
 
 export interface CoverageData {

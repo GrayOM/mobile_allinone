@@ -21,7 +21,10 @@ from backend.app.core.config import AppSettings, get_settings
 from backend.app.core.status import CapabilityStatus
 from backend.app.catalog import CATALOG_SOURCE, evaluate_controls
 from backend.app.analyzers.security_solutions import (
+    CATALOG_VERSION as SECURITY_SOLUTION_CATALOG_VERSION,
+    SIGNATURES as SECURITY_SOLUTION_SIGNATURES,
     identify_security_solutions,
+    security_solution_summary,
     solution_pattern,
 )
 from backend.app.analyzers.adapters import (
@@ -322,6 +325,32 @@ class StaticAnalyzer:
             "status": "available",
             "version": "0.2.0",
             "finding_count": native_count,
+        }
+        solution_count = len(result.structure.get("security_solutions") or [])
+        result.tool_runs.insert(
+            1,
+            {
+                "tool": "security_solution_analyzer",
+                "status": "available",
+                "version": SECURITY_SOLUTION_CATALOG_VERSION,
+                "command": [],
+                "started_at": analysis_started.isoformat(),
+                "finished_at": analysis_finished.isoformat(),
+                "raw_output_path": None,
+                "raw_sha256": None,
+                "error": None,
+                "finding_count": solution_count,
+                "metadata": {
+                    "result_count": solution_count,
+                    "catalog_signature_count": len(SECURITY_SOLUTION_SIGNATURES),
+                    "analysis_scope": "static_identification_only",
+                },
+            },
+        )
+        result.tools["security_solution_analyzer"] = {
+            "status": "available",
+            "version": SECURITY_SOLUTION_CATALOG_VERSION,
+            "finding_count": solution_count,
         }
         result.status = "completed"
         return result
@@ -649,7 +678,7 @@ class StaticAnalyzer:
                 r"\b(?:addJavascriptInterface|WKScriptMessageHandler)\b", re.I
             ),
             "local_storage": re.compile(
-                r"\b(?:SharedPreferences|SQLiteDatabase|RoomDatabase|UserDefaults|NSUserDefaults|Keychain|SecItemAdd|openFileOutput)\b",
+                r"(?:\b(?:SharedPreferences|SQLiteDatabase|RoomDatabase|UserDefaults|NSUserDefaults|Keychain|SecItemAdd|openFileOutput)\b|\bsqlite3_(?:open|open_v2)\b|\bSQLite/(?:Connection|Query|Schema|Statement)\.swift\b)",
                 re.I,
             ),
             "crypto": re.compile(
@@ -661,11 +690,12 @@ class StaticAnalyzer:
                 re.I,
             ),
             "root_jailbreak_detection": re.compile(
-                r"(?:/system/xbin/su|/system/bin/su|/Applications/Cydia\.app|jailbreak|magisk|busybox|rootbeer)",
+                r"(?:/system/xbin/su|/system/bin/su|/Applications/(?:Cydia|Sileo|Zebra|Filza)\.app|/Library/MobileSubstrate/MobileSubstrate\.dylib|jailbreak|magisk|busybox|rootbeer)",
                 re.I,
             ),
             "frida_hook_detection": re.compile(
-                r"\b(?:frida|gum-js-loop|xposed|substrate|ptrace)\b", re.I
+                r"(?:\b(?:frida|gum-js-loop|xposed|substrate|ptrace)\b|/hfe/yvo/sevqn/sevqn-ntrag\.qlyvo)",
+                re.I,
             ),
             "debugger_detection": re.compile(
                 r"\b(?:isDebuggerConnected|TracerPid|PT_DENY_ATTACH|Debug\.waitForDebugger)\b",
@@ -717,6 +747,11 @@ class StaticAnalyzer:
             platform=result.platform,
             matches=signals.get("security_solution") or [],
             native_libraries=result.native_libraries,
+            archive_entries=archive.namelist(),
+            control_signals=signals,
+        )
+        result.structure["security_solution_analysis"] = security_solution_summary(
+            result.structure["security_solutions"]
         )
 
     def _extract_candidates(self, text: str, location: str) -> Iterable[Candidate]:
@@ -1112,6 +1147,10 @@ class StaticAnalyzer:
             )
         solutions = result.structure.get("security_solutions") or []
         if solutions:
+            has_unattributed_controls = any(
+                item.get("signature_id") == "custom-in-app-protection"
+                for item in solutions
+            )
             names = ", ".join(f"{item['vendor']} {item['product']}" for item in solutions[:6])
             result.findings.append(
                 StaticFinding(
@@ -1124,11 +1163,17 @@ class StaticAnalyzer:
                         for location in item["locations"][:2]
                     )[:400],
                     (
-                        f"상용 모바일 보안솔루션 지표 {len(solutions)}종을 식별했습니다. "
-                        "제품명과 지표만 기록하며 보호 기능이 실제로 동작하는지는 승인된 단말 검증에서 확인합니다."
+                        f"모바일 보안통제 지표 {len(solutions)}종을 식별했습니다. "
+                        + (
+                            "일부 지표는 공급사·제품을 특정하지 않은 앱 자체 방어 구현으로 분류했습니다. "
+                            if has_unattributed_controls
+                            else "제품명과 지표만 기록합니다. "
+                        )
+                        + "보호 기능이 실제로 동작하는지는 승인된 단말 검증에서 확인합니다."
                     ),
                     max(item["confidence"] for item in solutions),
                     "informational",
+                    source_tool="security_solution_analyzer",
                     rule_id="signal.security_solution",
                     raw={
                         "assessment_type": "security_control",
@@ -1141,7 +1186,8 @@ class StaticAnalyzer:
                         "제품별 보호 범주(무결성·난독화·보안키패드·악성앱 탐지)를 통제 검증 항목에 연결합니다.",
                     ],
                     false_positive_risk=(
-                        "SDK 포함만으로 보호가 활성화됐다고 단정할 수 없습니다. 미사용 모듈이나 공통 라이브러리 이름이 겹칠 수 있습니다."
+                        "SDK·문자열·방어 코드 신호만으로 보호가 활성화됐다고 단정할 수 없습니다. "
+                        "미사용 코드나 공통 라이브러리 이름, 서로 독립적이지 않은 자체 구현 신호가 겹칠 수 있습니다."
                     ),
                     additional_checks=[
                         "고객에게 적용 솔루션·버전·정책을 승인 범위 안에서 확인하세요.",

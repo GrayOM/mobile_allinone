@@ -66,7 +66,9 @@ def normalize_network_host(value: str) -> str:
     return f"*.{host}" if wildcard else host
 
 
-def normalize_network_hosts(value: Any) -> list[str]:
+def normalize_network_hosts(value: Any, *, allow_empty: bool = False) -> list[str]:
+    if allow_empty and (value is None or value == []):
+        return []
     if not isinstance(value, list) or not value:
         raise ControlScopeError("통제 검증에는 허용 테스트 서버를 1개 이상 입력하세요.")
     if len(value) > MAX_ALLOWED_NETWORK_HOSTS:
@@ -103,6 +105,7 @@ def normalize_control_validation_request(
     selected_device_id: str,
     *,
     now: datetime | None = None,
+    network_scope_required: bool = True,
 ) -> dict[str, Any]:
     if run_mode != RunMode.LIVE:
         raise ControlScopeError("통제 검증 모드는 실제 Live 진단에서만 사용할 수 있습니다.")
@@ -135,13 +138,17 @@ def normalize_control_validation_request(
     if expires_at - current > MAX_AUTHORIZATION_WINDOW:
         raise ControlScopeError("승인 기간은 현재 시각부터 최대 366일까지 설정할 수 있습니다.")
 
+    allowed_network_hosts = normalize_network_hosts(
+        raw.get("allowed_network_hosts"),
+        allow_empty=not network_scope_required,
+    )
     return {
         "enabled": True,
         "mode": "authorized_control_validation",
         "execution_policy": "observation_plus_approved_manual_bypass",
         "automatic_control_evasion": False,
         "external_ai_excluded": True,
-        "network_scope_policy": "default_deny",
+        "network_scope_policy": "default_deny" if allowed_network_hosts else "not_in_scope",
         "out_of_scope_action": "stop_and_manual_review",
         "authorization_reference": _required_text(
             raw,
@@ -172,9 +179,7 @@ def normalize_control_validation_request(
             maximum=200,
         ),
         "authorized_device_id": selected_device_id,
-        "allowed_network_hosts": normalize_network_hosts(
-            raw.get("allowed_network_hosts")
-        ),
+        "allowed_network_hosts": allowed_network_hosts,
         "authorization_expires_at": expires_at.isoformat(),
         "authorized_scope_confirmed": True,
         "test_environment_confirmed": True,
@@ -200,7 +205,10 @@ def active_control_scope(
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     if expires_at <= current:
         raise ControlScopeError("승인 기간이 만료되어 자동 진단을 중단했습니다.")
-    normalize_network_hosts(raw.get("allowed_network_hosts"))
+    normalize_network_hosts(
+        raw.get("allowed_network_hosts"),
+        allow_empty=raw.get("network_scope_policy") == "not_in_scope",
+    )
     return raw
 
 

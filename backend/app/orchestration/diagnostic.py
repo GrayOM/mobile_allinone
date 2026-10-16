@@ -75,6 +75,7 @@ from backend.app.orchestration.resources import (
 )
 from backend.app.proxy import (
     BurpProxyAdapter,
+    DisabledProxyAdapter,
     FiddlerProxyAdapter,
     MitmProxyAdapter,
     MockProxyAdapter,
@@ -330,6 +331,11 @@ class DiagnosticOrchestrator:
         self, db: Session, run: DiagnosticRun, name: str, progress: int, message: str
     ) -> None:
         await self._checkpoint(run.id)
+        # A safely-paused Run may be updated by a separate API session while
+        # the orchestrator is waiting (manual checkpoints, proxy confirmation,
+        # approved actions).  Refresh before writing the next stage so the
+        # long-lived worker session cannot overwrite those committed options.
+        db.refresh(run)
         run.status = RunStatus.RUNNING.value
         run.current_stage = name
         run.progress = progress
@@ -687,6 +693,8 @@ class DiagnosticOrchestrator:
                 port=int(run.options.get("proxy_port") or 8080),
                 settings=self.settings,
             )
+        if adapter == "none":
+            return DisabledProxyAdapter()
         if adapter == "mock":
             return MockProxyAdapter()
         raise ValueError(f"지원하지 않는 프록시 Adapter입니다: {adapter}")
@@ -1845,16 +1853,51 @@ class DiagnosticOrchestrator:
                             installed,
                         )
                         if present:
+                            package_metadata = (
+                                installed.data.get("package_metadata") or {}
+                            ).get(package_name) or {}
+                            installed_version = str(
+                                package_metadata.get("version") or ""
+                            ).strip()
+                            expected_version = str(app.version or "").strip()
+                            version_matches = bool(
+                                expected_version
+                                and installed_version
+                                and expected_version == installed_version
+                            )
+                            if (
+                                expected_version
+                                and installed_version
+                                and not version_matches
+                                and not bool(
+                                    run.options.get(
+                                        "allow_installed_version_mismatch", False
+                                    )
+                                )
+                            ):
+                                raise RuntimeError(
+                                    "단말 설치 앱 버전이 업로드 분석본과 다릅니다: "
+                                    f"expected={expected_version}, installed={installed_version}. "
+                                    "동일 빌드를 설치하거나 명시적으로 버전 불일치를 승인하세요."
+                                )
                             reused_installed = True
                             options = dict(run.options)
                             options["install"] = {
                                 "status": "reused_installed",
                                 "package_name": package_name,
                                 "upload_sha256": app.sha256,
+                                "installed_metadata": package_metadata,
+                                "identity_assurance": (
+                                    "bundle_and_version"
+                                    if version_matches
+                                    else "bundle_only"
+                                ),
+                                "version_matches": version_matches,
                                 "note": (
                                     "업로드 파일을 설치하지 않고 단말에 이미 설치된 동일 "
-                                    "식별자의 앱을 사용했습니다. 업로드본과 단말 설치본의 "
-                                    "동일성은 별도 확인이 필요합니다."
+                                    "식별자의 앱을 사용했습니다. 설치 앱의 실행 바이너리 "
+                                    "SHA-256을 읽지 못한 경우 Bundle ID와 버전 수준까지만 "
+                                    "동일성을 보증합니다."
                                 ),
                             }
                             run.options = options
@@ -2454,9 +2497,15 @@ class DiagnosticOrchestrator:
                     run.current_stage = "manual_interaction"
                     db.commit()
                     await self.pause(
-                        run.id, "로그인을 직접 수행한 뒤 ‘재개’를 누르세요."
+                        run.id,
+                        (
+                            "앱 기능을 직접 재현하고 필요한 체크포인트를 여러 번 캡처한 뒤 ‘재개’를 누르세요."
+                            if run.options.get("interactive_session")
+                            else "로그인을 직접 수행한 뒤 ‘재개’를 누르세요."
+                        ),
                     )
                     await self._checkpoint(run.id)
+                    db.refresh(run)
                     await self._capture(
                         db,
                         run,
@@ -2468,7 +2517,12 @@ class DiagnosticOrchestrator:
                     record_check(
                         "app_interaction",
                         True,
-                        "사용자가 로그인 완료를 확인했습니다.",
+                        (
+                            f"사용자가 수동 진단을 완료했고 체크포인트 "
+                            f"{len(run.options.get('manual_checkpoints') or [])}건을 기록했습니다."
+                            if run.options.get("interactive_session")
+                            else "사용자가 로그인 완료를 확인했습니다."
+                        ),
                     )
 
                 navigation_enabled = run.options.get("auto_navigation")
@@ -2800,8 +2854,19 @@ class DiagnosticOrchestrator:
                             evidence_ids=background_ids,
                         )
 
+                network_capture_required = bool(
+                    run.options.get("network_capture_required", True)
+                )
                 await self._stage(
-                    db, run, "network_dynamic", 70, "프록시 패킷과 동적 증적을 수집합니다."
+                    db,
+                    run,
+                    "network_dynamic",
+                    70,
+                    (
+                        "프록시 패킷과 동적 증적을 수집합니다."
+                        if network_capture_required
+                        else "네트워크 제외 범위를 유지하며 단말 동적 증적만 수집합니다."
+                    ),
                 )
                 await asyncio.sleep(0.1)
                 flows = []
@@ -2896,15 +2961,23 @@ class DiagnosticOrchestrator:
                 await self.events.publish(run.id, "proxy_status", stop_proxy.to_dict())
                 await asyncio.sleep(0.1)
                 flows = await proxy.read_flows(run.id)
-                flow_rows = await self._store_proxy_flows(db, run, proxy, flows)
+                flow_rows = (
+                    await self._store_proxy_flows(db, run, proxy, flows)
+                    if network_capture_required
+                    else []
+                )
                 record_check(
                     "proxy_capture",
-                    bool(flows),
+                    bool(flows) or not network_capture_required,
                     f"최종 프록시 흐름 {len(flows)}개를 저장했습니다."
                     if flows
-                    else "프록시 흐름이 0개여서 네트워크 진단 범위를 확인할 수 없습니다.",
+                    else (
+                        "이번 Session은 단말 전용 범위로 네트워크 캡처를 요구하지 않습니다."
+                        if not network_capture_required
+                        else "프록시 흐름이 0개여서 네트워크 진단 범위를 확인할 수 없습니다."
+                    ),
                 )
-                if control_scope:
+                if control_scope and network_capture_required:
                     try:
                         control_scope = active_control_scope(
                             run.options,
@@ -2953,17 +3026,53 @@ class DiagnosticOrchestrator:
                     run,
                     "network_testing",
                     80,
-                    "ProxyFlow를 구조화하고 API 검증 Candidate의 승인 경계를 판정합니다.",
+                    (
+                        "ProxyFlow를 구조화하고 API 검증 Candidate의 승인 경계를 판정합니다."
+                        if network_capture_required
+                        else "네트워크 진단이 이번 Session 범위에서 제외됐음을 기록합니다."
+                    ),
                 )
-                network_summary, network_evidence = await self._run_network_testing(
-                    db, run, flows, flow_rows
-                )
+                if network_capture_required:
+                    network_summary, network_evidence = await self._run_network_testing(
+                        db, run, flows, flow_rows
+                    )
+                else:
+                    network_summary = {
+                        "status": "not_in_scope",
+                        "message": "단말 전용 Session에서 네트워크 캡처와 API 재현을 명시적으로 제외했습니다.",
+                        "flow_count": 0,
+                        "candidate_count": 0,
+                        "executed_count": 0,
+                        "pending_count": 0,
+                        "analyses": [],
+                        "candidates": [],
+                        "executions": [],
+                        "pending_approval": [],
+                        "synthetic": False,
+                        "truncated": False,
+                    }
+                    network_evidence = None
+                    await self.events.publish(
+                        run.id,
+                        "network_testing",
+                        {
+                            "status": "not_in_scope",
+                            "flow_count": 0,
+                            "candidate_count": 0,
+                            "executed_count": 0,
+                            "pending_count": 0,
+                            "evidence_id": None,
+                        },
+                    )
                 options = dict(run.options)
                 options["network_testing"] = network_summary
                 options["pending_network_tests"] = network_summary[
                     "pending_approval"
                 ]
-                options["network_testing_evidence_id"] = network_evidence.id
+                if network_evidence is not None:
+                    options["network_testing_evidence_id"] = network_evidence.id
+                else:
+                    options.pop("network_testing_evidence_id", None)
                 run.options = options
                 db.commit()
                 if (
@@ -2983,8 +3092,13 @@ class DiagnosticOrchestrator:
                     db.refresh(run)
                 record_check(
                     "network_testing",
-                    bool(network_summary["flow_count"]),
-                    str(network_summary["message"]),
+                    bool(network_summary["flow_count"])
+                    or not network_capture_required,
+                    (
+                        str(network_summary["message"])
+                        if network_capture_required
+                        else "단말 전용 Session이라 API 재현 Candidate를 필수 범위에서 제외했습니다."
+                    ),
                 )
                 if self.frida_sessions.is_active(run.id) and not frida_session_started:
                     frida_session_started = True
@@ -3343,6 +3457,14 @@ class DiagnosticOrchestrator:
                         for key, value in assessment_summary.items()
                         if key != "controls"
                     }
+                    options["assessment_status"] = (
+                        "complete"
+                        if not assessment_summary["unresolved"]
+                        else "in_progress"
+                    )
+                    options["assessment_open_items"] = assessment_summary[
+                        "unresolved"
+                    ]
                     if assessment_summary["confirmed"]:
                         vulnerability_evidence = self.evidence.add_json(
                             db,
@@ -3372,6 +3494,9 @@ class DiagnosticOrchestrator:
                     if (
                         run.run_mode == RunMode.LIVE.value
                         and assessment_summary["unresolved"]
+                        and bool(
+                            run.options.get("assessment_completion_required", False)
+                        )
                     ):
                         quality_gaps.append(
                             {

@@ -369,6 +369,28 @@ def test_confirmed_manual_result_rejects_missing_evidence(client):
         for item in final_evidence
     )
 
+    review_summary = "실행은 완료했지만 취약 조건 판단에는 추가 재현이 필요합니다."
+    needs_review = client.post(
+        f"/api/assessment-controls/{control_id}/record",
+        json={
+            "outcome": "needs_review",
+            "reviewer": "reviewer",
+            "summary": review_summary,
+        },
+    )
+    assert needs_review.status_code == 200
+    assert needs_review.json()["status"] == "completed"
+    assert needs_review.json()["result"] == "needs_review"
+    assert needs_review.json()["summary"] == review_summary
+    assert needs_review.json()["evidence_ids"] == []
+
+    run_coverage = client.get(
+        f"/api/coverage?run_id={run_id}&scope=run&standard=critical_infrastructure"
+    ).json()
+    recorded = next(item for item in run_coverage["tests"] if item["id"] == control_id)
+    assert recorded["result"] == "needs_review"
+    assert recorded["summary"] == review_summary
+
 
 def test_domestic_baseline_cannot_receive_run_evidence_or_decisions(client):
     demo = client.post("/api/demo/bootstrap").json()

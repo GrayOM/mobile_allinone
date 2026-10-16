@@ -99,6 +99,10 @@ export default function LiveRunPage() {
   const [connected, setConnected] = useState(false);
   const [actionBusy, setActionBusy] = useState("");
   const [proxyImporting, setProxyImporting] = useState(0);
+  const [checkpointLabel, setCheckpointLabel] = useState("");
+  const [checkpointNote, setCheckpointNote] = useState("");
+  const [checkpointControlIds, setCheckpointControlIds] = useState("");
+  const [checkpointResult, setCheckpointResult] = useState("");
   const [actionError, setActionError] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -189,6 +193,37 @@ export default function LiveRunPage() {
       await refresh();
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : "프록시 설정 확인 실패");
+    } finally {
+      setActionBusy("");
+    }
+  }
+
+  async function captureCheckpoint() {
+    if (!checkpointLabel.trim()) return;
+    setActionBusy("checkpoint");
+    setActionError("");
+    setCheckpointResult("");
+    try {
+      const result = await post<{ evidence_ids: string[] }>(
+        `/runs/${runId}/checkpoints`,
+        {
+          label: checkpointLabel.trim(),
+          note: checkpointNote.trim(),
+          control_ids: checkpointControlIds
+            .split(/[\s,]+/)
+            .map((item) => item.trim().toUpperCase())
+            .filter(Boolean),
+          capture_screenshot: true,
+          capture_logs: true,
+          capture_process: true,
+        },
+      );
+      setCheckpointResult(`체크포인트를 저장했습니다 · 증적 ${result.evidence_ids.length}개`);
+      setCheckpointLabel("");
+      setCheckpointNote("");
+      await refresh();
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "체크포인트 캡처 실패");
     } finally {
       setActionBusy("");
     }
@@ -311,6 +346,12 @@ export default function LiveRunPage() {
   const controlScopeEnforcement = readControlScopeEnforcement(
     run.options.control_scope_enforcement,
   );
+  const manualCheckpoints = Array.isArray(run.options.manual_checkpoints)
+    ? run.options.manual_checkpoints.filter(
+      (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object",
+    )
+    : [];
+  const assessmentOpenItems = Number(run.options.assessment_open_items ?? 0);
   const stageSequence = [
     { stage: "preflight", progress: 4 },
     { stage: "static_analysis", progress: 12 },
@@ -367,6 +408,58 @@ export default function LiveRunPage() {
       {run.error && <div className="inline-alert">{run.error}</div>}
       {actionError && <div className="inline-alert">{actionError}</div>}
       {candidateResult && <div className="inline-alert inline-alert--ok">{candidateResult}</div>}
+      {checkpointResult && <div className="inline-alert inline-alert--ok">{checkpointResult}</div>}
+      {run.options.assessment_status === "in_progress" && (
+        <div className="inline-alert assessment-progress-note">
+          증적 수집 Session과 기준 판정은 분리되어 있습니다. 현재 판정 대기 {assessmentOpenItems}건은 국내 기준 원장에서 계속 검토할 수 있습니다.
+        </div>
+      )}
+      {run.status === "safely_paused" && run.current_stage === "manual_interaction" && (
+        <section className="manual-session panel">
+          <div className="manual-session__rail" aria-hidden="true">
+            <span>LIVE</span>
+            <i />
+            <strong>{manualCheckpoints.length.toString().padStart(2, "0")}</strong>
+          </div>
+          <div className="manual-session__body">
+            <div className="manual-session__head">
+              <div>
+                <span className="eyebrow">INTERACTIVE DIAGNOSTIC SESSION</span>
+                <h3>앱을 조작하고 재현 시점을 고정하세요</h3>
+                <p>iPhone에서 대상 기능을 실행한 뒤 단계명을 입력하면 화면·프로세스·3초 syslog·현재 Frida 상태를 한 묶음으로 저장합니다. 필요한 만큼 반복한 후에만 Run을 재개하세요.</p>
+              </div>
+              <StatusChip value="safely_paused" label={`체크포인트 ${manualCheckpoints.length}건`} />
+            </div>
+            <div className="manual-session__form">
+              <div className="field">
+                <label htmlFor="checkpoint-label">재현 단계</label>
+                <input id="checkpoint-label" value={checkpointLabel} onChange={(event) => setCheckpointLabel(event.target.value)} placeholder="예: UserDefaults에 테스트 값 저장 후" maxLength={120} />
+              </div>
+              <div className="field">
+                <label htmlFor="checkpoint-controls">연결할 진단 항목 ID</label>
+                <input id="checkpoint-controls" value={checkpointControlIds} onChange={(event) => setCheckpointControlIds(event.target.value)} placeholder="예: EFI-MA-21, EFI-MA-49" />
+              </div>
+              <div className="field field--wide">
+                <label htmlFor="checkpoint-note">관찰 내용</label>
+                <textarea id="checkpoint-note" value={checkpointNote} onChange={(event) => setCheckpointNote(event.target.value)} placeholder="입력값, 수행한 메뉴, 화면 변화와 기대 결과를 기록하세요." rows={3} maxLength={1000} />
+              </div>
+              <button type="button" className="button button--signal" disabled={!checkpointLabel.trim() || Boolean(actionBusy)} onClick={() => void captureCheckpoint()}>
+                {actionBusy === "checkpoint" ? "증적 수집 중…" : "현재 상태를 증적으로 고정"}
+              </button>
+            </div>
+            {manualCheckpoints.length > 0 && (
+              <div className="manual-session__history">
+                {manualCheckpoints.slice().reverse().map((item) => (
+                  <div key={String(item.id)}>
+                    <strong>{String(item.label ?? "수동 체크포인트")}</strong>
+                    <small>{Array.isArray(item.control_ids) && item.control_ids.length ? item.control_ids.join(" · ") : "항목 미지정"}</small>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
       {controlValidation && (
         <section className={`control-scope-ledger panel ${controlScopeEnforcement?.status === "violation" ? "control-scope-ledger--violation" : ""}`}>
           <div className="control-scope-ledger__head">
@@ -388,8 +481,12 @@ export default function LiveRunPage() {
             <div><span>EXTERNAL AI</span><strong>{controlValidation.external_ai_excluded ? "EXCLUDED" : "—"}</strong><small>승인 원장·집행 증적 제외</small></div>
           </div>
           <div className="control-scope-ledger__hosts">
-            <span>ALLOWED DESTINATIONS</span>
-            <div>{controlValidation.allowed_network_hosts.map((host) => <code key={host}>{host}</code>)}</div>
+            <span>{controlValidation.network_scope_policy === "not_in_scope" ? "NETWORK SCOPE" : "ALLOWED DESTINATIONS"}</span>
+            <div>
+              {controlValidation.allowed_network_hosts.length
+                ? controlValidation.allowed_network_hosts.map((host) => <code key={host}>{host}</code>)
+                : <code>NOT IN SCOPE · DEVICE EVIDENCE ONLY</code>}
+            </div>
           </div>
           {controlScopeEnforcement?.violations.length ? (
             <div className="control-scope-ledger__violations">

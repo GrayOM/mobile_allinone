@@ -4,6 +4,8 @@ const MSW_JAILBREAK_PATHS = [
   '/Applications/Cydia.app',
   '/Applications/Sileo.app',
   '/Applications/Zebra.app',
+  '/Applications/Filza.app',
+  '/Applications/iFile.app',
   '/Library/MobileSubstrate/MobileSubstrate.dylib',
   '/Library/PreferenceLoader',
   '/bin/bash',
@@ -12,11 +14,16 @@ const MSW_JAILBREAK_PATHS = [
   '/private/var/lib/apt',
   '/private/var/lib/cydia',
   '/private/var/stash',
+  '/private/jailbreak.txt',
   '/usr/bin/ssh',
+  '/usr/lib/frida/frida-agent.dylib',
+  '/usr/sbin/frida-server',
   '/usr/libexec/sftp-server',
   '/var/cache/apt',
   '/var/jb'
 ];
+
+const MSW_INSTRUMENTATION_PORTS = [27042, 27043, 23946, 23947, 4444, 9999];
 
 let mswEventCount = 0;
 
@@ -39,7 +46,7 @@ function mswLooksLikeJailbreakPath(value) {
   return MSW_JAILBREAK_PATHS.some(function (item) {
     const lowered = item.toLowerCase();
     return path === lowered || path.indexOf(lowered + '/') === 0;
-  }) || /(^|\/)(cydia|sileo|zebra|mobilesubstrate|substrate|substitute)(\/|$)/i.test(path);
+  }) || /(^|\/)(cydia|sileo|zebra|filza|ifile|frida|mobilesubstrate|substrate|substitute)(\/|$)/i.test(path);
 }
 
 function mswReadCString(pointer) {
@@ -47,6 +54,55 @@ function mswReadCString(pointer) {
     return pointer.isNull() ? '' : pointer.readUtf8String();
   } catch (_) {
     return '';
+  }
+}
+
+function mswReadSocketAddress(address) {
+  try {
+    if (address.isNull()) return null;
+    const family = address.add(1).readU8();
+    const port = (address.add(2).readU8() << 8) | address.add(3).readU8();
+    if (family === 2) {
+      const octets = [0, 1, 2, 3].map(function (offset) {
+        return address.add(4 + offset).readU8();
+      });
+      return {
+        family: 'ipv4',
+        host: octets.join('.'),
+        port: port,
+        loopback: octets[0] === 127
+      };
+    }
+    if (family === 30) {
+      const octets = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map(
+        function (offset) {
+          return address.add(8 + offset).readU8();
+        }
+      );
+      const loopback = octets.slice(0, 15).every(function (value) {
+        return value === 0;
+      }) && octets[15] === 1;
+      return {
+        family: 'ipv6',
+        host: loopback ? '::1' : 'non-loopback-ipv6',
+        port: port,
+        loopback: loopback
+      };
+    }
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
+
+function mswSetErrno(value) {
+  try {
+    const errorAddress = Module.findExportByName(null, '__error');
+    if (!errorAddress) return;
+    const errorPointer = new NativeFunction(errorAddress, 'pointer', [])();
+    if (!errorPointer.isNull()) errorPointer.writeS32(value);
+  } catch (_) {
+    // The return value remains a failure even when errno cannot be updated.
   }
 }
 
@@ -111,6 +167,29 @@ setImmediate(function () {
     }, 'int', []));
   }
 
+  const connectAddress = Module.findExportByName(null, 'connect');
+  if (connectAddress) {
+    Interceptor.attach(connectAddress, {
+      onEnter(args) {
+        this.mswSocket = mswReadSocketAddress(args[1]);
+        this.mswMask = Boolean(
+          this.mswSocket &&
+          this.mswSocket.loopback &&
+          MSW_INSTRUMENTATION_PORTS.indexOf(this.mswSocket.port) !== -1
+        );
+      },
+      onLeave(retval) {
+        if (!this.mswMask) return;
+        mswReport(
+          'libc.connect',
+          this.mswSocket.host + ':' + String(this.mswSocket.port)
+        );
+        mswSetErrno(61);
+        retval.replace(-1);
+      }
+    });
+  }
+
   if (ObjC.available) {
     const NSFileManager = ObjC.classes.NSFileManager;
     if (NSFileManager && NSFileManager['- fileExistsAtPath:']) {
@@ -164,7 +243,7 @@ setImmediate(function () {
       Interceptor.attach(UIApplication['- canOpenURL:'].implementation, {
         onEnter(args) {
           this.mswUrl = new ObjC.Object(args[2]).absoluteString().toString();
-          this.mswMask = /^(cydia|sileo|zbra|filza|activator):/i.test(this.mswUrl);
+          this.mswMask = /^(cydia|sileo|zebra|filza|activator):/i.test(this.mswUrl);
         },
         onLeave(retval) {
           if (!this.mswMask) return;
