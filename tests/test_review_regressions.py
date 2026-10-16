@@ -628,6 +628,7 @@ def _live_artifact_from_demo(client) -> tuple[Project, AppArtifact]:
             external_analyzer_allowed=False,
             mock_mode=False,
             run_mode="live",
+            assessment_profile="free_assessment",
         )
         db.add(project)
         db.flush()

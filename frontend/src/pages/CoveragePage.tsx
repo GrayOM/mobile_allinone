@@ -210,6 +210,15 @@ export default function CoveragePage() {
   const total = coverage?.tests.length ?? 0;
   const completion = total ? Math.round((decided / total) * 100) : 0;
   const domestic = standard !== "owasp_mastg";
+  const openItems = domestic ? Math.max(total - decided, 0) : 0;
+  const confirmedItems = coverage?.result_counts.confirmed ?? 0;
+  const reportReady = Boolean(
+    domestic
+    && runId
+    && selectedRun?.status === "completed"
+    && openItems === 0
+    && confirmedItems > 0,
+  );
   const laneCounts = useMemo(() => {
     const values: Record<string, number> = {};
     for (const test of coverage?.tests ?? []) {
@@ -377,13 +386,13 @@ export default function CoveragePage() {
         reviewer: assessmentReviewer.trim(),
         summary: assessmentSummary.trim(),
         evidence_ids: assessmentOutcome === "confirmed" ? selectedEvidenceIds : [],
-        criteria_confirmed: assessmentOutcome === "confirmed" && criteriaConfirmed,
+        criteria_confirmed: assessmentOutcome !== "needs_review" && criteriaConfirmed,
       });
       localStorage.setItem("msw.assessmentReviewer", assessmentReviewer.trim());
       await refreshRunAssessment();
       setAssessmentMessage(
         assessmentOutcome === "confirmed"
-          ? "취약 판정과 연결 증적을 확정 원장에 기록했습니다. 이제 취약점 전용 DOCX에 포함됩니다."
+          ? "취약 판정과 연결 증적을 원장에 기록했습니다. 모든 항목 판정이 끝난 뒤 최종 DOCX에 포함됩니다."
           : "판정 상태와 검토 사유만 기록했습니다. 양호·해당없음 증적은 생성하거나 연결하지 않았습니다.",
       );
       setCriteriaConfirmed(false);
@@ -503,6 +512,30 @@ export default function CoveragePage() {
       </section>
 
       {domestic && coverage && (
+        <section className={reportReady ? "assessment-gate assessment-gate--open" : "assessment-gate"} aria-label="최종 완료 게이트">
+          <div className="assessment-gate__status">
+            <span>{reportReady ? "최종화 가능" : "최종화 잠금"}</span>
+            <strong>{openItems === 0 ? "전 항목 판정 완료" : `${openItems}개 항목이 남았습니다`}</strong>
+            <p>{reportReady ? "Run과 원장이 완료됐습니다. 확정 취약점 보고서를 생성할 수 있습니다." : "미점검과 추가 검토를 0으로 만들기 전에는 완료 처리와 최종 보고서 생성을 허용하지 않습니다."}</p>
+          </div>
+          <ol className="assessment-gate__steps">
+            <li className={appId ? "is-done" : ""}><span>1</span><div><strong>대상 고정</strong><small>{appId ? "완료" : "앱 선택 필요"}</small></div></li>
+            <li className={runId ? "is-done" : ""}><span>2</span><div><strong>Run 선택</strong><small>{runId ? "완료" : "Run 선택 필요"}</small></div></li>
+            <li className={openItems === 0 && total > 0 ? "is-done" : "is-blocked"}><span>3</span><div><strong>전 항목 판정</strong><small>{decided}/{total}</small></div></li>
+            <li className={reportReady ? "is-done" : "is-locked"}><span>4</span><div><strong>최종 보고서</strong><small>{reportReady ? "생성 가능" : "잠김"}</small></div></li>
+          </ol>
+          <button
+            className="button button--signal"
+            onClick={() => void downloadDocxReport()}
+            disabled={reporting || !reportReady}
+            title={!reportReady ? "전 항목 판정과 Run 완료 후 사용할 수 있습니다." : undefined}
+          >
+            {reporting ? "최종 보고서 생성 중…" : "최종 DOCX 생성"}
+          </button>
+        </section>
+      )}
+
+      {domestic && coverage && (
         <section className="execution-rail" aria-label="진단 실행 경계">
           <div className="execution-rail__label">
             <span>EXECUTION BOUNDARY</span>
@@ -519,13 +552,6 @@ export default function CoveragePage() {
               disabled={triaging || !appId || !project?.ai_enabled || (project.run_mode === "live" && !project.external_ai_allowed)}
             >
               {triaging ? "정적 증적 분류 중…" : "AI 사전 진단"}
-            </button>
-            <button
-              className="button button--signal"
-              onClick={() => void downloadDocxReport()}
-              disabled={reporting || !runId || (coverage.result_counts.confirmed ?? 0) === 0}
-            >
-              {reporting ? "DOCX 생성 중…" : "취약점만 DOCX"}
             </button>
             <button
               className="button button--quiet"
@@ -1101,11 +1127,11 @@ function AssessmentDecisionDesk({
               </label>
             </div>
 
-            {outcome === "confirmed" && (
+            {outcome !== "needs_review" && (
               <label className="assessment-criteria-check">
                 <input type="checkbox" checked={criteriaConfirmed} onChange={(event) => onCriteriaChange(event.target.checked)} />
                 <span>
-                  <strong>문서의 취약 진단 기준을 실제로 수행했습니다</strong>
+                  <strong>{outcome === "not_applicable" ? "적용 대상을 확인하고 해당없음 사유를 검증했습니다" : "문서의 진단 기준을 실제로 수행했습니다"}</strong>
                   <small>{control.criteria.join(" ")}</small>
                 </span>
               </label>

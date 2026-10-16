@@ -37,6 +37,7 @@ PROFILE_NAMES = {
     "electronic_financial": "전자금융기반시설",
     "free_assessment": "전체 진단 (ALL)",
 }
+TERMINAL_ASSESSMENT_RESULTS = {"confirmed", "not_vulnerable", "not_applicable"}
 EXCLUDED_EVIDENCE_TYPES = {
     "assessment_ledger",
     "assessment_ledger_amendment",
@@ -56,9 +57,34 @@ class VulnerabilityDocxReportRenderer:
         app = db.get(AppArtifact, run.app_id) if run.app_id else None
         if not project or not app:
             raise LookupError("보고서에 필요한 프로젝트 또는 앱을 찾을 수 없습니다.")
+        if run.status != "completed":
+            raise ValueError(
+                "최종 보고서는 진단 Run이 완료된 뒤에만 생성할 수 있습니다. "
+                "미점검 항목과 필수 실행 Gap을 먼저 처리하세요."
+            )
         profile = str(run.options.get("assessment_profile") or project.assessment_profile)
         if is_free_assessment(profile):
             return self._render_free(db, project=project, app=app, run=run, profile=profile)
+        all_controls = db.scalars(
+            select(ControlTest)
+            .where(
+                ControlTest.run_id == run.id,
+                ControlTest.standard == profile,
+            )
+            .order_by(ControlTest.mastg_id)
+        ).all()
+        unresolved = [
+            item
+            for item in all_controls
+            if item.result not in TERMINAL_ASSESSMENT_RESULTS
+        ]
+        if unresolved:
+            preview = ", ".join(item.mastg_id for item in unresolved[:5])
+            suffix = "…" if len(unresolved) > 5 else ""
+            raise ValueError(
+                f"최종 보고서 생성이 차단됐습니다. 미점검·추가 검토 "
+                f"{len(unresolved)}개 항목을 먼저 판정하세요: {preview}{suffix}"
+            )
         controls = db.scalars(
             select(ControlTest)
             .where(

@@ -38,6 +38,7 @@ const stageLabels: Record<string, string> = {
   network_testing: "API Candidate 판정",
   ai_analysis: "AI 판정",
   finalize: "증적 정리",
+  assessment_completion: "전 항목 판정 대기",
   completed: "완료",
   completed_with_gaps: "일부 범위 미완료",
   manual_required: "수동 확인 필요",
@@ -410,9 +411,14 @@ export default function LiveRunPage() {
       {candidateResult && <div className="inline-alert inline-alert--ok">{candidateResult}</div>}
       {checkpointResult && <div className="inline-alert inline-alert--ok">{checkpointResult}</div>}
       {run.options.assessment_status === "in_progress" && (
-        <div className="inline-alert assessment-progress-note">
-          증적 수집 Session과 기준 판정은 분리되어 있습니다. 현재 판정 대기 {assessmentOpenItems}건은 국내 기준 원장에서 계속 검토할 수 있습니다.
-        </div>
+        <section className="assessment-blocker" aria-label="진단 완료 차단">
+          <div>
+            <span>완료 잠금</span>
+            <strong>아직 진단이 끝나지 않았습니다</strong>
+            <p>미점검·추가 검토 {assessmentOpenItems}건을 모두 판정해야 완료 상태와 최종 보고서가 열립니다.</p>
+          </div>
+          <Link className="button button--signal" to="/coverage">남은 항목 판정하기</Link>
+        </section>
       )}
       {run.status === "safely_paused" && run.current_stage === "manual_interaction" && (
         <section className="manual-session panel">

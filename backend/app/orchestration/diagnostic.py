@@ -3465,7 +3465,27 @@ class DiagnosticOrchestrator:
                     options["assessment_open_items"] = assessment_summary[
                         "unresolved"
                     ]
-                    if assessment_summary["confirmed"]:
+                    assessment_required = bool(
+                        run.options.get("assessment_completion_required", False)
+                    )
+                    options["assessment_gate"] = {
+                        "required": assessment_required,
+                        "total": assessment_summary["total"],
+                        "decided": (
+                            assessment_summary["total"]
+                            - assessment_summary["unresolved"]
+                        ),
+                        "unresolved": assessment_summary["unresolved"],
+                        "state": (
+                            "open"
+                            if assessment_required and assessment_summary["unresolved"]
+                            else "passed"
+                        ),
+                    }
+                    if (
+                        assessment_summary["confirmed"]
+                        and not assessment_summary["unresolved"]
+                    ):
                         vulnerability_evidence = self.evidence.add_json(
                             db,
                             run_id=run.id,
@@ -3492,11 +3512,8 @@ class DiagnosticOrchestrator:
                         ] = vulnerability_evidence.id
                     run.options = options
                     if (
-                        run.run_mode == RunMode.LIVE.value
+                        assessment_required
                         and assessment_summary["unresolved"]
-                        and bool(
-                            run.options.get("assessment_completion_required", False)
-                        )
                     ):
                         quality_gaps.append(
                             {
@@ -3509,6 +3526,34 @@ class DiagnosticOrchestrator:
                             }
                         )
                     db.commit()
+                    if assessment_required and assessment_summary["unresolved"]:
+                        await self._stage(
+                            db,
+                            run,
+                            "assessment_completion",
+                            94,
+                            "모든 국내 기준 항목의 판정을 기다립니다.",
+                        )
+                        await self.pause(
+                            run.id,
+                            reason=(
+                                "미점검·추가 검토 항목이 남아 최종화를 잠갔습니다. "
+                                "판정 원장에서 모든 항목을 완료하세요."
+                            ),
+                        )
+                        await self._checkpoint(run.id)
+                        db.refresh(run)
+                        refreshed_summary = evaluate_standard_controls(db, run, app)
+                        if refreshed_summary["unresolved"]:
+                            raise DiagnosticManualRequired(
+                                f"국내 기준 {refreshed_summary['unresolved']}개 항목이 "
+                                "미판정 상태라 최종화를 중단했습니다."
+                            )
+                        quality_gaps = [
+                            item
+                            for item in quality_gaps
+                            if item["stage"] != "domestic_assessment"
+                        ]
 
                 await self._stage(
                     db, run, "finalize", 96, "증적 인덱스를 검증하고 캡처를 종료합니다."
@@ -3526,14 +3571,25 @@ class DiagnosticOrchestrator:
                     item["stage"] for item in unique_gaps
                 ]
                 run.options = options
+                assessment_blocked = any(
+                    item["stage"] == "domestic_assessment" for item in unique_gaps
+                )
                 final_status = (
-                    RunStatus.COMPLETED_WITH_GAPS
-                    if unique_gaps
-                    else RunStatus.COMPLETED
+                    RunStatus.MANUAL_REQUIRED
+                    if assessment_blocked
+                    else (
+                        RunStatus.COMPLETED_WITH_GAPS
+                        if unique_gaps
+                        else RunStatus.COMPLETED
+                    )
                 )
                 run.status = final_status.value
-                run.current_stage = final_status.value
-                run.progress = 100
+                run.current_stage = (
+                    "assessment_completion"
+                    if assessment_blocked
+                    else final_status.value
+                )
+                run.progress = 96 if assessment_blocked else 100
                 run.finished_at = datetime.now(timezone.utc)
                 db.commit()
                 await self.events.publish(
@@ -3541,9 +3597,12 @@ class DiagnosticOrchestrator:
                     "run_status",
                     {
                         "status": final_status.value,
-                        "progress": 100,
+                        "progress": run.progress,
                         "message": (
-                            f"파이프라인은 종료됐지만 필수 범위 {len(unique_gaps)}개가 부족합니다."
+                            "국내 기준의 모든 항목을 판정해야 진단을 완료할 수 있습니다. "
+                            "미점검·추가 검토 항목을 원장에서 처리하세요."
+                            if assessment_blocked
+                            else f"파이프라인은 종료됐지만 필수 범위 {len(unique_gaps)}개가 부족합니다."
                             if unique_gaps
                             else "필수 실행·증적 조건을 충족해 진단을 완료했습니다."
                         ),

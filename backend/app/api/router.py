@@ -3016,6 +3016,14 @@ async def create_run(
         raise HTTPException(
             422, "assessment_completion_required는 boolean이어야 합니다."
         )
+    if (
+        run_mode == RunMode.LIVE
+        and project.assessment_profile != "free_assessment"
+    ):
+        # A real domestic-standard assessment is never allowed to opt out of
+        # its ledger. The client flag remains accepted for old clients, but
+        # the server is authoritative and forces the completion gate on.
+        assessment_completion_required = True
     reuse_installed_app = options.get(
         "reuse_installed_app", bool(app and _is_device_registered(app))
     )
@@ -3060,6 +3068,11 @@ async def create_run(
             "pause_for_login": payload.pause_for_login or interactive_session,
             "interactive_session": interactive_session,
             "assessment_completion_required": assessment_completion_required,
+            "assessment_completion_policy": (
+                "all_controls_terminal_before_final_report"
+                if assessment_completion_required
+                else "advisory"
+            ),
             "frida_mode": frida_mode,
             "auto_navigation": auto_navigation,
             "ai_rank_navigation": ai_rank_navigation,
@@ -3380,6 +3393,16 @@ async def pause_run(request: Request, run_id: str, db: Session = Depends(get_db)
 @router.post("/runs/{run_id}/resume")
 async def resume_run(request: Request, run_id: str, db: Session = Depends(get_db)):
     run = _run_or_404(db, run_id)
+    if (
+        run.current_stage == "assessment_completion"
+        and bool(run.options.get("assessment_completion_required"))
+        and int(run.options.get("assessment_open_items") or 0) > 0
+    ):
+        raise HTTPException(
+            409,
+            f"미점검·추가 검토 {int(run.options.get('assessment_open_items') or 0)}개 항목을 "
+            "모두 판정한 뒤 진단을 재개하세요.",
+        )
     if (
         run.proxy_adapter in {"burp", "fiddler"}
         and run.current_stage == "proxy_manual_setup"
@@ -4102,7 +4125,7 @@ def create_vulnerability_docx_report(
         "run_id": run_id,
         "url": f"/api/runs/{run_id}/report/docx",
         "file": path.name,
-        "policy": "confirmed_vulnerabilities_only",
+        "policy": "complete_assessment_confirmed_vulnerabilities_only",
     }
 
 
@@ -5299,6 +5322,10 @@ def _apply_assessment_summary(
     review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Re-evaluate the run ledger and persist summary, gaps and review trail."""
+    was_assessment_blocked = (
+        run.status == RunStatus.MANUAL_REQUIRED.value
+        and run.current_stage == "assessment_completion"
+    )
     options = dict(run.options)
     if review is not None:
         reviews = list(options.get("assessment_reviews") or [])
@@ -5311,7 +5338,25 @@ def _apply_assessment_summary(
     options["assessment_summary"] = {
         key: value for key, value in summary.items() if key != "controls"
     }
-    if summary["confirmed"]:
+    assessment_required = bool(
+        options.get("assessment_completion_required", False)
+    )
+    options["assessment_status"] = (
+        "complete" if not summary["unresolved"] else "in_progress"
+    )
+    options["assessment_open_items"] = summary["unresolved"]
+    options["assessment_gate"] = {
+        "required": assessment_required,
+        "total": summary["total"],
+        "decided": summary["total"] - summary["unresolved"],
+        "unresolved": summary["unresolved"],
+        "state": (
+            "open"
+            if assessment_required and summary["unresolved"]
+            else "passed"
+        ),
+    }
+    if summary["confirmed"] and not summary["unresolved"]:
         vulnerability_evidence = EvidenceService(_settings(request)).add_json(
             db,
             run_id=run.id,
@@ -5336,7 +5381,7 @@ def _apply_assessment_summary(
         for item in options.get("quality_gaps", [])
         if item.get("stage") != "domestic_assessment"
     ]
-    if run.run_mode == RunMode.LIVE.value and summary["unresolved"]:
+    if assessment_required and summary["unresolved"]:
         quality_gaps.append(
             {
                 "stage": "domestic_assessment",
@@ -5346,9 +5391,19 @@ def _apply_assessment_summary(
     options["quality_gaps"] = quality_gaps
     options["failed_required_stages"] = [item["stage"] for item in quality_gaps]
     run.options = options
-    if run.status == RunStatus.COMPLETED_WITH_GAPS.value and not quality_gaps:
+    if was_assessment_blocked and not summary["unresolved"]:
+        final_status = (
+            RunStatus.COMPLETED_WITH_GAPS
+            if quality_gaps
+            else RunStatus.COMPLETED
+        )
+        run.status = final_status.value
+        run.current_stage = final_status.value
+        run.progress = 100
+    elif run.status == RunStatus.COMPLETED_WITH_GAPS.value and not quality_gaps:
         run.status = RunStatus.COMPLETED.value
         run.current_stage = RunStatus.COMPLETED.value
+        run.progress = 100
     return summary
 
 
@@ -5367,7 +5422,7 @@ class AssessmentRecordRequest(BaseModel):
         "confirmed", "not_vulnerable", "needs_review", "not_applicable"
     ]
     reviewer: str = Field(min_length=1, max_length=100)
-    summary: str = Field(min_length=1, max_length=4000)
+    summary: str = Field(min_length=10, max_length=4000)
     evidence_ids: list[str] = Field(default_factory=list, max_length=100)
     criteria_confirmed: bool = False
 
@@ -5402,8 +5457,6 @@ def record_assessment_result(
     if foreign_attachments:
         raise HTTPException(422, "다른 국내 기준 항목에 첨부한 수동 증적은 재사용할 수 없습니다.")
     if payload.outcome == "confirmed":
-        if not payload.criteria_confirmed:
-            raise HTTPException(422, "문서의 진단 기준 수행 확인이 필요합니다.")
         if not evidence:
             raise HTTPException(422, "취약 확정 판정에는 재현 원본 증적이 필요합니다.")
         available = {item.evidence_type for item in evidence}
@@ -5418,6 +5471,11 @@ def record_assessment_result(
                 "필수 증적 유형이 부족합니다: "
                 + "; ".join(" 또는 ".join(group) for group in missing),
             )
+    if payload.outcome != "needs_review" and not payload.criteria_confirmed:
+        raise HTTPException(
+            422,
+            "취약·양호·해당없음 판정에는 문서의 진단 기준 수행 또는 적용 여부 확인이 필요합니다.",
+        )
     control.status = "completed"
     control.result = payload.outcome
     control.summary = payload.summary
@@ -5475,6 +5533,7 @@ def record_assessment_result(
             "outcome": payload.outcome,
             "reviewer": payload.reviewer,
             "summary": payload.summary,
+            "criteria_confirmed": payload.criteria_confirmed,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         },
     )

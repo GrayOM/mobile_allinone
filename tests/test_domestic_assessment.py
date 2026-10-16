@@ -28,6 +28,25 @@ def _wait_for_run(client, run_id: str, timeout: float = 30) -> dict:
     raise AssertionError("국내 기준 Mock Run이 제한 시간 안에 끝나지 않았습니다.")
 
 
+def _wait_for_assessment_gate(client, run_id: str, timeout: float = 30) -> dict:
+    deadline = time.monotonic() + timeout
+    current: dict = {}
+    while time.monotonic() < deadline:
+        current = client.get(f"/api/runs/{run_id}").json()
+        if (
+            current.get("status") == "safely_paused"
+            and current.get("current_stage") == "assessment_completion"
+        ):
+            return current
+        if current.get("status") in {"failed", "stopped", "interrupted"}:
+            break
+        time.sleep(0.05)
+    raise AssertionError(
+        f"판정 완료 게이트에 도달하지 못했습니다: "
+        f"{current.get('status')} {current.get('current_stage')}"
+    )
+
+
 def test_domestic_catalogs_preserve_document_item_counts_and_ids():
     assert len(CRITICAL_INFRASTRUCTURE_CONTROLS) == 27
     assert len(ELECTRONIC_FINANCIAL_CONTROLS) == 56
@@ -207,7 +226,7 @@ def test_run_generates_evidence_bound_ledger_and_manual_confirmation(client, tmp
     }
     assert root_evidence_types == {"device_state", "command_log", "screenshot"}
     assert len(root["evidence_ids"]) == 3
-    assert any(item["evidence_type"] == "vulnerability_assessment" for item in evidence)
+    assert not any(item["evidence_type"] == "vulnerability_assessment" for item in evidence)
 
     transaction = next(
         item for item in ledger["tests"] if item["control_id"] == "EFI-MA-01"
@@ -249,9 +268,25 @@ def test_run_generates_evidence_bound_ledger_and_manual_confirmation(client, tmp
     assert recorded.json()["result"] == "confirmed"
     assert recorded.json()["finding_ids"]
 
+    blocked_report = client.post(f"/api/runs/{run['id']}/report/docx")
+    assert blocked_report.status_code == 409
+    assert "미점검·추가 검토" in blocked_report.json()["detail"]
+
+    with SessionLocal() as db:
+        controls = db.query(ControlTest).filter_by(
+            run_id=run["id"],
+            standard="electronic_financial",
+        ).all()
+        for control in controls:
+            if control.result not in {"confirmed", "not_vulnerable", "not_applicable"}:
+                control.status = "completed"
+                control.result = "not_applicable"
+                control.summary = "보고서 게이트 테스트를 위한 명시적 적용 제외 판정입니다."
+        db.commit()
+
     report = client.post(f"/api/runs/{run['id']}/report/docx")
     assert report.status_code == 200
-    assert report.json()["policy"] == "confirmed_vulnerabilities_only"
+    assert report.json()["policy"] == "complete_assessment_confirmed_vulnerabilities_only"
     downloaded = client.get(f"/api/runs/{run['id']}/report/docx")
     assert downloaded.status_code == 200
     assert downloaded.headers["content-type"].startswith(
@@ -323,6 +358,18 @@ def test_confirmed_manual_result_rejects_missing_evidence(client):
     )
     assert response.status_code == 422
 
+    unattested_good = client.post(
+        f"/api/assessment-controls/{control_id}/record",
+        json={
+            "outcome": "not_vulnerable",
+            "reviewer": "reviewer",
+            "summary": "실제 기준 수행 확인 없이 양호로 넘기려는 시도입니다.",
+            "criteria_confirmed": False,
+        },
+    )
+    assert unattested_good.status_code == 422
+    assert "진단 기준 수행" in unattested_good.json()["detail"]
+
     evidence_before = client.get(f"/api/runs/{run_id}/evidence").json()
     good = client.post(
         f"/api/assessment-controls/{control_id}/record",
@@ -330,7 +377,7 @@ def test_confirmed_manual_result_rejects_missing_evidence(client):
             "outcome": "not_vulnerable",
             "reviewer": "reviewer",
             "summary": "진단 기준을 수행했으며 취약 조건이 재현되지 않았습니다.",
-            "criteria_confirmed": False,
+            "criteria_confirmed": True,
         },
     )
     assert good.status_code == 200
@@ -390,6 +437,154 @@ def test_confirmed_manual_result_rejects_missing_evidence(client):
     recorded = next(item for item in run_coverage["tests"] if item["id"] == control_id)
     assert recorded["result"] == "needs_review"
     assert recorded["summary"] == review_summary
+
+
+def test_required_assessment_stays_blocked_until_last_control_is_terminal(client):
+    demo = client.post("/api/demo/bootstrap").json()
+    with SessionLocal() as db:
+        template = db.query(ControlTest).filter_by(
+            app_id=demo["app"]["id"],
+            run_id=None,
+            standard="critical_infrastructure",
+        ).first()
+        run = DiagnosticRun(
+            project_id=demo["project"]["id"],
+            app_id=demo["app"]["id"],
+            device_id="mock-android-01",
+            device_adapter="mock",
+            proxy_adapter="mock",
+            run_mode="live",
+            synthetic=False,
+            status="manual_required",
+            current_stage="assessment_completion",
+            progress=96,
+            options={
+                "assessment_profile": "critical_infrastructure",
+                "assessment_completion_required": True,
+                "quality_gaps": [
+                    {
+                        "stage": "domestic_assessment",
+                        "message": "1개 국내 기준 항목의 점검이 완료되지 않았습니다.",
+                    }
+                ],
+                "failed_required_stages": ["domestic_assessment"],
+            },
+        )
+        db.add(run)
+        db.flush()
+        control = ControlTest(
+            project_id=run.project_id,
+            app_id=run.app_id,
+            run_id=run.id,
+            mastg_id=template.mastg_id,
+            masvs_id=template.masvs_id,
+            platform=template.platform,
+            title=template.title,
+            automation=template.automation,
+            status="manual_required",
+            result="not_tested",
+            standard=template.standard,
+            criteria=template.criteria,
+            evidence_requirements=template.evidence_requirements,
+            finding_categories=template.finding_categories,
+            risk=template.risk,
+            replacement_ids=[],
+            evidence_ids=[],
+            finding_ids=[],
+            synthetic=False,
+        )
+        db.add(control)
+        db.commit()
+        run_id = run.id
+        control_id = control.id
+
+    blocked = client.post(f"/api/runs/{run_id}/report/docx")
+    assert blocked.status_code == 409
+    assert "Run이 완료된 뒤" in blocked.json()["detail"]
+
+    recorded = client.post(
+        f"/api/assessment-controls/{control_id}/record",
+        json={
+            "outcome": "not_vulnerable",
+            "reviewer": "completion-reviewer",
+            "summary": "진단 기준을 수행했으며 취약 조건이 재현되지 않았습니다.",
+            "criteria_confirmed": True,
+        },
+    )
+    assert recorded.status_code == 200
+    finished = client.get(f"/api/runs/{run_id}").json()
+    assert finished["status"] == "completed"
+    assert finished["current_stage"] == "completed"
+    assert finished["progress"] == 100
+    assert finished["options"]["assessment_status"] == "complete"
+    assert finished["options"]["assessment_open_items"] == 0
+    assert finished["options"]["assessment_gate"]["state"] == "passed"
+    assert "domestic_assessment" not in finished["options"]["failed_required_stages"]
+
+
+def test_required_run_pauses_and_resume_is_server_blocked_until_ledger_complete(client):
+    demo = client.post("/api/demo/bootstrap").json()
+    started = client.post(
+        "/api/runs",
+        json={
+            "project_id": demo["project"]["id"],
+            "app_id": demo["app"]["id"],
+            "device_id": "mock-android-01",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+            "options": {"assessment_completion_required": True},
+        },
+    )
+    assert started.status_code == 201, started.text
+    run_id = started.json()["id"]
+    paused = _wait_for_assessment_gate(client, run_id)
+    assert paused["progress"] == 94
+    assert paused["options"]["assessment_gate"]["state"] == "open"
+    assert paused["options"]["assessment_open_items"] > 0
+
+    blocked_resume = client.post(f"/api/runs/{run_id}/resume")
+    assert blocked_resume.status_code == 409
+    assert "모두 판정" in blocked_resume.json()["detail"]
+
+    with SessionLocal() as db:
+        controls = db.query(ControlTest).filter_by(
+            run_id=run_id,
+            standard="critical_infrastructure",
+        ).all()
+        unresolved = [
+            item
+            for item in controls
+            if item.result not in {"confirmed", "not_vulnerable", "not_applicable"}
+        ]
+        assert unresolved
+        final_control = unresolved[-1]
+        for control in unresolved[:-1]:
+            control.status = "completed"
+            control.result = "not_applicable"
+            control.summary = "게이트 통합 테스트에서 적용 대상을 확인한 제외 판정입니다."
+        db.commit()
+        final_control_id = final_control.id
+
+    final_decision = client.post(
+        f"/api/assessment-controls/{final_control_id}/record",
+        json={
+            "outcome": "not_applicable",
+            "reviewer": "gate-reviewer",
+            "summary": "적용 대상 기능이 없음을 진단 기준에 따라 확인했습니다.",
+            "criteria_confirmed": True,
+        },
+    )
+    assert final_decision.status_code == 200, final_decision.text
+    ready = client.get(f"/api/runs/{run_id}").json()
+    assert ready["status"] == "safely_paused"
+    assert ready["options"]["assessment_open_items"] == 0
+    assert ready["options"]["assessment_gate"]["state"] == "passed"
+
+    resumed = client.post(f"/api/runs/{run_id}/resume")
+    assert resumed.status_code == 200, resumed.text
+    completed = _wait_for_run(client, run_id)
+    assert completed["status"] == "completed", completed.get("error")
+    assert completed["progress"] == 100
 
 
 def test_domestic_baseline_cannot_receive_run_evidence_or_decisions(client):

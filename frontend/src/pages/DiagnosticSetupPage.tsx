@@ -203,7 +203,9 @@ export default function DiagnosticSetupPage() {
           background_screen_check: data.get("background_screen_check") === "on",
           interactive_session: data.get("interactive_session") === "on",
           assessment_completion_required:
-            data.get("assessment_completion_required") === "on",
+            project.run_mode === "live" && project.assessment_profile !== "free_assessment"
+              ? true
+              : data.get("assessment_completion_required") === "on",
           reuse_installed_app: reuseInstalledApp,
           network_capture_required: proxyAdapter !== "none",
           pause_for_approval_candidates:
@@ -511,11 +513,21 @@ export default function DiagnosticSetupPage() {
                 <span />
                 <div><strong>수동 진단 Session 열기</strong><small>Frida·프록시를 유지한 안전 일시정지 상태에서 앱을 조작하고 여러 체크포인트를 캡처합니다.</small></div>
               </label>
-              <label className="toggle-line">
-                <input type="checkbox" name="assessment_completion_required" />
-                <span />
-                <div><strong>이번 Run에서 전체 기준 판정 완료 요구</strong><small>켜면 미판정 항목도 실행 Gap으로 계산합니다. 일반 증적 수집 Session에서는 끄고 원장에서 계속 판정합니다.</small></div>
-              </label>
+              {project?.run_mode === "live" && project.assessment_profile !== "free_assessment" ? (
+                <div className="completion-lock" role="status">
+                  <span>필수</span>
+                  <div>
+                    <strong>전체 기준 판정 완료 잠금</strong>
+                    <small>해제할 수 없습니다. 모든 항목이 취약·양호·해당없음 중 하나로 판정되어야 Run과 최종 보고서가 완료됩니다.</small>
+                  </div>
+                </div>
+              ) : (
+                <label className="toggle-line">
+                  <input type="checkbox" name="assessment_completion_required" />
+                  <span />
+                  <div><strong>전체 기준 판정 완료 확인</strong><small>연습 Run에서도 모든 항목 판정을 완료 조건으로 사용할 수 있습니다.</small></div>
+                </label>
+              )}
               <label className="toggle-line">
                 <input type="checkbox" name="pause_for_approval_candidates" />
                 <span />

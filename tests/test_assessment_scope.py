@@ -7,6 +7,8 @@ import zipfile
 
 from backend.app.catalog import STANDARD_CONTROLS
 from backend.app.catalog.guidance import guidance_for, guidance_source
+from backend.app.database.models import ControlTest
+from backend.app.database.session import SessionLocal
 from backend.app.demo import create_demo_apk
 
 import pytest
@@ -254,6 +256,22 @@ def test_custom_controls_and_exclusions_flow_through_baseline_run_and_report(cli
     assert recorded.status_code == 200
     assert recorded.json()["result"] == "confirmed"
     assert recorded.json()["finding_ids"]
+
+    blocked_report = client.post(f"/api/runs/{run['id']}/report/docx")
+    assert blocked_report.status_code == 409
+    assert "미점검·추가 검토" in blocked_report.json()["detail"]
+
+    with SessionLocal() as db:
+        controls = db.query(ControlTest).filter_by(
+            run_id=run["id"],
+            standard="critical_infrastructure",
+        ).all()
+        for control in controls:
+            if control.result not in {"confirmed", "not_vulnerable", "not_applicable"}:
+                control.status = "completed"
+                control.result = "not_applicable"
+                control.summary = "보고서 게이트 테스트를 위한 명시적 적용 제외 판정입니다."
+        db.commit()
 
     report = client.post(f"/api/runs/{run['id']}/report/docx")
     assert report.status_code == 200

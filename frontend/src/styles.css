@@ -4848,6 +4848,114 @@ a:hover {
   font: normal 8px "Cascadia Mono", monospace;
 }
 
+.assessment-gate {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.9fr) minmax(440px, 1.7fr) 170px;
+  align-items: stretch;
+  color: #fff;
+  background: #352b24;
+  border: 2px solid #b65722;
+  box-shadow: 0 8px 24px rgba(53, 43, 36, 0.16);
+}
+
+.assessment-gate--open {
+  background: #173f3e;
+  border-color: #2f8b81;
+}
+
+.assessment-gate__status {
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  padding: 20px 22px;
+  border-right: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.assessment-gate__status > span {
+  color: #ffc29d;
+  font: 800 10px "Malgun Gothic", sans-serif;
+}
+
+.assessment-gate--open .assessment-gate__status > span {
+  color: #9ee5da;
+}
+
+.assessment-gate__status > strong {
+  font: 700 20px/1.25 "Malgun Gothic", sans-serif;
+}
+
+.assessment-gate__status > p {
+  margin: 0;
+  color: #eadbd2;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.assessment-gate--open .assessment-gate__status > p {
+  color: #cbe5e1;
+}
+
+.assessment-gate__steps {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.assessment-gate__steps > li {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  align-content: center;
+  gap: 9px;
+  padding: 14px;
+  border-right: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.assessment-gate__steps > li > span {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: #fff;
+  border: 1px solid #8c7668;
+  border-radius: 50%;
+  font: 700 11px "Cascadia Mono", monospace;
+}
+
+.assessment-gate__steps > li.is-done > span {
+  color: #143f3c;
+  background: #9ee5da;
+  border-color: #9ee5da;
+}
+
+.assessment-gate__steps > li.is-blocked > span {
+  background: #b65722;
+  border-color: #e8915d;
+}
+
+.assessment-gate__steps strong,
+.assessment-gate__steps small {
+  display: block;
+}
+
+.assessment-gate__steps strong {
+  font-size: 11px;
+}
+
+.assessment-gate__steps small {
+  margin-top: 3px;
+  color: #cdbdb3;
+  font-size: 9px;
+}
+
+.assessment-gate > .button {
+  align-self: center;
+  justify-self: center;
+  width: calc(100% - 28px);
+  min-height: 48px;
+}
+
 .coverage-strip {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -6942,7 +7050,98 @@ a:hover {
   color: var(--slate-600);
 }
 
+.assessment-blocker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 20px;
+  color: #fff;
+  background: #352b24;
+  border: 2px solid #b65722;
+}
+
+.assessment-blocker span,
+.assessment-blocker strong {
+  display: block;
+}
+
+.assessment-blocker span {
+  color: #ffc29d;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.assessment-blocker strong {
+  margin-top: 4px;
+  font-size: 18px;
+}
+
+.assessment-blocker p {
+  margin: 5px 0 0;
+  color: #eadbd2;
+  font-size: 12px;
+}
+
+.completion-lock {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  padding: 12px 14px;
+  background: #fff5ee;
+  border: 1px solid #d98a57;
+}
+
+.completion-lock > span {
+  display: grid;
+  place-items: center;
+  min-height: 36px;
+  color: #fff;
+  background: #9f431b;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.completion-lock strong,
+.completion-lock small {
+  display: block;
+}
+
+.completion-lock small {
+  margin-top: 4px;
+  color: #704f3e;
+  line-height: 1.45;
+}
+
 @media (max-width: 760px) {
+  .assessment-gate {
+    grid-template-columns: 1fr;
+  }
+
+  .assessment-gate__status {
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+  }
+
+  .assessment-gate__steps {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .assessment-gate__steps > li:nth-child(2) {
+    border-right: 0;
+  }
+
+  .assessment-gate > .button {
+    margin-block: 12px 16px;
+  }
+
+  .assessment-blocker {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .installed-registry,
   .manual-session__head {
     align-items: stretch;
