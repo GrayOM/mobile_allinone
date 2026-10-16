@@ -5906,6 +5906,16 @@ a:hover {
   line-height: 1.55;
 }
 
+.assessment-evidence-note {
+  margin: 0;
+  padding: 9px 11px;
+  color: var(--slate-600);
+  background: #f2f6f5;
+  border-top: 1px solid var(--line);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
 .assessment-upload {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

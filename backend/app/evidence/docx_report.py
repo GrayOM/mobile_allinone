@@ -15,7 +15,6 @@ from docx.shared import Cm, Pt, RGBColor
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.ai.masking import mask_context
 from backend.app.assessment_scope import custom_row_for, resolve_definition
 from backend.app.catalog import execution_plan
 from backend.app.catalog.korean_standards import is_free_assessment
@@ -41,8 +40,33 @@ TERMINAL_ASSESSMENT_RESULTS = {"confirmed", "not_vulnerable", "not_applicable"}
 EXCLUDED_EVIDENCE_TYPES = {
     "assessment_ledger",
     "assessment_ledger_amendment",
+    "assessment_attestation",
+    "interaction_checkpoint",
     "vulnerability_assessment",
 }
+
+
+def curate_customer_evidence(items: list[Evidence]) -> list[Evidence]:
+    """Keep the analyst's order while removing audit wrappers and duplicate images.
+
+    Raw evidence remains in the Run.  This view is intentionally limited to the
+    sources that prove the vulnerability to a report reader; checkpoint and
+    attestation containers merely repeat their linked screenshot/log children.
+    """
+    selected: list[Evidence] = []
+    seen_ids: set[str] = set()
+    seen_images: set[str] = set()
+    for item in items:
+        if item.id in seen_ids or item.evidence_type in EXCLUDED_EVIDENCE_TYPES:
+            continue
+        seen_ids.add(item.id)
+        if (item.mime_type or "").startswith("image/"):
+            image_key = item.sha256 or str(item.file_path or item.id)
+            if image_key in seen_images:
+                continue
+            seen_images.add(image_key)
+        selected.append(item)
+    return selected
 
 
 class VulnerabilityDocxReportRenderer:
@@ -121,13 +145,18 @@ class VulnerabilityDocxReportRenderer:
                     Evidence.run_id == run.id,
                 )
             ).all()
-            if item.evidence_type not in EXCLUDED_EVIDENCE_TYPES
+        }
+        report_evidence = {
+            control.id: curate_customer_evidence(
+                [evidence[item] for item in control.evidence_ids if item in evidence]
+            )
+            for control in controls
         }
 
         document = Document()
         self._configure(document)
         self._cover(document, project, app, run, profile, len(controls))
-        self._summary(document, controls, findings)
+        self._summary(document, controls, findings, report_evidence)
         document.add_page_break()
         for index, control in enumerate(controls, start=1):
             self._control_section(
@@ -137,7 +166,7 @@ class VulnerabilityDocxReportRenderer:
                 index=index,
                 control=control,
                 findings=[findings[item] for item in control.finding_ids if item in findings],
-                evidence=[evidence[item] for item in control.evidence_ids if item in evidence],
+                evidence=report_evidence[control.id],
             )
             if index != len(controls):
                 document.add_page_break()
@@ -180,14 +209,15 @@ class VulnerabilityDocxReportRenderer:
                     Evidence.run_id == run.id,
                 )
             ).all()
-            if item.evidence_type not in EXCLUDED_EVIDENCE_TYPES
         }
         rows_by_finding = {
-            finding.id: [
-                evidence[item]
-                for item in dict.fromkeys(linked[finding.id])
-                if item in evidence
-            ]
+            finding.id: curate_customer_evidence(
+                [
+                    evidence[item]
+                    for item in dict.fromkeys(linked[finding.id])
+                    if item in evidence
+                ]
+            )
             for finding in findings
         }
         document = Document()
@@ -268,9 +298,15 @@ class VulnerabilityDocxReportRenderer:
         document.add_heading("재현 절차", level=2)
         for step in [item for item in finding.reproduction if item] or ["재현 절차가 기록되지 않았습니다."]:
             document.add_paragraph(step, style="List Number")
-        document.add_heading("취약 증적", level=2)
+        document.add_heading("핵심 재현 증적", level=2)
         if not evidence:
             document.add_paragraph("연결 증적 메타데이터를 찾지 못했습니다.")
+        else:
+            document.add_paragraph(
+                "판정에 사용한 원본 중 고객이 재현 흐름을 확인하는 데 필요한 자료만 "
+                "순서대로 표시합니다. 전체 원본과 해시는 작업대 Run에 보존됩니다.",
+                style="Caption",
+            )
         for position, item in enumerate(evidence, start=1):
             self._evidence(document, position, item)
         if finding.additional_checks:
@@ -339,7 +375,11 @@ class VulnerabilityDocxReportRenderer:
             cells[1].text = value
             cells[0].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             cells[0].paragraphs[0].runs[0].bold = True
-        document.add_paragraph("\n이 문서는 취약 판정이 확정된 항목과 연결 증적만 포함합니다. 양호·해당없음·미확정 항목은 수록하지 않습니다.")
+        document.add_paragraph(
+            "\n이 문서는 취약 판정이 확정된 항목과 고객 확인에 필요한 핵심 재현 증적만 "
+            "포함합니다. 양호·해당없음·미확정 항목은 수록하지 않습니다. 중복 캡처와 "
+            "감사 원장도 제외하며 전체 원본은 Run에 그대로 보존합니다."
+        )
         if run.synthetic:
             warning = document.add_paragraph("SYNTHETIC MOCK — 실제 진단 결과로 사용할 수 없습니다.")
             warning.runs[0].bold = True
@@ -350,6 +390,7 @@ class VulnerabilityDocxReportRenderer:
         document: Document,
         controls: list[ControlTest],
         findings: dict[str, Finding],
+        report_evidence: dict[str, list[Evidence]],
     ) -> None:
         document.add_heading("취약점 요약", level=1)
         table = VulnerabilityDocxReportRenderer._summary_table(
@@ -363,7 +404,7 @@ class VulnerabilityDocxReportRenderer:
             row[0].text = control.mastg_id
             row[1].text = control.title
             row[2].text = (severities[0] if severities else control.risk).upper()
-            row[3].text = f"{len(control.evidence_ids)}건"
+            row[3].text = f"{len(report_evidence.get(control.id, []))}건"
 
     def _control_section(
         self,
@@ -440,9 +481,15 @@ class VulnerabilityDocxReportRenderer:
         for step in reproduction:
             document.add_paragraph(step, style="List Number")
 
-        document.add_heading("취약 증적", level=2)
+        document.add_heading("핵심 재현 증적", level=2)
         if not evidence:
             document.add_paragraph("연결 증적 메타데이터를 찾지 못했습니다.")
+        else:
+            document.add_paragraph(
+                "판정에 사용한 원본 중 고객이 재현 흐름을 확인하는 데 필요한 자료만 "
+                "순서대로 표시합니다. 전체 원본과 해시는 작업대 Run에 보존됩니다.",
+                style="Caption",
+            )
         for position, item in enumerate(evidence, start=1):
             self._evidence(document, position, item)
 
@@ -467,28 +514,61 @@ class VulnerabilityDocxReportRenderer:
             )
 
     def _evidence(self, document: Document, position: int, item: Evidence) -> None:
-        document.add_heading(f"E-{position:02d}  {item.title}", level=3)
-        metadata = document.add_paragraph()
-        metadata.add_run(f"TYPE {item.evidence_type}  ·  ID {item.id}\n").bold = True
-        metadata.add_run(
-            f"CAPTURED {item.captured_at.isoformat()}  ·  SHA-256 {item.sha256 or 'N/A'}"
-        )
+        image = self._safe_image_path(item)
+        label = "화면" if image else "기술 확인"
+        document.add_heading(f"{position}. {label} — {item.title}", level=3)
         if item.description:
             document.add_paragraph(item.description)
-        if item.command:
-            command = document.add_paragraph(item.command)
-            command.runs[0].font.name = "Cascadia Mono"
-            command.runs[0].font.size = Pt(7)
-        if item.inline_data is not None:
-            masked, _ = mask_context({"evidence": item.inline_data})
-            excerpt = masked[:2500] + ("…" if len(masked) > 2500 else "")
-            block = document.add_paragraph(excerpt)
-            block.runs[0].font.name = "Cascadia Mono"
-            block.runs[0].font.size = Pt(7)
-        image = self._safe_image_path(item)
+        for line in self._evidence_facts(item):
+            document.add_paragraph(line, style="List Bullet")
         if image:
             document.add_picture(str(image), width=Cm(15.2))
             document.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        integrity = document.add_paragraph(
+            f"원본 무결성 · {item.captured_at.isoformat()} · SHA-256 {item.sha256 or 'N/A'}",
+            style="Caption",
+        )
+        integrity.runs[0].font.size = Pt(7)
+
+    @staticmethod
+    def _evidence_facts(item: Evidence) -> list[str]:
+        """Extract reader-facing facts without dumping commands or raw JSON."""
+        data = item.inline_data if isinstance(item.inline_data, dict) else {}
+        facts: list[str] = []
+        device = data.get("device") if isinstance(data.get("device"), dict) else None
+        if device:
+            values = [
+                str(device.get("model") or "").strip(),
+                str(device.get("os_version") or "").strip(),
+                "privileged" if device.get("privileged") is True else "",
+                str(device.get("frida_status") or "").strip(),
+            ]
+            summary = " · ".join(value for value in values if value)
+            if summary:
+                facts.append(f"검증 단말: {summary}")
+        for key, label in (
+            ("message", "확인 결과"),
+            ("script_name", "실행 스크립트"),
+            ("category", "검증 범주"),
+            ("risk", "승인 위험도"),
+            ("content_sha256", "스크립트 SHA-256"),
+            ("approved_sha256", "승인 SHA-256"),
+            ("status", "수집 상태"),
+        ):
+            value = data.get(key)
+            if isinstance(value, (str, int, float, bool)) and str(value).strip():
+                facts.append(f"{label}: {value}")
+        operation = data.get("operation")
+        if isinstance(operation, dict):
+            message = operation.get("message")
+            status = operation.get("status")
+            if message:
+                facts.append(f"확인 결과: {message}")
+            elif status:
+                facts.append(f"수집 상태: {status}")
+        # Keep the report compact. Full command output, syslog and JSON remain
+        # available from the Run and are referenced by the integrity line.
+        return list(dict.fromkeys(facts))[:6]
 
     def _safe_image_path(self, item: Evidence) -> Path | None:
         if not item.file_path or not (item.mime_type or "").startswith("image/"):

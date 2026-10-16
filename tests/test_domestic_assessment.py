@@ -438,6 +438,39 @@ def test_confirmed_manual_result_rejects_missing_evidence(client):
     assert recorded["result"] == "needs_review"
     assert recorded["summary"] == review_summary
 
+    second_attachment = client.post(
+        f"/api/assessment-controls/{control_id}/evidence",
+        files={"file": ("focused-proof.txt", io.BytesIO(b"focused proof"), "text/plain")},
+    )
+    assert second_attachment.status_code == 200
+    focused_id = second_attachment.json()["evidence_id"]
+    first_confirmation = client.post(
+        f"/api/assessment-controls/{control_id}/record",
+        json={
+            "outcome": "confirmed",
+            "reviewer": "reviewer",
+            "summary": "두 원본을 검토해 취약 조건을 재현했습니다.",
+            "evidence_ids": [evidence_id, focused_id],
+            "criteria_confirmed": True,
+        },
+    )
+    assert first_confirmation.status_code == 200
+    narrowed = client.post(
+        f"/api/assessment-controls/{control_id}/record",
+        json={
+            "outcome": "confirmed",
+            "reviewer": "reviewer",
+            "summary": "중복 원본을 제외하고 핵심 증적만 다시 선택했습니다.",
+            "evidence_ids": [focused_id],
+            "criteria_confirmed": True,
+        },
+    )
+    assert narrowed.status_code == 200
+    narrowed_ids = narrowed.json()["evidence_ids"]
+    assert focused_id in narrowed_ids
+    assert evidence_id not in narrowed_ids
+    assert len(narrowed_ids) == 2  # 핵심 원본 + 새 판정 확인 원장
+
 
 def test_required_assessment_stays_blocked_until_last_control_is_terminal(client):
     demo = client.post("/api/demo/bootstrap").json()

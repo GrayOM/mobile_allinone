@@ -45,6 +45,14 @@ const ASSESSMENT_RECORDABLE_STATUSES = new Set([
   "manual_required",
 ]);
 
+const CUSTOMER_REPORT_EXCLUDED_EVIDENCE_TYPES = new Set([
+  "assessment_ledger",
+  "assessment_ledger_amendment",
+  "assessment_attestation",
+  "interaction_checkpoint",
+  "vulnerability_assessment",
+]);
+
 export default function CoveragePage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState(
@@ -325,7 +333,8 @@ export default function CoveragePage() {
     setSelectedEvidenceIds(
       test.evidence_ids.filter((id) => {
         const evidence = runEvidence.find((item) => item.id === id);
-        return evidence?.evidence_type !== "assessment_attestation";
+        return evidence
+          && !CUSTOMER_REPORT_EXCLUDED_EVIDENCE_TYPES.has(evidence.evidence_type);
       }),
     );
     setAssessmentFile(null);
@@ -976,7 +985,7 @@ function AssessmentDecisionDesk({
 }) {
   const requiredKinds = new Set(control.evidence_requirements.flat());
   const eligibleEvidence = evidence.filter((item) => {
-    if (item.evidence_type === "assessment_attestation") return false;
+    if (CUSTOMER_REPORT_EXCLUDED_EVIDENCE_TYPES.has(item.evidence_type)) return false;
     if (item.evidence_type === "manual_assessment_attachment") {
       return !Array.isArray(item.inline_data)
         && item.inline_data?.control_test_id === control.id;
@@ -995,7 +1004,7 @@ function AssessmentDecisionDesk({
   const requirementsSatisfied = requirementStatus.every((item) => item.satisfied);
   const manualAttachmentAccepted = requiredKinds.has("manual_assessment_attachment");
   const canRecord = reviewer.trim().length > 0
-    && summary.trim().length > 0
+    && summary.trim().length >= 10
     && (outcome !== "confirmed" || (criteriaConfirmed && requirementsSatisfied));
 
   function toggleEvidence(id: string) {
@@ -1053,8 +1062,8 @@ function AssessmentDecisionDesk({
               <>
                 <div className="assessment-evidence-list">
                   <div className="assessment-evidence-list__head">
-                    <span>같은 Run의 연결 가능한 원본</span>
-                    <strong>{selectedEvidenceIds.length} selected</strong>
+                    <span>고객 보고서에 넣을 핵심 원본 · 표시 순서대로 수록</span>
+                    <strong>{selectedEvidenceIds.length}개 선택</strong>
                   </div>
                   {eligibleEvidence.length ? eligibleEvidence.map((item) => (
                     <label className="assessment-evidence-row" key={item.id}>
@@ -1069,6 +1078,9 @@ function AssessmentDecisionDesk({
                   )) : (
                     <p className="assessment-evidence-empty">필수 유형과 일치하는 원본 증적이 없습니다. 자동 수집을 실행하거나 허용된 수동 증적을 첨부하세요.</p>
                   )}
+                  <p className="assessment-evidence-note">
+                    선택하지 않은 원본도 Run에서 삭제되지 않습니다. 중복 캡처·체크포인트 묶음·감사 원장은 고객 DOCX에서 제외됩니다.
+                  </p>
                 </div>
 
                 {manualAttachmentAccepted && (

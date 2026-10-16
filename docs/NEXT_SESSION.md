@@ -55,11 +55,13 @@ curl -s http://127.0.0.1:8798/api/devices   # Cyberone, privileged=True, frida a
 
 ## 1. 현재 검증된 상태
 
+- 고객 DOCX는 Run 원본 전체를 나열하지 않는다. 검토자가 선택한 증적에서 중복 이미지·체크포인트/판정 컨테이너를 제거하고, 화면은 재현 순서대로 보여 주며 기술 원본은 명령·JSON·syslog 덤프 대신 확인 사실과 SHA-256만 표시한다. 판정을 다시 저장하면 현재 선택으로 교체되며 선택 해제한 원본도 Run에서는 삭제되지 않는다.
+- iPhone 홈 화면에 지속된 초록색 가로 띠는 iOS 손쉬운 사용 `스위치 제어`의 글라이딩 커서다. 작업대가 만든 화면이 아니며 저장소에도 활성화 코드가 없다. iPhone 8 홈 버튼을 빠르게 세 번 누르거나 `설정 → 손쉬운 사용 → 스위치 제어`에서 끈다.
 - Live 국내 기준 Run에는 해제 불가능한 전수 판정 게이트가 적용된다. 자동 수집 후 미점검·추가 검토가 남으면 `assessment_completion`에서 안전 일시정지되며 재개 API도 409로 차단한다. 취약·양호·해당없음 모두 기준 수행 확인과 구체적 사유가 필요하고, 모든 항목이 종결 판정이며 Run의 다른 필수 Gap도 없을 때만 `completed` 및 최종 DOCX가 열린다. 원장 화면 상단에서 남은 항목과 잠금 단계를 먼저 보여준다. 확정 취약점 원장 증적은 전수 판정 완료 시 한 번만 생성한다.
 - 가장 최신 Run `a5f47c17-8582-4d0e-8da0-5c7b99422458`은 Cyberone OJT 전체 승인 범위로 시작한 대화형 Live Run이며 `security_bypass_preparation`에서 `safely_paused`(22%)다. v2 우회 Spawn과 체크포인트 2건은 성공했다. 합성 등록 스크립트 2개는 입력 필드/접근성 대상이 0개라 fail-closed로 끝나 데이터 변경이 없었다. 마지막 읽기 전용 런타임 표면 관찰은 완료됐지만 약 95KB 메시지가 제한에 걸려 일부만 보존됐다. 기존 1회 승인은 모두 소비됐고 승인 범위도 다음 세션에는 만료된 것으로 간주해 다시 검증한다. 서버가 재시작되면 DB의 안전 일시정지 상태와 달리 메모리 Frida 세션은 복구되지 않으므로 무조건 현재 세션 상태부터 조회한다.
 - Cyberone OJT 최신 Live Run `5fbbcea1-672a-4bd5-95c8-5accccea03bc`: v2 우회 재승인 후 실단말 증적을 수집하고 `completed_with_gaps`로 종료했다. `EFI-MA-07`과 `EFI-MA-11` 2건 확정, `EFI-MA-33` 양호, `EFI-MA-54` 해당없음, `EFI-MA-21` needs_review, 그 외 needs_review 8·not_tested 43이다. 보고서는 `data/reports/5fbbcea1-672a-4bd5-95c8-5accccea03bc-electronic_financial-vulnerabilities.docx`. 앱 종료로 마지막 프로세스·Frida 확인만 Gap이며 메시지 유실은 0이다.
 - Cyberone IPA 재분석 `cd6bfa96-c3ca-4391-b7f8-07bd686f6a21`: SQLite.swift local-storage 신호, `users(name, ssn, pin, bio, breg)` 구조, 벤더 미식별 자체 보호 로직을 확인했다. DB는 현재 0행이라 민감정보 평문 저장을 확정하지 않는다.
-- 수동 원장 판정의 `needs_review`가 자동 재평가에서 `not_tested`로 되돌아가던 결함을 수정했다. 최신 수동 검토 이력을 Run options에 먼저 기록하고 원장 평가가 이를 보존한다. 최신 전체 검증은 backend 192 passed·1 skipped, frontend build·audit(취약점 0) 통과.
+- 수동 원장 판정의 `needs_review`가 자동 재평가에서 `not_tested`로 되돌아가던 결함을 수정했다. 최신 수동 검토 이력을 Run options에 먼저 기록하고 원장 평가가 이를 보존한다. 최신 검증은 표적 14 tests와 frontend build·audit(취약점 0) 통과. 전체는 193 passed·1 skipped였고 기존 WebSocket 종료 타이밍 테스트가 1회 간헐 실패했으나 단독 재실행은 통과했다.
 - Cyberone OJT Run `ffb8c67d-8518-4f1c-b56f-6ebfd2a7c89a`: 승인된 v2 우회 후 앱이 등록 화면까지 유지되어 `EFI-MA-07`이 실제 취약으로 확정됐다. 앱 한정 백업에서 `Documents/db.sqlite3`가 암호화되지 않은 SQLite이고 `users(name, ssn, pin, bio, breg)` 스키마임을 확인했지만 현재 0행이라 `EFI-MA-21`은 미확정이다. 백업 과정에서 iOS가 앱을 종료했으므로 Run은 `manual_interaction` 안전 일시정지, Frida는 `process-terminated`; 같은 스크립트 재실행에도 새 1회 승인이 필요하다.
 - iPhone에서 기존 Live Run(`completed_with_gaps`)과 새 대화형 단말 전용 Run(`completed`)을 모두 검증했다. `proxy_adapter=none`은 네트워크를 명시적으로 범위 제외하고, `interactive_session`은 안전 일시정지 중 화면·프로세스·syslog·Frida 상태 체크포인트를 반복 수집한다. 증적 Session 완료와 국내 기준 판정 완료는 별도 상태다.
 - 오픈소스 DVIA-v2: 정적 분석 + 실단말 동적 Run 완료(Run `381ef237`, 2026-10-15).

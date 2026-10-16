@@ -5439,8 +5439,11 @@ def record_assessment_result(
     _assert_assessment_recording_state(run)
     _assert_control_in_scope(control)
     app = _app_or_404(db, control.app_id)
+    # The reviewer selection is authoritative. Re-recording a finding must be
+    # able to remove noisy or duplicate sources from the customer evidence
+    # story while the underlying Run evidence remains immutable.
     requested_ids = (
-        list(dict.fromkeys([*control.evidence_ids, *payload.evidence_ids]))
+        list(dict.fromkeys(payload.evidence_ids))
         if payload.outcome == "confirmed"
         else []
     )
