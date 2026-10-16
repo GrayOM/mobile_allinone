@@ -18,6 +18,7 @@ import {
 } from "../components/UI";
 
 const PROFILE_LABELS: Record<Project["assessment_profile"], string> = {
+  domestic_all: "국내 기준 통합 진단",
   critical_infrastructure: "주요정보통신기반시설",
   electronic_financial: "전자금융기반시설",
   free_assessment: "전체 진단 (ALL)",
@@ -288,16 +289,20 @@ export default function ProjectsPage() {
             <fieldset className="assessment-profile-picker field--wide">
               <legend>국내 취약점 진단 기준</legend>
               <label>
-                <input type="radio" name="assessment_profile" value="critical_infrastructure" defaultChecked />
-                <span><strong>1 · 주요정보통신기반시설</strong><small>모바일·웹/API 공통 27개 항목</small></span>
+                <input type="radio" name="assessment_profile" value="domestic_all" defaultChecked />
+                <span><strong>1 · 국내 기준 통합 진단</strong><small>권장 · CII 27개 + EFI 56개, 총 83개 전수 판정</small></span>
+              </label>
+              <label>
+                <input type="radio" name="assessment_profile" value="critical_infrastructure" />
+                <span><strong>2 · 주요정보통신기반시설</strong><small>모바일·웹/API 공통 27개 항목만</small></span>
               </label>
               <label>
                 <input type="radio" name="assessment_profile" value="electronic_financial" />
-                <span><strong>2 · 전자금융기반시설</strong><small>거래·인증·모바일·TLS 56개 항목</small></span>
+                <span><strong>3 · 전자금융기반시설</strong><small>거래·인증·모바일·TLS 56개 항목만</small></span>
               </label>
               <label>
                 <input type="radio" name="assessment_profile" value="free_assessment" />
-                <span><strong>3 · 전체 진단 (ALL)</strong><small>고정 항목 없음 · 발견항목을 증적으로 확정해 보고</small></span>
+                <span><strong>4 · 자유 진단 (ALL)</strong><small>고정 항목 없음 · 발견항목을 증적으로 확정해 보고</small></span>
               </label>
               <p>앱 등록 후에는 기준을 변경할 수 없습니다. Run은 선택한 항목만 판정 원장에 생성합니다.</p>
             </fieldset>
@@ -340,7 +345,7 @@ export default function ProjectsPage() {
             >
               <strong>{item.name}</strong>
               <small>{formatDate(item.updated_at)}</small>
-              <span>{item.run_mode.toUpperCase()} · {item.assessment_profile === "electronic_financial" ? "EFI" : item.assessment_profile === "free_assessment" ? "ALL" : "CII"}</span>
+              <span>{item.run_mode.toUpperCase()} · {item.assessment_profile === "domestic_all" ? "CII+EFI" : item.assessment_profile === "electronic_financial" ? "EFI" : item.assessment_profile === "free_assessment" ? "ALL" : "CII"}</span>
             </button>
           )) : (
             <EmptyState title="프로젝트가 없습니다" description="첫 진단 범위를 만들어 시작하세요." />

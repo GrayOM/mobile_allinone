@@ -38,7 +38,7 @@ class Project(Base, TimestampMixin):
     mock_mode: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     run_mode: Mapped[str] = mapped_column(String(16), default="live", nullable=False)
     assessment_profile: Mapped[str] = mapped_column(
-        String(40), default="critical_infrastructure", nullable=False
+        String(40), default="domestic_all", nullable=False
     )
     retention_days: Mapped[int] = mapped_column(
         Integer, default=90, nullable=False

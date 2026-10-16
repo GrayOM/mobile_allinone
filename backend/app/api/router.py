@@ -1445,6 +1445,7 @@ async def bootstrap_demo(request: Request, db: Session = Depends(get_db)):
         external_ai_allowed=False,
         mock_mode=True,
         run_mode=RunMode.MOCK.value,
+        assessment_profile="critical_infrastructure",
     )
     db.add(project)
     db.commit()
@@ -5007,7 +5008,13 @@ def assessment_profiles():
 def assessment_execution_matrix(profile: str | None = None):
     if profile is not None and profile not in PROFILE_SOURCES:
         raise HTTPException(422, "지원하지 않는 국내 진단 기준입니다.")
-    selected = [profile] if profile else list(PROFILE_SOURCES)
+    # The combined profile is an execution view over the two source catalogs.
+    # Do not double-count its 83 rows in the unfiltered catalog totals.
+    selected = (
+        [profile]
+        if profile
+        else ["critical_infrastructure", "electronic_financial", "free_assessment"]
+    )
     profiles = {
         item: {
             "source": PROFILE_SOURCES[item],

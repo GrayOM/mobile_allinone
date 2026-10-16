@@ -20,6 +20,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from backend.app.catalog.korean_standards import (
+    CRITICAL_INFRASTRUCTURE,
+    DOMESTIC_ALL,
+    ELECTRONIC_FINANCIAL,
+)
+
 GUIDANCE_PATH = Path(
     os.getenv("MSW_KOREAN_GUIDANCE_PATH")
     or Path(__file__).resolve().parent / "data" / "korean_standard_guidance.json"
@@ -72,12 +78,19 @@ def _index() -> dict[tuple[str, str], dict[str, Any]]:
 
 def guidance_for(profile: str, control_id: str) -> dict[str, Any] | None:
     """Return the document guidance for one control or ``None``."""
-    item = _index().get((profile, control_id))
+    source_profile = profile
+    if profile == DOMESTIC_ALL:
+        if control_id.startswith("CII-MA-"):
+            source_profile = CRITICAL_INFRASTRUCTURE
+        elif control_id.startswith("EFI-MA-"):
+            source_profile = ELECTRONIC_FINANCIAL
+    item = _index().get((source_profile, control_id))
     if item is None:
         return None
     examples = item.get("remediation_examples")
     return {
         "profile": profile,
+        "source_profile": source_profile,
         "control_id": control_id,
         "title": item.get("title", ""),
         "description": list(item.get("description") or []),
@@ -108,6 +121,12 @@ def guidance_summary(profile: str, control_id: str) -> dict[str, Any] | None:
 
 
 def guidance_titles(profile: str) -> list[tuple[str, str]]:
+    if profile == DOMESTIC_ALL:
+        return [
+            (control_id, str(item.get("title") or ""))
+            for (item_profile, control_id), item in sorted(_index().items())
+            if item_profile in {CRITICAL_INFRASTRUCTURE, ELECTRONIC_FINANCIAL}
+        ]
     return [
         (control_id, str(item.get("title") or ""))
         for (item_profile, control_id), item in sorted(_index().items())

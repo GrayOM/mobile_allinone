@@ -6,11 +6,23 @@ from typing import Any, Iterable
 
 CRITICAL_INFRASTRUCTURE = "critical_infrastructure"
 ELECTRONIC_FINANCIAL = "electronic_financial"
+DOMESTIC_ALL = "domestic_all"
 FREE_ASSESSMENT = "free_assessment"
-DEFAULT_ASSESSMENT_PROFILE = CRITICAL_INFRASTRUCTURE
+DEFAULT_ASSESSMENT_PROFILE = DOMESTIC_ALL
 
 
 PROFILE_SOURCES: dict[str, dict[str, Any]] = {
+    DOMESTIC_ALL: {
+        "id": DOMESTIC_ALL,
+        "name": "국내 기준 통합 진단",
+        "document": "주요정보통신기반시설 27개 + 전자금융기반시설 56개",
+        "reviewed_at": "2026-10-16",
+        "item_count": 83,
+        "note": (
+            "테스트 앱 전체 진단용 프로필입니다. 두 국내 권고안의 항목을 생략 없이 "
+            "하나의 Run 원장에 생성하며 각 항목의 원래 CII-MA/EFI-MA ID를 유지합니다."
+        ),
+    },
     CRITICAL_INFRASTRUCTURE: {
         "id": CRITICAL_INFRASTRUCTURE,
         "name": "주요정보통신기반시설",
@@ -248,6 +260,8 @@ STANDARD_CONTROLS: tuple[StandardControlDefinition, ...] = (
 
 
 def controls_for_profile(profile: str) -> tuple[StandardControlDefinition, ...]:
+    if profile == DOMESTIC_ALL:
+        return STANDARD_CONTROLS
     if profile == CRITICAL_INFRASTRUCTURE:
         return CRITICAL_INFRASTRUCTURE_CONTROLS
     if profile == ELECTRONIC_FINANCIAL:

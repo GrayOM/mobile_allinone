@@ -6,7 +6,9 @@ import zipfile
 
 from backend.app.catalog.korean_standards import (
     CRITICAL_INFRASTRUCTURE_CONTROLS,
+    DOMESTIC_ALL,
     ELECTRONIC_FINANCIAL_CONTROLS,
+    controls_for_profile,
 )
 from backend.app.demo import create_demo_apk
 from backend.app.database.models import AIInvocation, ControlTest, DiagnosticRun
@@ -59,6 +61,8 @@ def test_domestic_catalogs_preserve_document_item_counts_and_ids():
     assert len(ids) == 83
     assert all(item.criteria for item in ELECTRONIC_FINANCIAL_CONTROLS)
     assert all(item.evidence_requirements for item in CRITICAL_INFRASTRUCTURE_CONTROLS)
+    assert len(controls_for_profile(DOMESTIC_ALL)) == 83
+    assert {item.control_id for item in controls_for_profile(DOMESTIC_ALL)} == ids
 
 
 def test_execution_matrix_separates_ready_and_device_deferred_controls(client):
@@ -133,7 +137,7 @@ def test_app_assessment_plan_is_generated_and_never_auto_confirms(client):
 def test_project_profile_seeds_only_selected_domestic_baseline(client, tmp_path):
     profiles = client.get("/api/assessment/profiles")
     assert profiles.status_code == 200
-    assert {item["item_count"] for item in profiles.json()} == {0, 27, 56}
+    assert {item["item_count"] for item in profiles.json()} == {0, 27, 56, 83}
 
     project = client.post(
         "/api/projects",
@@ -177,6 +181,58 @@ def test_project_profile_seeds_only_selected_domestic_baseline(client, tmp_path)
         json={"assessment_profile": "critical_infrastructure"},
     )
     assert immutable.status_code == 409
+
+
+def test_combined_domestic_profile_seeds_all_83_controls(client, tmp_path):
+    project = client.post(
+        "/api/projects",
+        json={
+            "name": "국내 기준 83개 전수 진단",
+            "run_mode": "mock",
+            "ai_enabled": False,
+        },
+    )
+    assert project.status_code == 201
+    assert project.json()["assessment_profile"] == "domestic_all"
+    apk = create_demo_apk(tmp_path / "domestic-all.apk")
+    with apk.open("rb") as stream:
+        uploaded = client.post(
+            f"/api/projects/{project.json()['id']}/apps/upload",
+            files={"file": (apk.name, stream, "application/vnd.android.package-archive")},
+        )
+    assert uploaded.status_code == 201
+    app = uploaded.json()
+    assert app["analysis_result"]["assessment_plan"]["assessment_profile"] == "domestic_all"
+    assert app["analysis_result"]["assessment_plan"]["total"] == 83
+
+    baseline = client.get(
+        f"/api/coverage?app_id={app['id']}&standard=domestic_all"
+    ).json()
+    assert baseline["total_catalog"] == 83
+    assert len(baseline["tests"]) == 83
+    ids = {item["control_id"] for item in baseline["tests"]}
+    assert "CII-MA-01" in ids and "CII-MA-27" in ids
+    assert "EFI-MA-01" in ids and "EFI-MA-56" in ids
+    assert {item["standard"] for item in baseline["tests"]} == {"domestic_all"}
+
+    started = client.post(
+        "/api/runs",
+        json={
+            "project_id": project.json()["id"],
+            "app_id": app["id"],
+            "device_id": "mock-android-01",
+            "device_adapter": "mock",
+            "proxy_adapter": "mock",
+        },
+    )
+    assert started.status_code == 201
+    run = _wait_for_run(client, started.json()["id"])
+    assert run["options"]["assessment_profile"] == "domestic_all"
+    assert run["options"]["assessment_summary"]["total"] == 83
+    ledger = client.get(
+        f"/api/coverage?run_id={run['id']}&scope=run&standard=domestic_all"
+    ).json()
+    assert len(ledger["tests"]) == 83
 
 
 def test_run_generates_evidence_bound_ledger_and_manual_confirmation(client, tmp_path):

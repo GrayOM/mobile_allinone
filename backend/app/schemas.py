@@ -21,7 +21,7 @@ class ProjectCreate(BaseModel):
     external_ai_allowed: bool = False
     external_analyzer_allowed: bool = False
     run_mode: RunMode = RunMode.LIVE
-    assessment_profile: AssessmentProfile = AssessmentProfile.CRITICAL_INFRASTRUCTURE
+    assessment_profile: AssessmentProfile = AssessmentProfile.DOMESTIC_ALL
     retention_days: int = Field(default=90, ge=1, le=3650)
     raw_access_enabled: bool = False
     mock_mode: bool | None = None

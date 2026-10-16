@@ -225,7 +225,7 @@ POST /frida/scripts/generate {project_id, run_id?, app_id?, purpose, platform, �
 ## Runtime tools / findings / ledger
 GET  /runtime/adapters · POST /runtime/execute {adapter, project_id, run_id, action, arguments, approval_token?}
 GET  /findings?project_id|run_id · GET /findings/{id} · GET /findings/{id}/sources · GET /findings/{id}/report
-GET  /coverage?run_id=…&scope=run&standard=critical_infrastructure|electronic_financial|owasp_mastg
+GET  /coverage?run_id=…&scope=run&standard=domestic_all|critical_infrastructure|electronic_financial|free_assessment|owasp_mastg
 POST /assessment-controls/{control_test_id}/record {outcome, reviewer, summary, evidence_ids[], criteria_confirmed}
 POST /assessment-controls/{control_test_id}/evidence (multipart png/jpg/txt/log/json/xml/har)
 GET  /assessment/profiles · GET /assessment/execution-matrix?profile= · GET /assessment/guidance/{profile}/{control_id}

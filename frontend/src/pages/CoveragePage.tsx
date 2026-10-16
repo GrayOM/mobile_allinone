@@ -19,6 +19,7 @@ import type {
 import { EmptyState, SectionHeading, StatusChip } from "../components/UI";
 
 const PROFILE_LABELS: Record<string, string> = {
+  domestic_all: "국내 기준 통합 진단",
   critical_infrastructure: "주요정보통신기반시설",
   electronic_financial: "전자금융기반시설",
   free_assessment: "전체 진단 (ALL)",
@@ -428,7 +429,7 @@ export default function CoveragePage() {
         >
           <span>01 / 판정 기준</span>
           <strong>{PROFILE_LABELS[project?.assessment_profile ?? "critical_infrastructure"]}</strong>
-          <small>{project?.assessment_profile === "electronic_financial" ? "56개 전자금융 점검 항목" : project?.assessment_profile === "free_assessment" ? "고정 항목 없음 · 확정 발견항목만 보고" : "27개 주요정보통신 점검 항목"}</small>
+          <small>{project?.assessment_profile === "domestic_all" ? "CII 27개 + EFI 56개 · 총 83개 전수 판정" : project?.assessment_profile === "electronic_financial" ? "56개 전자금융 점검 항목" : project?.assessment_profile === "free_assessment" ? "고정 항목 없음 · 확정 발견항목만 보고" : "27개 주요정보통신 점검 항목"}</small>
         </button>
         <button
           className={ledger === "mastg" ? "standard-switch__item standard-switch__item--active" : "standard-switch__item"}

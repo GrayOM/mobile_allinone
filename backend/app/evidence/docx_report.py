@@ -32,6 +32,7 @@ from backend.app.database.models import (
 
 
 PROFILE_NAMES = {
+    "domestic_all": "국내 기준 통합 진단 (CII 27 + EFI 56)",
     "critical_infrastructure": "주요정보통신기반시설",
     "electronic_financial": "전자금융기반시설",
     "free_assessment": "전체 진단 (ALL)",

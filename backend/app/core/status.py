@@ -42,6 +42,7 @@ class RunMode(StringEnum):
 
 
 class AssessmentProfile(StringEnum):
+    DOMESTIC_ALL = "domestic_all"
     CRITICAL_INFRASTRUCTURE = "critical_infrastructure"
     ELECTRONIC_FINANCIAL = "electronic_financial"
     # "ALL": no fixed catalog; the ledger is built from confirmed findings.
