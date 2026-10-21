@@ -4345,6 +4345,21 @@ async def execute_frida_script(
             )
             lifecycle_evidence_ids.append(evidence.id)
 
+        if session_was_active and not session_manager.is_healthy(run.id):
+            stale_session = await session_manager.stop(run.id)
+            session_was_active = False
+            if stale_session is not None:
+                stale_evidence = evidence_service.add(
+                    db,
+                    run_id=run.id,
+                    evidence_type="command_log",
+                    title="직접 Frida 실행 전 비정상 세션 정리",
+                    description=stale_session.message,
+                    command=stale_session.command,
+                    inline_data=stale_session.to_dict(),
+                )
+                lifecycle_evidence_ids.append(stale_evidence.id)
+
         if not session_was_active:
             if payload.mode == "spawn":
                 stopped = await device_adapter.stop_app(run.device_id, target)

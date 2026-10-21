@@ -1948,7 +1948,24 @@ class DiagnosticOrchestrator:
                         else "원본 상태에서 앱을 실행합니다."
                     ),
                 )
-                launch = await device.start_app(run.device_id, package_name)
+                launch = None
+                if bypass_session_active:
+                    # A manually approved Frida spawn already launched and
+                    # resumed the target.  Launching it again here can replace
+                    # or terminate the instrumented iOS process, detaching the
+                    # very session whose state this stage is meant to verify.
+                    # Adopt the verified process and only fall back to a normal
+                    # launch when the spawn did not leave the app running.
+                    launch = await device.process_info(run.device_id, package_name)
+                    if self._process_running(launch, package_name):
+                        launch.message = (
+                            "승인된 Frida Spawn 대상 프로세스가 이미 실행 중이어서 "
+                            "중복 실행하지 않고 기존 프로세스를 사용합니다."
+                        )
+                    else:
+                        launch = None
+                if launch is None:
+                    launch = await device.start_app(run.device_id, package_name)
                 await self._record_operation(
                     db,
                     run.id,

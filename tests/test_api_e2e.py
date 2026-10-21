@@ -11,6 +11,7 @@ from backend.app.api.router import _normalize_control_validation_options
 from backend.app.core.status import RunMode
 from backend.app.database.models import AIInvocation
 from backend.app.database.session import SessionLocal
+from backend.app.devices.mock import MockDeviceAdapter
 
 
 def _wait_for_run(client, run_id: str, timeout: float = 30):
@@ -299,7 +300,24 @@ def test_custom_frida_script_requires_approval(client):
     assert refreshed["success_count"] == script["success_count"]
 
 
-def test_high_risk_root_bypass_requires_prelaunch_pause_and_one_time_approval(client):
+def test_high_risk_root_bypass_requires_prelaunch_pause_and_one_time_approval(
+    client, monkeypatch
+):
+    class LaunchCountingDevice(MockDeviceAdapter):
+        def __init__(self):
+            super().__init__()
+            self.start_calls = 0
+
+        async def start_app(self, device_id: str, package_name: str):
+            self.start_calls += 1
+            return await super().start_app(device_id, package_name)
+
+    device = LaunchCountingDevice()
+    monkeypatch.setattr(
+        client.app.state.orchestrator,
+        "_device",
+        lambda _adapter: device,
+    )
     demo = client.post("/api/demo/bootstrap").json()
     script = next(
         item
@@ -426,6 +444,7 @@ def test_high_risk_root_bypass_requires_prelaunch_pause_and_one_time_approval(cl
     assert resumed.status_code == 200
     completed = _wait_for_run(client, run_id)
     assert completed["status"] == "completed", completed.get("error")
+    assert device.start_calls == 0
     assert completed["options"]["manual_frida_scripts"][0]["risk"] == "high"
     evidence = client.get(f"/api/runs/{run_id}/evidence").json()
     bypass = next(

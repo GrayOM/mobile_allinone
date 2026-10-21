@@ -479,13 +479,18 @@ class FridaSessionManager:
         for script_id, prepared in prepared_sources.items():
             active.runtime_wrappers[script_id] = prepared.to_dict()
 
+        connect_phase = "resolve_device"
+
         def connect() -> None:
+            nonlocal connect_phase
             if resolved_target.transport == "remote":
+                connect_phase = "add_remote_device"
                 active.device_manager = frida_module.get_device_manager()
                 active.device = active.device_manager.add_remote_device(
                     str(resolved_target.endpoint)
                 )
             else:
+                connect_phase = "get_device"
                 active.device = frida_module.get_device(
                     str(resolved_target.device_id), timeout=5
                 )
@@ -495,7 +500,9 @@ class FridaSessionManager:
                 "type": str(getattr(active.device, "type", "")) or None,
             }
             if mode == "spawn":
+                connect_phase = "spawn"
                 active.spawned_pid = active.device.spawn([target])
+                connect_phase = "attach_spawned_process"
                 active.session = active.device.attach(active.spawned_pid)
             else:
                 # Frida attaches by process name or pid; iOS targets are bundle
@@ -513,6 +520,7 @@ class FridaSessionManager:
                                 break
                     except Exception:  # pragma: no cover - device enumeration is best effort
                         attach_target = target
+                connect_phase = "attach_running_process"
                 active.session = active.device.attach(attach_target)
             if hasattr(active.session, "on"):
                 def detached(reason, crash=None) -> None:
@@ -534,6 +542,7 @@ class FridaSessionManager:
                 active.session.on("detached", detached)
             try:
                 for script in scripts:
+                    connect_phase = f"create_script:{script.script_id}"
                     loaded = active.session.create_script(
                         prepared_sources[script.script_id].source, name=script.name
                     )
@@ -543,10 +552,13 @@ class FridaSessionManager:
                             active, script_id, script_name, message, data
                         ),
                     )
+                    connect_phase = f"load_script:{script.script_id}"
                     loaded.load()
                     active.scripts[script.script_id] = loaded
                 if active.spawned_pid is not None:
+                    connect_phase = "resume_spawned_process"
                     active.device.resume(active.spawned_pid)
+                connect_phase = "ready"
             except Exception:
                 if active.spawned_pid is not None:
                     try:
@@ -561,7 +573,10 @@ class FridaSessionManager:
             stopped = await self.stop(run_id)
             return FridaSessionResult(
                 CapabilityStatus.FAILED,
-                f"Frida 세션 연결 실패: {type(exc).__name__}: {exc}",
+                (
+                    "Frida 세션 연결 실패"
+                    f"(stage={connect_phase}): {type(exc).__name__}: {exc}"
+                ),
                 mode,
                 target,
                 transport=resolved_target.transport,

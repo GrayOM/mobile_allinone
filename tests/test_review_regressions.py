@@ -283,6 +283,77 @@ async def test_frida_session_loads_multiple_scripts_once_and_detaches_at_run_end
 
 
 @pytest.mark.asyncio
+async def test_frida_session_failure_reports_exact_connection_phase(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    class FakeScript:
+        def on(self, _event, _handler):
+            return None
+
+        def load(self):
+            raise RuntimeError("load failed")
+
+        def unload(self):
+            return None
+
+    class FakeSession:
+        def on(self, _event, _handler):
+            return None
+
+        def create_script(self, _content, *, name):
+            assert name == "phase-test"
+            return FakeScript()
+
+        def detach(self):
+            return None
+
+    class FakeDevice:
+        def spawn(self, targets):
+            assert targets == ["com.example.app"]
+            return 4242
+
+        def attach(self, pid):
+            assert pid == 4242
+            return FakeSession()
+
+        def resume(self, pid):
+            assert pid == 4242
+
+    class FakeFrida:
+        @staticmethod
+        def get_device(device_id, timeout):
+            assert (device_id, timeout) == ("device-1", 5)
+            return FakeDevice()
+
+    manager = FridaSessionManager(AppSettings(data_dir=tmp_path))
+
+    async def syntax_ok(_content):
+        return CapabilityStatus.AVAILABLE, "ok"
+
+    monkeypatch.setattr(manager.syntax, "check_syntax", syntax_ok)
+    monkeypatch.setattr(
+        "backend.app.frida.session.importlib.import_module",
+        lambda name: FakeFrida if name == "frida" else None,
+    )
+
+    result = await manager.start(
+        run_id="run-phase",
+        device_id="device-1",
+        target="com.example.app",
+        mode="spawn",
+        scripts=[
+            FridaSessionScript("script-1", "phase-test", "send('ok')")
+        ],
+    )
+
+    assert result.status == CapabilityStatus.FAILED
+    assert "stage=load_script:script-1" in result.message
+    assert "RuntimeError: load failed" in result.message
+    assert not manager.is_active("run-phase")
+
+
+@pytest.mark.asyncio
 async def test_frida_messages_use_bounded_ring_binary_serialization_and_transcript_limits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
